@@ -1,0 +1,69 @@
+"""Test gated Docker network and container creation commands."""
+import importlib.util
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+PROJECT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("instance_docker", PROJECT / "remote-scripts/actions/instance-docker.py")
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+HOST = "11111111-1111-4111-8111-111111111111"
+INSTANCE = "22222222-2222-4222-8222-222222222222"
+PROJECT_NAME = "fh_22222222222242228222222222222222"
+
+
+class DockerTests(unittest.TestCase):
+    def test_existing_network_requires_matching_labels(self):
+        labels = '{"com.hungerdesolate.schemaVersion":"1","com.hungerdesolate.hostId":"' + HOST + '","com.hungerdesolate.instanceId":"' + INSTANCE + '","com.hungerdesolate.role":"network"}'
+        with patch.object(MODULE, "run", return_value=type("Result", (), {"returncode": 0, "stdout": labels})()):
+            self.assertEqual(MODULE.ensure_network(PROJECT_NAME, HOST, INSTANCE), PROJECT_NAME + "_instance")
+        wrong = labels.replace(INSTANCE, "33333333-3333-4333-8333-333333333333")
+        with patch.object(MODULE, "run", return_value=type("Result", (), {"returncode": 0, "stdout": wrong})()):
+            with self.assertRaises(MODULE.DockerRejected) as failure:
+                MODULE.ensure_network(PROJECT_NAME, HOST, INSTANCE)
+        self.assertEqual(str(failure.exception), "CREATE_NETWORK_CONFLICT")
+
+    def test_missing_network_is_created_with_identity_labels(self):
+        calls = []
+        def command(args, **_kwargs):
+            calls.append(args)
+            if args[:3] == ["docker", "network", "inspect"]:
+                return type("Result", (), {"returncode": 1, "stdout": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": "network-id"})()
+        with patch.object(MODULE, "run", side_effect=command):
+            self.assertEqual(MODULE.ensure_network(PROJECT_NAME, HOST, INSTANCE), PROJECT_NAME + "_instance")
+        create = calls[-1]
+        self.assertEqual(create[:4], ["docker", "network", "create", "--driver"])
+        self.assertIn("com.hungerdesolate.instanceId=" + INSTANCE, create)
+
+    def test_container_create_is_no_start_and_rejects_external_paths(self):
+        calls = []
+        def command(args, **_kwargs):
+            calls.append(args)
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
+        with patch.object(MODULE, "run", side_effect=command):
+            result = MODULE.create_containers("/var/lib/famine-hub/instances/x/staging/t/compose.yaml", PROJECT_NAME)
+        self.assertEqual(result, {"project": PROJECT_NAME, "created": True, "started": False})
+        self.assertEqual(calls[0][-2:], ["create", "--no-start"])
+        with self.assertRaises(MODULE.DockerRejected):
+            MODULE.create_containers("/tmp/compose.yaml", PROJECT_NAME)
+
+    def test_verification_requires_identity_labels_and_expected_container_roles(self):
+        ids = "a" * 64 + "\n" + "b" * 64 + "\n"
+        labels = '{"com.hungerdesolate.schemaVersion":"1","com.hungerdesolate.hostId":"' + HOST + '","com.hungerdesolate.instanceId":"' + INSTANCE + '","com.hungerdesolate.role":"master"}'
+        caves = labels.replace('"master"', '"caves"')
+        mounts = '[{"Source":"/var/lib/famine-hub/instances/' + INSTANCE + '/config"}]'
+        bindings = '{}'
+        def command(args, **_kwargs):
+            if args[:3] == ["docker", "container", "ls"]:
+                return type("Result", (), {"returncode": 0, "stdout": ids})()
+            return type("Result", (), {"returncode": 0, "stdout": labels + "\t" + mounts + "\t" + bindings + "\n" + caves + "\t" + mounts + "\t" + bindings + "\n"})()
+        with patch.object(MODULE, "run", side_effect=command):
+            result = MODULE.verify_containers(PROJECT_NAME, HOST, INSTANCE, {"cavesEnabled": True})
+        self.assertEqual(result["roles"], ["caves", "master"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

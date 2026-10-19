@@ -1,0 +1,156 @@
+# 后续功能清单
+
+- 更新时间：2026-10-19
+- 依据：当前生产代码、[实施计划](implementation-roadmap.md)、[接口契约](api-contract.md)
+- 原则：按真实功能与完成条件核对进度，页面存在不等于功能已完成。
+
+## 1. 当前可用与本轮修复
+
+已实现独立桌面工程、主机记录增删改、SSH 指纹扫描/确认、系统凭据库接口、登录验证、固定 host.json 只读发现，以及两层导航和部分查询/任务隔离基础。
+
+本轮修复：添加主机选择“密码”后可输入 SSH 密码；选择“SSH 密钥”后可输入/选择本机私钥文件路径和可选口令。路径支持绝对路径与 `~/`，Rust 读取非空普通文件，限制 64 KiB 并识别 PEM/OpenSSH 格式，拒绝公钥。私钥内容导入系统凭据库，路径和内容均不写 SQLite。
+
+添加流程先保存元数据，再保存本地凭据。失败保留已创建主机，同一表单重试沿用该记录；关闭后可在连接设置补充。首次确认指纹保留预先保存的凭据，登录仍要求先确认指纹。已信任公钥变化经用户重新确认后保留已有凭据，清除旧主机身份绑定并重新验证登录。
+
+当前仍不能创建/启动真实 DST 专服。世界、MOD、备份、更新和运行列表主要是明确开启的界面预览；登录验证不等于持续连接或部署成功。
+
+## 2. 立即完成：认证验收与主机只读检查（P0）
+
+| 顺序 | 功能 | 待完成与验收条件 |
+| --- | --- | --- |
+| A1 | 认证实机验收（部分通过） | 用户已验证添加、获取指纹与登录成功； macOS/Windows 文件选择与原生凭据库；密码、普通/加密私钥、拒绝授权、坏路径、首次信任与更换指纹。添加到登录全流程成功，失败不重复创建、不发送未验证凭据 |
+| A2 | 主机环境检查（已实现） | 已接入 SSH 只读探测、系统/Docker/资源/权限结果和页面；待真实 Linux Docker 主机验收。 Linux 发行版/架构、Docker/Compose、磁盘/内存、权限与所需命令；显示真实阻断项和采集时间，权限错误不当作未安装，失败不填示例值 |
+| A3 | 注册表只读发现（已实现） | registry/manifest schema、hostId/instanceId 归属、受控路径、主机别名连接对账已接入；待真实远端数据验收 |
+| A4 | 连接结果与 UI 联调 | 区分未验证、最近验证通过、失败/离线；返回页面重查，切换 X→Y、A→B→A 不接受旧响应，查询不覆盖编辑 |
+
+A1 已得到用户人工验证的主路径证据，平台/异常矩阵仍需补齐；A2/A3 代码及隔离/SSH 集成测试通过；下一步是阶段 0 Docker 三专服实验。只读检查可与 Docker 实验同步推进，不意味着提前放行部署写入。
+
+## 3. 阶段 0：Docker 验证（P0 门禁）
+
+| 项目 | 必须证明的结果 |
+| --- | --- |
+| 首发环境 | 固定 Linux amd64 发行版、Docker/Compose 版本、依赖、镜像 digest 与资源预算 |
+| 三专服隔离 | 同机 A/B/C 独立 Compose 项目、bridge 网络、配置、存档、MOD/UGC、完整内外同号对外端口 |
+| 完整联网 | 分别验证公网列表、玩家进入、直连、Steam 查询、洞穴双向迁移与 LAN 发现 |
+| 可控更新与恢复 | staging 不影响活动产物，A 发布切换不影响 B/C；旧程序+MOD+配置+存档共同恢复，缺产物时拒绝自动回滚 |
+| 任务可靠性 | SSH/桌面断开继续；worker/daemon/主机故障可对账，不重复破坏性步骤 |
+
+这些实验尚未完成。Docker Engine 安装器用于准备干净 Ubuntu 26.04 验收主机，并在阶段 0 中验收；三专服游戏镜像/脚本安装、部署和恢复仍须阶段 0 报告通过后放行。保持单一 Docker Compose 路线。管理目录元数据初始化不代表专服部署就绪。
+
+## 4. 部署基础与多专服（P0）
+
+| 顺序 | 功能 | 关键交付/验收 |
+| --- | --- | --- |
+| B1 | 环境准备（实现完成，实机验收待做） | 管理目录初始化、Ubuntu 26.04 root-only Docker/Compose APT 安装、固定包清单、冲突阻断、apt removal simulation、systemd 持久任务与断线对账已实现；仍需 Ubuntu 26.04 干净机安装/重启/断线验收，再由阶段 0 验证三专服部署 |
+| B2 | 注册表、manifest、端口计划 | 已落地创建接纳内核：注册锁、不可变身份、完整端口预留、实际占用重查与 operation 幂等；尚未接入持久 controller，不能创建真实专服 |
+| B3 | 远端任务与对账 | 已完成创建任务持久接纳、request/status/journal、systemd controller 启动、sequence、interrupted 对账和恢复动作；真实部署 worker、维护锁租约、取消与主机重任务队列仍待完成 |
+| B4 | 创建专服 | 已完成受控实例目录树、拓扑 manifest、release 元数据校验、staging Compose、Compose config、资源计划、Docker network/容器创建、runtime 验证和前端任务提交；真实 DST 产物/容器实验、启动和后续世界配置仍待完成 |
+| B5 | 启停/重启/开机策略 | 实例级操作、Master/Caves 绑定、实际 build/监听证据；手动停止及重启语义明确 |
+| B6 | 完整任务 UI | 单一底栏、详情/错误/恢复动作、应用级对账；A 完成不会覆盖 B 页或抢导航 |
+
+B3 必须先于安装/恢复等长任务成熟。现有 task reducer 和本地凭据操作记录并不等于远端任务系统已实现。
+
+## 5. 核心运维（P0）
+
+| 顺序 | 功能 | 关键交付/验收 |
+| --- | --- | --- |
+| C1 | 世界配置 | 期望/部署/运行分离，实例草稿、revision CAS、预览；洞穴关闭保留存档 |
+| C2 | 备份与恢复基础 | 停服一致备份、校验/归属、下载、恢复前保护点；拒绝跨实例恢复，失败保留原世界 |
+| C3 | MOD 管理 | Workshop 元数据、实例启用/配置、受限 Lua 解析、检查更新、staging 下载/应用、分片 UGC 一致性 |
+| C4 | DST/MOD 更新 | 固定目标版本、保护备份、发布切换、实际版本验证与完整恢复点回滚 |
+| C5 | 日志与诊断 | 有界分片日志/游标、脱敏、健康摘要、失败任务证据与恢复入口 |
+| C6 | 保护删除专服 | 有效备份、停止并清理受管运行资源、retired 保留，确认残留消失后才释放端口 |
+
+世界/MOD 的编辑与预览可先开发；实际写入放行时依赖可用保护备份。回滚成功仍应保留原更新失败结果。
+
+## 6. 发布与后续优先级
+
+P0 发布还需全量契约、并发/故障注入、三实例实机回归、四组视觉与键盘验收、本地字体/图标、Windows/macOS 安装签名、升级迁移与恢复手册。现有部分测试和 macOS debug 编译不能替代双平台发布验收。
+
+P1：远端定时备份/保留策略、健康历史、脱敏诊断包、旧部署发现/迁移/失败回退。
+
+P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因。
+
+## 7. 2026-10-18 进展
+
+用户已确认 Docker 可以成功安装，此证据覆盖用户当前 Ubuntu 26.04 主机的安装主路径；尚未提供精确版本、重启/断线和阶段 0 三专服实验结果，不扩大为完整部署验收。
+
+新增“新建专服 → 创建预览”：当前只收集实例名称、启动策略、容器拓扑（是否创建洞穴容器）和自动端口策略。世界模式、人数、PVP、说明和 Token 不出现在创建窗口或预览请求；创建容器和验证游戏环境完成后，才进入世界配置流程。创建路线固定为公网；绑定完整 HostTarget、连接版本和注册表版本，真实读取远端身份/注册表/manifest、Linux IPv4/IPv6 占用与 Docker 发布配置，计算完整同号 UDP 建议端口，显示目录、项目和可用磁盘。
+
+当时尚未接入创建执行，结果固定携带“游戏镜像与部署兼容性尚未完成验证”阻断；不宣称可安装/启动真实专服。随后已完成 B2 接纳和 B3 持久任务基础；当前仍需阶段 0 的镜像/SteamCMD/双分片/联网与隔离验证，以及 release/Compose/容器部署，再开放创建任务。
+
+## 8. 2026-10-19：创建接纳内核
+
+新增 `remote-scripts/actions/instance-create-control.py`，实现 B2 的短临界区：在远端 `registry.lock` 内重新校验 hostId、registryRevision、预览端口计划、registry 预留、Linux socket 与 Docker 发布端口，原子写入 `creating` 实例、完整 UDP 端口预留和受限 operation 回执。锁 owner 记录 token、generation、心跳和租约时间；相同 operationId/输入重放原结果，不同输入返回 `OPERATION_ID_REUSED`。
+
+该脚本仍未注册 Tauri command，也不创建实例目录、写 Token、生成 Compose 或启动 Docker；持久任务 controller/worker 完成后才可接入 `create_instance`。隔离测试入口为 `python3 scripts/test-instance-create-control.py`。
+
+## 9. 2026-10-19：持久创建任务基础设施
+
+新增 `remote-scripts/actions/instance-create-task.py` 与 `remote-scripts/actions/instance-create-worker.py`，实现 B3 的基础闭环：任务接纳按 operationId 幂等写入 `request.json`、`admission.json`、`status.json` 和 `journal.jsonl`，通过 systemd transient unit 脱离 SSH 启动 worker；状态使用单调 sequence，任务进程消失时对账为 `interrupted`，并保留继续创建、清理现场和查看日志等恢复动作。
+
+没有 release 时 worker 在 `download` 阶段返回 `CREATE_RELEASE_REQUIRED`；release/runtime/容器验证失败会返回对应任务错误并保留现场。创建任务不写世界配置、Token 或启动游戏；隔离测试入口为 `python3 scripts/test-instance-create-task.py`。
+
+## 10. 2026-10-19：实例目录与初始 manifest
+
+创建 worker 已进入 B4 前置阶段：使用固定 `/var/lib/famine-hub/instances/<instanceId>` 路径创建 `config`、`desired`、`data/Master`、可选 `data/Caves`、`dst/releases`、`mods/releases`、`staging/<taskId>`、`tasks/<taskId>`、`locks` 等受控目录，并原子发布初始 `manifest.json`。manifest 只包含 host/instance 身份、名称、容器拓扑、端口和期望 revision，不包含世界配置、Token 或其他秘密。
+
+目录或 manifest 冲突会失败并保留现场；没有 release 时任务在 `download` 返回 `CREATE_RELEASE_REQUIRED`。有合格 release 时只生成 staging Compose，仍不创建网络/卷或启动容器。
+
+## 11. 2026-10-19：release 校验与 Compose staging
+
+新增 `remote-scripts/actions/instance-release.py`，固定校验 `linux/amd64`、UUID releaseId、image digest、产物摘要、脚本版本、Master/Caves 启动命令和 verified 标记，并生成 digest pin 的确定性 Compose 文本。worker 接收到任务级 `release.json` 后只将 `compose.yaml` 和 release 摘要写入 `staging/<taskId>`，不会覆盖活动 `compose.yaml` 或启动 Docker。
+
+缺少 release 返回 `CREATE_RELEASE_REQUIRED`；release 或 manifest 无效返回明确失败。staging Compose 会先执行受控 `docker compose config --quiet`，成功后写入不含秘密的 network、bind mount 和端口资源计划；校验失败保留现场并返回 `CREATE_COMPOSE_CONFIG_FAILED`。config 成功后任务进入 `publish`，以 `CREATE_DOCKER_RUNTIME_REQUIRED` 阻断，等待真实镜像、产物、权限、网络/卷和容器验证。隔离测试入口为 `python3 scripts/test-instance-release.py`。
+
+## 12. 2026-10-19：Docker 资源创建内核
+
+新增 `remote-scripts/actions/instance-docker.py`，只有 release 的 `runtimeVerified=true` 时才允许执行资源创建：网络名称固定为 `<composeProject>_instance`，创建/复用必须匹配 hostId、instanceId 和 schema 标签；容器使用 `docker compose create --no-start`，随后验证容器 labels、挂载源和端口发布。验证通过后 worker 发布活动 `compose.yaml`、`active-release.json`、`runtime.json` 并完成创建任务；不自动启动游戏。
+
+当前默认 release 未通过 runtime 验证，因此 worker 仍在 `publish` 返回 `CREATE_DOCKER_RUNTIME_REQUIRED`；runtimeVerified fixture 已覆盖创建、验证和发布路径。隔离测试入口为 `python3 scripts/test-instance-docker.py`；真实 network/container 创建与阶段 0 产物验证仍待完成。下一步是容器就绪后的世界配置与 Token 流程。
+
+## 13. 2026-10-19：DST release catalog 只读发现（✅ 已完成）
+
+新增 `list_instance_releases` command 和远端 catalog probe。它只读取 `/var/lib/famine-hub/releases/catalog.json`，验证 hostId、release 摘要、镜像 digest、产物 digest、启动命令和 runtimeVerified；catalog 缺失或没有合格 release 时返回 `CREATE_RELEASE_REQUIRED`。
+
+- ✅ 后端：`list_instance_releases` 注册并实现
+- ✅ 远端：`probes/instance-release-catalog.py` 校验完成
+- ✅ 测试：`scripts/test-instance-release-catalog.py` 通过
+- ⚠️ 前端：命令已接入但 UI 未展示 release 列表
+
+## 14. 2026-10-19：release 准备前置校验（✅ 已完成）
+
+新增 release prepare probe，按 catalogDigest/releaseId 检查 catalog 是否变化、release 是否 verified，以及固定 `/var/lib/famine-hub/releases/staging/<releaseId>` 是否存在。
+
+- ✅ 远端：`probes/instance-release-prepare.py` 实现
+- ✅ 测试：`scripts/test-instance-release-prepare.py` 通过
+- ⚠️ 真实产物下载与 staging 仍等待阶段 0
+
+## 15. 2026-10-19：release 导入任务（✅ 后端完成 / ⚠️ 前端待接入）
+
+新增 `preview_instance_release` / `import_instance_release`。导入任务验证 staged `release.json` 与 catalog 完全匹配，并要求 `runtime.json` 提供 `runtimeVerified=true`、`verification=passed`；验证成功后原子更新 catalog release 的 `runtimeVerified`。
+
+- ✅ 后端：两个命令已注册并实现
+- ✅ 远端：`actions/instance-release-import.py` 验证完成
+- ✅ 测试：隔离测试通过
+- ❌ 前端：创建对话框未显示 release 状态
+- ❌ 前端：未提供”验证 release”按钮
+- ❌ 前端：未接入验证任务流程
+
+## 16. 2026-10-19：创建任务前端状态同步（⚠️ 部分完成）
+
+`InstanceCreateDialog` 已实现完整表单与预览调用，但创建任务提交与状态轮询尚未接入。
+
+- ✅ 表单：参数收集、预览调用、端口计划展示
+- ✅ 后端：`create_instance` 命令已注册
+- ❌ 前端：未调用 `create_instance` 提交任务
+- ❌ 前端：未实现任务状态轮询或事件订阅
+- ❌ 前端：未展示创建进度（下载、配置、Docker 资源）
+- ❌ 前端：未实现失败重试、查看日志、清理现场
+
+**下一步优先级**：
+
+1. **补齐创建任务集成**（P0 阻断）：前端调用 `create_instance`、轮询状态、展示进度
+2. **Release 验证 UI**（P0 阻断）：显示 release 状态、验证按钮、错误反馈
+3. **任务恢复入口**（P0 重要）：失败任务重试、清理、日志查看
+4. **视觉验收准备**（P0 门禁）：light/dark × 960×680/1480×920 截图、键盘交互记录

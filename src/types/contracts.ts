@@ -122,6 +122,16 @@ export interface TaskResult {
     invalidate: {hostId: HostId; instanceId: InstanceId | null; domains: string[]}[];
     recoveryActions: TaskRecoveryAction[];
 }
+
+export interface MutationResult<T> {
+    schemaVersion: 1;
+    target: InstanceTarget;
+    operationId: string;
+    verifiedRevision: number;
+    data: T;
+    invalidate: {hostId: HostId; instanceId: InstanceId | null; domains: string[]}[];
+}
+
 export interface CommandError {
     schemaVersion: 1;
     code: string;

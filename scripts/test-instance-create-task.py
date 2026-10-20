@@ -43,17 +43,25 @@ class TaskTests(unittest.TestCase):
         root = Path(self.temp.name) / "famine-hub"
         root.mkdir(mode=0o700)
         (root / "locks").mkdir(mode=0o700)
+        (root / "releases").mkdir(mode=0o700)
         (root / "host.json").write_text(json.dumps({"schemaVersion": 1, "hostId": HOST}))
         (root / "registry.json").write_text(json.dumps({"schemaVersion": 1, "hostId": HOST,
                                                          "registryRevision": 3, "instances": [],
                                                          "portReservations": [], "operations": []}))
         (root / "host.json").chmod(0o600)
         (root / "registry.json").chmod(0o600)
+        release = valid_release()
+        catalog = {"schemaVersion": 1, "hostId": HOST,
+                   "releases": [{key: value for key, value in release.items() if key != "schemaVersion"}]}
+        (root / "releases" / "catalog.json").write_text(json.dumps(catalog))
+        (root / "releases" / "catalog.json").chmod(0o600)
         self.root = root
+        catalog_digest = CONTROL.digest(catalog)
         self.request = {"action": "start", "schemaVersion": 1, "operationId": OPERATION,
                         "planId": PLAN, "hostId": HOST, "expectedRegistryRevision": 3,
                         "input": {"displayName": "生存一服", "autostart": True,
                                    "startAfterCreate": True, "portPolicy": "auto", "cavesEnabled": False,
+                                   "releaseId": release["releaseId"], "releaseCatalogDigest": catalog_digest,
                                    "expectedPorts": CONTROL.allocate(set(), False)}}
         original_lstat, original_fstat = Path.lstat, os.fstat
         def root_owned(info):
@@ -62,6 +70,8 @@ class TaskTests(unittest.TestCase):
             return os.stat_result(fields)
         self.patches = [
             patch.object(CONTROL, "ROOT", root),
+            patch.object(CONTROL, "CATALOG", root / "releases" / "catalog.json"),
+            patch.object(CONTROL, "CATALOG", root / "releases" / "catalog.json"),
             patch.object(CONTROL, "LOCKS", root / "locks"),
             patch.object(CONTROL, "LOCK_PATH", root / "locks" / "registry.lock"),
             patch.object(CONTROL, "OWNER_PATH", root / "locks" / "registry-owner.json"),
@@ -94,6 +104,8 @@ class TaskTests(unittest.TestCase):
         self.assertTrue((task / "request.json").exists())
         self.assertTrue((task / "status.json").exists())
         self.assertEqual(runner.call_args.args[0][0], "/usr/bin/systemd-run")
+        self.assertTrue((task / "release.json").exists())
+        (task / "release.json").unlink()
 
         worker_source = PROJECT / "remote-scripts/actions/instance-create-worker.py"
         (task / "worker.py").write_text(worker_source.read_text())
@@ -144,28 +156,15 @@ class TaskTests(unittest.TestCase):
         self.assertTrue(state["error"]["remoteChanged"])
         self.assertTrue((self.root / "tasks" / OPERATION / "journal.jsonl").exists())
 
-    def test_verified_release_renders_only_to_task_staging_then_blocks_deployment(self):
-        launch = type("Result", (), {"returncode": 0})()
-        with patch.object(CONTROL.subprocess, "run", return_value=launch):
-            state = CONTROL.start(self.request, "# worker", CONTROL.RUNTIME_SOURCE, CONTROL.RELEASE_SOURCE, CONTROL.DOCKER_SOURCE)
-        task = self.root / "tasks" / OPERATION
-        (task / "release.json").write_text(json.dumps(valid_release()))
-        (task / "release.json").chmod(0o600)
-        worker_source = PROJECT / "remote-scripts/actions/instance-create-worker.py"
-        (task / "worker.py").write_text(worker_source.read_text())
-        with patch.object(CONTROL.os, "geteuid", return_value=0), \
-             patch.object(CONTROL.subprocess, "run", return_value=launch):
-            worker = __import__("runpy").run_path(str(task / "worker.py"))
-            worker["main"](str(task))
-        status = json.loads((task / "status.json").read_text())
-        staging = self.root / "instances" / state["target"]["instanceId"] / "staging" / OPERATION
-        self.assertEqual(status["stage"], "publish")
-        self.assertEqual(status["error"]["code"], "CREATE_DOCKER_RUNTIME_REQUIRED")
-        self.assertTrue((staging / "compose.yaml").exists())
-        self.assertTrue((staging / "resource-plan.json").exists())
-        compose = (staging / "compose.yaml").read_text()
-        self.assertIn("registry.example/dst@sha256:" + "a" * 64, compose)
-        self.assertFalse((self.root / "instances" / state["target"]["instanceId"] / "compose.yaml").exists())
+    def test_unverified_release_is_rejected_during_admission(self):
+        catalog = json.loads((self.root / "releases" / "catalog.json").read_text())
+        catalog["releases"][0]["verified"] = False
+        (self.root / "releases" / "catalog.json").write_text(json.dumps(catalog))
+        request = json.loads(json.dumps(self.request))
+        request["input"]["releaseCatalogDigest"] = CONTROL.digest(catalog)
+        with self.assertRaises(CONTROL.TaskRejected) as failure:
+            CONTROL.start(request, "# worker", CONTROL.RUNTIME_SOURCE, CONTROL.RELEASE_SOURCE, CONTROL.DOCKER_SOURCE)
+        self.assertEqual(str(failure.exception), "CREATE_RELEASE_REQUIRED")
 
     def test_invalid_release_stops_before_compose_publish(self):
         launch = type("Result", (), {"returncode": 0})()
@@ -205,13 +204,13 @@ class TaskTests(unittest.TestCase):
         self.assertTrue((staging / "compose.yaml").exists())
         self.assertFalse((staging / "resource-plan.json").exists())
 
-    def test_runtime_verified_release_creates_and_verifies_container_runtime(self):
+    def test_base_verified_release_creates_containers_without_runtime_smoke_test(self):
         launch = type("Result", (), {"returncode": 0})()
         with patch.object(CONTROL.subprocess, "run", return_value=launch):
             state = CONTROL.start(self.request, "# worker", CONTROL.RUNTIME_SOURCE, CONTROL.RELEASE_SOURCE, CONTROL.DOCKER_SOURCE)
         task = self.root / "tasks" / OPERATION
         release = valid_release()
-        release["runtimeVerified"] = True
+        release["runtimeVerified"] = False
         (task / "release.json").write_text(json.dumps(release))
         (task / "release.json").chmod(0o600)
         docker_stub = "\n".join([

@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowLeft, Cpu, Database, Gauge, Globe2, HardDrive, List, Monitor, Moon, Server, Settings, Sun, TerminalSquare, Wrench } from "@lucide/vue";
+import { ArrowLeft, Cpu, Database, Gauge, Globe2, HardDrive, List, Monitor, Moon, Package, Server, Settings, Sun, TerminalSquare, Wrench } from "@lucide/vue";
 import { useWorkspace } from "./composables/useWorkspace";
 import { useTheme } from "./composables/useTheme";
 import { useTasks } from "./composables/useTasks";
@@ -78,6 +78,10 @@ onUnmounted(() => { disposed = true; unlisten?.(); });
             <button class="nav-item" :class="{active:route.path.endsWith('/instances')}" @click="hostRoute('instances')">
               <List :size="17"/>
               专服列表
+            </button>
+            <button class="nav-item" :class="{active:route.path.endsWith('/releases')}" @click="hostRoute('releases')">
+              <Package :size="17"/>
+              Release 管理
             </button>
             <button class="nav-item" :class="{active:route.path.endsWith('/environment')}" @click="hostRoute('environment')">
               <Cpu :size="17"/>

@@ -93,7 +93,7 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 
 ## 10. 2026-10-19：实例目录与初始 manifest
 
-创建 worker 已进入 B4 前置阶段：使用固定 `/var/lib/famine-hub/instances/<instanceId>` 路径创建 `config`、`desired`、`data/Master`、可选 `data/Caves`、`dst/releases`、`mods/releases`、`staging/<taskId>`、`tasks/<taskId>`、`locks` 等受控目录，并原子发布初始 `manifest.json`。manifest 只包含 host/instance 身份、名称、容器拓扑、端口和期望 revision，不包含世界配置、Token 或其他秘密。
+创建 worker 已进入 B4 前置阶段：使用固定 `/var/lib/famine-hub/instances/<instanceId>` 路径创建 `config`、`desired`、`data/Master`、可选 `data/Caves`、`mods/releases`、`staging/<taskId>`、`tasks/<taskId>`、`locks` 等受控目录，并原子发布初始 `manifest.json`。DST 二进制由 digest 固定的 Release 镜像提供，不创建会遮蔽 `/srv/dst` 的实例 bind mount。manifest 只包含 host/instance 身份、名称、容器拓扑、端口和期望 revision，不包含世界配置、Token 或其他秘密。
 
 目录或 manifest 冲突会失败并保留现场；没有 release 时任务在 `download` 返回 `CREATE_RELEASE_REQUIRED`。有合格 release 时只生成 staging Compose，仍不创建网络/卷或启动容器。
 
@@ -126,16 +126,14 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 - ✅ 测试：`scripts/test-instance-release-prepare.py` 通过
 - ⚠️ 真实产物下载与 staging 仍等待阶段 0
 
-## 15. 2026-10-19：release 导入任务（✅ 后端完成 / ⚠️ 前端待接入）
+## 15. 2026-10-19：release 导入任务（历史实现）
 
 新增 `preview_instance_release` / `import_instance_release`。导入任务验证 staged `release.json` 与 catalog 完全匹配，并要求 `runtime.json` 提供 `runtimeVerified=true`、`verification=passed`；验证成功后原子更新 catalog release 的 `runtimeVerified`。
 
 - ✅ 后端：两个命令已注册并实现
 - ✅ 远端：`actions/instance-release-import.py` 验证完成
 - ✅ 测试：隔离测试通过
-- ❌ 前端：创建对话框未显示 release 状态
-- ❌ 前端：未提供”验证 release”按钮
-- ❌ 前端：未接入验证任务流程
+- 后续已在 §18 补齐基础/运行时验证入口；真实主机实验仍需阶段 0。
 
 ## 16. 2026-10-19：创建任务前端状态同步（⚠️ 部分完成）
 
@@ -151,6 +149,20 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 **下一步优先级**：
 
 1. **补齐创建任务集成**（P0 阻断）：前端调用 `create_instance`、轮询状态、展示进度
-2. **Release 验证 UI**（P0 阻断）：显示 release 状态、验证按钮、错误反馈
+2. **Release 验证 UI**（P0 阻断）：Release 管理页显示基础/运行时验证操作、进度和结果；创建窗口只选择可用 Release
 3. **任务恢复入口**（P0 重要）：失败任务重试、清理、日志查看
 4. **视觉验收准备**（P0 门禁）：light/dark × 960×680/1480×920 截图、键盘交互记录
+
+## 18. 2026-10-19：DST Release 两阶段验证与实例固定版本
+
+- 构建登记前核对本地主机 Docker image ID、镜像内 `version.txt` 与 DST binary；基础验证通过才标记 `verified=true`。已登记但未验证的 Release 可从创建流程重新执行基础验证。
+- 运行验证接收一次性 Klei 配置 ZIP，在 `/run` 下创建不发布宿主端口的 LAN-only Master/Caves 集群，核对实际 DST 进程和配置 UDP listener；验证容器、网络和临时配置清理后，写入不含 token 的 digest 绑定 evidence。
+- 创建流程显式选择单个 Release；提交时携带 releaseId/catalogDigest，远端 admission 在 registry 锁内重验并将确切 Release 快照写入任务。Compose 通过 image digest 使用镜像内 DST binary，不再将空实例目录 bind mount 到 `/srv/dst`。
+- 测试：`scripts/test-register-built-release.py`、`scripts/test-verify-release-runtime.py`、`scripts/test-instance-create-task.py`。真实 DST/Klei 配置兼容、UDP listener 及网络要求仍需 Linux amd64 阶段 0 实机验证。
+
+## 19. 2026-10-19：基础验证 Release 可创建
+
+- Release 构建登记后的基础验证（镜像 digest、`version.txt`、DST 可执行文件与动态依赖）通过后即可用于创建容器；`runtimeVerified` 不再是创建门槛。
+- Klei 配置 ZIP 的 Master/Caves 隔离启动和 UDP listener 检查保留为可选增强证据。创建任务只创建 `--no-start` 容器并验证 Docker 身份标签、挂载和端口，不把容器创建成功表述为游戏已启动。
+- 前后端 catalog、创建 admission、worker 与 UI 均以 `verified=true` 为放行条件；`runtimeVerified` 仍独立记录，不能由基础验证伪造。
+- 测试：`scripts/test-instance-release-catalog.py`、`scripts/test-instance-create-task.py`、`scripts/test-instance-create-ui.mjs`。

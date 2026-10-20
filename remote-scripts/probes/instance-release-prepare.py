@@ -84,16 +84,28 @@ def inspect(request):
         return {"schemaVersion": 1, "hostId": host_id, "releaseId": release_id,
                 "catalogDigest": observed_digest, "status": "blocked", "blockers": ["CREATE_RELEASE_NOT_VERIFIED"],
                 "artifactPath": None}
-    artifact = STAGING / release_id
-    if not artifact.exists():
+    staging_dir = STAGING / release_id
+    if not staging_dir.exists():
         return {"schemaVersion": 1, "hostId": host_id, "releaseId": release_id,
-                "catalogDigest": observed_digest, "status": "blocked", "blockers": ["CREATE_RELEASE_ARTIFACT_REQUIRED"],
+                "catalogDigest": observed_digest, "status": "blocked", "blockers": ["CREATE_RELEASE_STAGING_MISSING"],
                 "artifactPath": None}
-    if not artifact.is_dir() or artifact.is_symlink():
-        reject("CREATE_RELEASE_ARTIFACT_INVALID")
+    info = staging_dir.lstat()
+    if (not staging_dir.is_dir() or staging_dir.is_symlink() or info.st_mode & 0o077
+            or info.st_uid not in (0, os.geteuid())):
+        reject("CREATE_RELEASE_STAGING_INVALID")
+    try:
+        metadata = json.loads((staging_dir / "release-metadata.json").read_bytes())
+        metadata_entry = dict(metadata)
+        metadata_entry.pop("schemaVersion", None)
+    except (OSError, ValueError, TypeError):
+        return {"schemaVersion": 1, "hostId": host_id, "releaseId": release_id,
+                "catalogDigest": observed_digest, "status": "blocked", "blockers": ["CREATE_RELEASE_METADATA_INVALID"],
+                "artifactPath": None}
+    if metadata_entry != release:
+        reject("CREATE_RELEASE_METADATA_INVALID")
     return {"schemaVersion": 1, "hostId": host_id, "releaseId": release_id,
             "catalogDigest": observed_digest, "status": "ready", "blockers": [],
-            "artifactPath": "/var/lib/famine-hub/releases/staging/" + release_id}
+            "artifactPath": "/var/lib/famine-hub/staging/" + release_id}
 
 
 def main(request):

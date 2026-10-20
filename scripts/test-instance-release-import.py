@@ -23,16 +23,16 @@ class ImportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="release-import-")
         root = Path(self.temp.name) / "famine-hub"
-        (root / "releases" / "staging" / RID).mkdir(parents=True, mode=0o700)
+        (root / "staging" / RID).mkdir(parents=True, mode=0o700)
         (root / "releases" / "tasks").mkdir(parents=True, mode=0o700)
-        for path in [root, root / "releases", root / "releases" / "staging", root / "releases" / "tasks", root / "host.json"]:
+        for path in [root, root / "staging", root / "releases", root / "releases" / "tasks", root / "host.json"]:
             try: path.chmod(0o700 if path.is_dir() else 0o600)
             except FileNotFoundError: pass
         (root / "host.json").write_text(json.dumps({"schemaVersion": 1, "hostId": HOST})); (root / "host.json").chmod(0o600)
         self.root = root
         original_lstat, original_fstat = Path.lstat, os.fstat
         def owned(info): values=list(info); values[4]=0; return os.stat_result(values)
-        self.patches=[patch.object(MODULE,"ROOT",root),patch.object(MODULE,"CATALOG",root/"releases/catalog.json"),patch.object(MODULE,"STAGING",root/"releases/staging"),patch.object(MODULE,"TASKS",root/"releases/tasks"),patch.object(MODULE.os,"geteuid",return_value=0),patch.object(Path,"lstat",lambda path:owned(original_lstat(path))),patch.object(MODULE.os,"fstat",lambda fd:owned(original_fstat(fd)))]
+        self.patches=[patch.object(MODULE,"ROOT",root),patch.object(MODULE,"CATALOG",root/"releases/catalog.json"),patch.object(MODULE,"STAGING",root/"staging"),patch.object(MODULE,"TASKS",root/"releases/tasks"),patch.object(MODULE.os,"geteuid",return_value=0),patch.object(Path,"lstat",lambda path:owned(original_lstat(path))),patch.object(MODULE.os,"fstat",lambda fd:owned(original_fstat(fd)))]
         for item in self.patches:item.start()
     def tearDown(self):
         for item in reversed(self.patches):item.stop()
@@ -43,12 +43,13 @@ class ImportTests(unittest.TestCase):
         request={"action":"start","operationId":"33333333-3333-4333-8333-333333333333","releaseId":RID,"hostId":HOST,"catalogDigest":digest}
         result = MODULE.run(request)
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["error"]["code"], "CREATE_RELEASE_ARTIFACT_REQUIRED")
+        self.assertEqual(result["error"]["code"], "CREATE_RELEASE_RUNTIME_EVIDENCE_REQUIRED")
     def test_import_marks_runtime_verified_after_matching_evidence(self):
         catalog={"schemaVersion":1,"hostId":HOST,"releases":[RELEASE]}; MODULE.CATALOG.write_text(json.dumps(catalog)); MODULE.CATALOG.chmod(0o600)
         artifact=MODULE.STAGING/RID
-        (artifact/"release.json").write_text(json.dumps(RELEASE)); (artifact/"release.json").chmod(0o600)
-        (artifact/"runtime.json").write_text(json.dumps({"runtimeVerified":True,"verification":"passed"})); (artifact/"runtime.json").chmod(0o600)
+        (artifact/"release-metadata.json").write_text(json.dumps({"schemaVersion":1,**RELEASE})); (artifact/"release-metadata.json").chmod(0o600)
+        evidence={"schemaVersion":1,"releaseId":RID,"imageDigest":RELEASE["imageDigest"],"runtimeVerified":True,"verification":"passed"}
+        (artifact/"runtime.json").write_text(json.dumps(evidence)); (artifact/"runtime.json").chmod(0o600)
         digest=MODULE.catalog_digest(catalog); request={"action":"start","operationId":"33333333-3333-4333-8333-333333333333","releaseId":RID,"hostId":HOST,"catalogDigest":digest}
         result=MODULE.run(request)
         self.assertEqual(result["status"],"succeeded")

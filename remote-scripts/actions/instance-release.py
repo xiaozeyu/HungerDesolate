@@ -93,7 +93,6 @@ def render_compose(manifest, release, instance_root):
         lines.extend(["    working_dir: '/srv'", "    volumes:",
                       "      - " + quote(instance_root + "/config:/srv/config:rw"),
                       "      - " + quote(instance_root + "/data/" + ("Caves" if shard == "caves" else "Master") + ":/srv/data:rw"),
-                      "      - " + quote(instance_root + "/dst/releases/" + release["releaseId"] + ":/srv/dst:ro"),
                       "      - " + quote(instance_root + "/mods/releases/" + release["releaseId"] + "/" + ("Caves" if shard == "caves" else "Master") + ":/srv/ugc:rw")])
         ports = port_lines(manifest, shard)
         if ports:

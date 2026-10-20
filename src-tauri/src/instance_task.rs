@@ -30,6 +30,8 @@ pub struct CreateTaskInput {
     pub start_after_create: bool,
     pub port_policy: String,
     pub caves_enabled: bool,
+    pub release_id: String,
+    pub release_catalog_digest: String,
     pub expected_ports: Vec<PortPlan>,
 }
 
@@ -147,6 +149,8 @@ fn validate_start(request: &StartRequest) -> CommandResult<()> {
         || request.input.display_name.chars().any(char::is_control)
         || request.input.port_policy != "auto"
         || (!request.input.autostart && request.input.start_after_create)
+        || !valid_uuid(&request.input.release_id)
+        || !request.input.release_catalog_digest.starts_with("sha256:")
         || request.input.expected_ports.len() != if request.input.caves_enabled { 6 } else { 3 }
     {
         return Err(error("CREATE_INPUT_INVALID", "创建容器请求参数无效"));

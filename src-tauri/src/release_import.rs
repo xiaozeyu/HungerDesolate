@@ -16,6 +16,11 @@ use std::{
 const OP: &str = "prepareInstanceRelease";
 const PREPARE: &str = include_str!("../../remote-scripts/probes/instance-release-prepare.py");
 const IMPORT: &str = include_str!("../../remote-scripts/actions/instance-release-import.py");
+const RUNTIME_VERIFY: &str = include_str!("../../remote-scripts/actions/verify-release-runtime.py");
+const BASE_VERIFY: &str = include_str!("../../remote-scripts/actions/register-built-release.py");
+const DELETE_RELEASE: &str =
+    include_str!("../../remote-scripts/actions/delete-instance-release.py");
+const MAX_SETTINGS_BUNDLE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -37,6 +42,74 @@ pub struct ImportRequest {
     pub release_id: String,
     pub catalog_digest: String,
     pub operation_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeVerifyRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub expected_record_version: u64,
+    pub release_id: String,
+    pub catalog_digest: String,
+    pub operation_id: String,
+    pub settings_bundle_base64: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BaseVerifyRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub expected_record_version: u64,
+    pub release_id: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseDeletePreviewRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub expected_record_version: u64,
+    pub release_id: String,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReleaseDeleteRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub expected_record_version: u64,
+    pub release_id: String,
+    pub catalog_digest: String,
+    pub typed_name: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseDeletePreviewResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub release_id: String,
+    pub dst_build: String,
+    pub image_digest: String,
+    pub instance_references: Vec<String>,
+    pub task_references: Vec<String>,
+    pub container_references: Vec<String>,
+    pub shared_image: bool,
+    pub allowed: bool,
+    pub catalog_digest: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseDeleteResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub release_id: String,
+    pub image_removed: bool,
+    pub image_shared: bool,
+    pub staging_removed: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +133,27 @@ pub struct ImportResponse {
     pub record_version: u64,
     pub task: Option<Value>,
 }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeVerifyResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub record_version: u64,
+    pub release_id: String,
+    pub runtime_verified: bool,
+    pub listeners: Value,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaseVerifyResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: crate::instance_creation::HostTarget,
+    pub record_version: u64,
+    pub release_id: String,
+    pub verified: bool,
+}
 
 fn error(code: &'static str, message: &'static str) -> Box<CommandError> {
     CommandError::new(
@@ -80,7 +174,159 @@ fn validate_target(target: &crate::instance_creation::HostTarget) -> CommandResu
     Ok(())
 }
 
-fn execute(session: &Session, script: &str, request: &Value) -> CommandResult<Value> {
+fn remote_error(code: &str) -> Box<CommandError> {
+    let (stable_code, message) = match code {
+        "CREATE_RELEASE_INPUT_INVALID" => (
+            "CREATE_RELEASE_INPUT_INVALID",
+            "Release 验证请求无效，请刷新 Release 列表后重试",
+        ),
+        "HOST_IDENTITY_MISMATCH" => (
+            "HOST_IDENTITY_MISMATCH",
+            "Release 所属主机与当前连接不一致，请重新连接主机",
+        ),
+        "CREATE_RELEASE_CATALOG_INVALID" => (
+            "CREATE_RELEASE_CATALOG_INVALID",
+            "主机上的 Release catalog 无效，请检查 catalog 文件",
+        ),
+        "CREATE_RELEASE_NOT_VERIFIED" => (
+            "CREATE_RELEASE_NOT_VERIFIED",
+            "Release 尚未通过基础镜像验证，请先验证镜像",
+        ),
+        "CREATE_RELEASE_METADATA_INVALID" => (
+            "CREATE_RELEASE_METADATA_INVALID",
+            "Release metadata 与主机 catalog 不一致，请重新构建并登记镜像",
+        ),
+        "CREATE_RELEASE_BINARY_CHECK_FAILED" => (
+            "CREATE_RELEASE_BINARY_CHECK_FAILED",
+            "DST 64 位服务端文件不可执行或缺少动态库，请检查镜像运行库依赖后重新构建 Release",
+        ),
+        "CREATE_DOCKER_UNAVAILABLE" => (
+            "CREATE_DOCKER_UNAVAILABLE",
+            "远端主机未安装 Docker CLI，请检查 Docker 安装",
+        ),
+        "RELEASE_RUNTIME_CONFIG_INCOMPLETE" => (
+            "RELEASE_RUNTIME_CONFIG_INCOMPLETE",
+            "Klei 配置包缺少 cluster token 或 Master/Caves 配置",
+        ),
+        "RELEASE_RUNTIME_CONFIG_INVALID"
+        | "RELEASE_RUNTIME_BUNDLE_INVALID"
+        | "RELEASE_RUNTIME_BUNDLE_TOO_LARGE" => (
+            "RELEASE_RUNTIME_BUNDLE_INVALID",
+            "Klei 配置包无效或超出大小限制",
+        ),
+        "RELEASE_RUNTIME_PROCESS_NOT_READY" => (
+            "RELEASE_RUNTIME_PROCESS_NOT_READY",
+            "DST 服务进程未能保持运行",
+        ),
+        "RELEASE_RUNTIME_LISTENERS_NOT_READY" => (
+            "RELEASE_RUNTIME_LISTENERS_NOT_READY",
+            "DST 分片未监听配置中的 UDP 端口",
+        ),
+        "RELEASE_RUNTIME_CONTAINER_START_FAILED" => (
+            "RELEASE_RUNTIME_CONTAINER_START_FAILED",
+            "隔离验证容器启动失败",
+        ),
+        "RELEASE_RUNTIME_NETWORK_FAILED" => {
+            ("RELEASE_RUNTIME_NETWORK_FAILED", "无法创建隔离验证网络")
+        }
+        "RELEASE_RUNTIME_BUSY" => ("RELEASE_RUNTIME_BUSY", "主机上已有 Release 运行验证任务"),
+        "RELEASE_RUNTIME_PATH_UNSAFE" => (
+            "RELEASE_RUNTIME_PATH_UNSAFE",
+            "Release 运行验证目录权限或类型不安全，请检查主机管理目录权限",
+        ),
+        "RELEASE_RUNTIME_DOCKER_TIMEOUT" => (
+            "RELEASE_RUNTIME_DOCKER_TIMEOUT",
+            "主机 Docker 命令超时，请检查 Docker daemon 状态与主机负载",
+        ),
+        "RELEASE_RUNTIME_DOCKER_RESPONSE_INVALID" => (
+            "RELEASE_RUNTIME_DOCKER_RESPONSE_INVALID",
+            "Docker 返回了无效结果，请检查主机 Docker 状态",
+        ),
+        "RELEASE_RUNTIME_CHECK_FAILED" | "RELEASE_RUNTIME_VERIFY_FAILED" => (
+            "RELEASE_RUNTIME_VERIFY_FAILED",
+            "Release 运行时检查未完成，请查看主机 Docker 状态和 Release 验证条件",
+        ),
+        "RELEASE_RUNTIME_CLEANUP_FAILED" => (
+            "RELEASE_RUNTIME_CLEANUP_FAILED",
+            "验证结束后未能清理全部临时 Docker 资源",
+        ),
+        "CREATE_RELEASE_IMAGE_DIGEST_MISMATCH" => (
+            "CREATE_RELEASE_IMAGE_DIGEST_MISMATCH",
+            "主机上的镜像与 Release digest 不匹配",
+        ),
+        "RELEASE_CATALOG_CHANGED" => (
+            "RELEASE_CATALOG_CHANGED",
+            "Release catalog 已变化，请刷新后重试",
+        ),
+        "RELEASE_NOT_FOUND" => ("RELEASE_NOT_FOUND", "Release 已不存在，请刷新列表"),
+        "RELEASE_IN_USE" => (
+            "RELEASE_IN_USE",
+            "该 Release 仍被实例、任务或容器引用，不能删除",
+        ),
+        "RELEASE_CONFIRMATION_MISMATCH" => (
+            "RELEASE_CONFIRMATION_MISMATCH",
+            "输入的 DST 版本与待删除 Release 不一致",
+        ),
+        "RELEASE_DELETE_IMAGE_FAILED" => (
+            "RELEASE_DELETE_IMAGE_FAILED",
+            "Docker 未能删除该镜像，Release 登记已恢复，请检查镜像状态后重试",
+        ),
+        "RELEASE_DELETE_IMAGE_IN_USE" => (
+            "RELEASE_DELETE_IMAGE_IN_USE",
+            "Docker 仍有容器引用该镜像，Release 登记已恢复；请先清理引用容器",
+        ),
+        "RELEASE_DELETE_DOCKER_PERMISSION_DENIED" => (
+            "RELEASE_DELETE_DOCKER_PERMISSION_DENIED",
+            "当前主机账户没有删除 Docker 镜像的权限，Release 登记已恢复",
+        ),
+        "RELEASE_DELETE_DOCKER_UNAVAILABLE" => (
+            "RELEASE_DELETE_DOCKER_UNAVAILABLE",
+            "无法连接主机 Docker，未执行 Release 删除",
+        ),
+        "RELEASE_DELETE_DOCKER_TIMEOUT" => (
+            "RELEASE_DELETE_DOCKER_TIMEOUT",
+            "Docker 资源检查超时，未执行 Release 删除",
+        ),
+        "RELEASE_DELETE_STATE_INVALID" => (
+            "RELEASE_DELETE_STATE_INVALID",
+            "Release、实例或任务状态无法安全核对，未执行删除",
+        ),
+        "RELEASE_DELETE_FAILED" => (
+            "RELEASE_DELETE_FAILED",
+            "Release 删除检查或清理过程遇到未分类错误；请刷新列表并核对主机 catalog、staging 和 Docker 状态",
+        ),
+        "RELEASE_DELETE_DOCKER_RESPONSE_INVALID" => (
+            "RELEASE_DELETE_DOCKER_RESPONSE_INVALID",
+            "Docker 返回的镜像或容器信息无效，未完成 Release 删除",
+        ),
+        "RELEASE_DELETE_PROTOCOL_INVALID" => (
+            "RELEASE_DELETE_PROTOCOL_INVALID",
+            "远端 Release 删除响应格式不匹配，请重新连接并重试",
+        ),
+        _ => (
+            "RELEASE_RUNTIME_VERIFY_FAILED",
+            "Release 运行时验证失败，请检查主机 Docker 和配置包",
+        ),
+    };
+    let mut result = error(stable_code, message);
+    if stable_code == "RELEASE_RUNTIME_VERIFY_FAILED"
+        && !code.is_empty()
+        && code.len() <= 96
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        result.details = json!({"remoteCode": code});
+    }
+    result
+}
+
+fn execute(
+    session: &Session,
+    script: &str,
+    request: &Value,
+    timeout_seconds: u64,
+) -> CommandResult<Value> {
     let encoded = STANDARD.encode(
         serde_json::to_vec(request)
             .map_err(|_| error("CREATE_RELEASE_PROTOCOL_INVALID", "release 请求编码失败"))?,
@@ -105,7 +351,7 @@ fn execute(session: &Session, script: &str, request: &Value) -> CommandResult<Va
         .send_eof()
         .map_err(|_| error("CREATE_RELEASE_CHANNEL_FAILED", "无法结束 release 请求"))?;
     session.set_blocking(false);
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let mut output = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
@@ -137,10 +383,11 @@ fn execute(session: &Session, script: &str, request: &Value) -> CommandResult<Va
     let envelope: Value = serde_json::from_slice(&output)
         .map_err(|_| error("CREATE_RELEASE_PROTOCOL_INVALID", "release 响应无效"))?;
     if envelope.get("ok") != Some(&Value::Bool(true)) {
-        return Err(error(
-            "CREATE_RELEASE_TASK_FAILED",
-            "release 准备或导入失败",
-        ));
+        let code = envelope
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return Err(remote_error(code));
     }
     envelope
         .get("data")
@@ -170,6 +417,7 @@ pub fn preview(database: &Path, request: PrepareRequest) -> CommandResult<Prepar
             session,
             PREPARE,
             &json!({"hostId":request.target.host_id,"releaseId":request.release_id,"catalogDigest":request.catalog_digest}),
+            20,
         )?;
         Ok(PrepareResponse {
             schema_version: 1,
@@ -224,6 +472,7 @@ pub fn import(database: &Path, request: ImportRequest) -> CommandResult<ImportRe
             session,
             IMPORT,
             &json!({"action":"start","hostId":request.target.host_id,"releaseId":request.release_id,"catalogDigest":request.catalog_digest,"operationId":request.operation_id}),
+            20,
         )?;
         Ok(ImportResponse {
             schema_version: 1,
@@ -233,4 +482,312 @@ pub fn import(database: &Path, request: ImportRequest) -> CommandResult<ImportRe
             task: Some(data),
         })
     })
+}
+
+pub fn verify_runtime(
+    database: &Path,
+    request: RuntimeVerifyRequest,
+) -> CommandResult<RuntimeVerifyResponse> {
+    validate_target(&request.target)?;
+    crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
+    if request.schema_version != 1
+        || !valid_id(&request.release_id)
+        || !request.catalog_digest.starts_with("sha256:")
+        || request.settings_bundle_base64.len() > (MAX_SETTINGS_BUNDLE_BYTES * 4 / 3 + 8)
+        || base64::engine::general_purpose::STANDARD
+            .decode(request.settings_bundle_base64.as_bytes())
+            .map(|bundle| bundle.len() > MAX_SETTINGS_BUNDLE_BYTES)
+            .unwrap_or(true)
+    {
+        return Err(error(
+            "RELEASE_RUNTIME_INPUT_INVALID",
+            "运行时验证请求无效或配置包过大",
+        ));
+    }
+    let connection = ConnectionRequest {
+        schema_version: request.schema_version,
+        request_id: request.request_id.clone(),
+        server_id: request.target.server_id.clone(),
+        expected_record_version: request.expected_record_version,
+    };
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "Release 目标主机不一致"));
+        }
+        let data = execute(
+            session,
+            RUNTIME_VERIFY,
+            &json!({"hostId":request.target.host_id,"releaseId":request.release_id,
+                   "catalogDigest":request.catalog_digest,"operationId":request.operation_id,
+                   "settingsBundleBase64":request.settings_bundle_base64}),
+            180,
+        )?;
+        if data.get("runtimeVerified") != Some(&Value::Bool(true))
+            || data.get("releaseId").and_then(Value::as_str) != Some(request.release_id.as_str())
+        {
+            return Err(error(
+                "RELEASE_RUNTIME_PROTOCOL_INVALID",
+                "运行时验证结果无效",
+            ));
+        }
+        Ok(RuntimeVerifyResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            record_version: request.expected_record_version,
+            release_id: request.release_id,
+            runtime_verified: true,
+            listeners: data.get("listeners").cloned().unwrap_or(Value::Null),
+        })
+    })
+}
+
+pub fn verify_base(
+    database: &Path,
+    request: BaseVerifyRequest,
+) -> CommandResult<BaseVerifyResponse> {
+    validate_target(&request.target)?;
+    if request.schema_version != 1 || !valid_id(&request.release_id) {
+        return Err(error("CREATE_RELEASE_INPUT_INVALID", "基础验证请求无效"));
+    }
+    let connection = ConnectionRequest {
+        schema_version: request.schema_version,
+        request_id: request.request_id.clone(),
+        server_id: request.target.server_id.clone(),
+        expected_record_version: request.expected_record_version,
+    };
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "Release 目标主机不一致"));
+        }
+        let data = execute(
+            session,
+            BASE_VERIFY,
+            &json!({"releaseId":request.release_id}),
+            60,
+        )?;
+        if data.get("releaseId").and_then(Value::as_str) != Some(request.release_id.as_str())
+            || data.get("verified") != Some(&Value::Bool(true))
+        {
+            return Err(error("CREATE_RELEASE_PROTOCOL_INVALID", "基础验证结果无效"));
+        }
+        Ok(BaseVerifyResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            record_version: request.expected_record_version,
+            release_id: request.release_id,
+            verified: true,
+        })
+    })
+}
+
+fn validate_delete_request(
+    schema_version: u32,
+    target: &crate::instance_creation::HostTarget,
+    release_id: &str,
+) -> CommandResult<()> {
+    validate_target(target)?;
+    if schema_version != 1 || !valid_id(release_id) {
+        return Err(error(
+            "RELEASE_DELETE_INPUT_INVALID",
+            "Release 删除请求无效",
+        ));
+    }
+    Ok(())
+}
+
+pub fn preview_delete(
+    database: &Path,
+    request: ReleaseDeletePreviewRequest,
+) -> CommandResult<ReleaseDeletePreviewResponse> {
+    validate_delete_request(request.schema_version, &request.target, &request.release_id)?;
+    let connection = ConnectionRequest {
+        schema_version: request.schema_version,
+        request_id: request.request_id.clone(),
+        server_id: request.target.server_id.clone(),
+        expected_record_version: request.expected_record_version,
+    };
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "Release 目标主机不一致"));
+        }
+        let data = execute(
+            session,
+            DELETE_RELEASE,
+            &json!({"action":"preview","hostId":request.target.host_id,"releaseId":request.release_id}),
+            30,
+        )?;
+        let allowed = data
+            .get("allowed")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                error(
+                    "RELEASE_DELETE_PROTOCOL_INVALID",
+                    "Release 删除预览缺少 allowed",
+                )
+            })?;
+        let release_id = data
+            .get("releaseId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "RELEASE_DELETE_PROTOCOL_INVALID",
+                    "Release 删除预览缺少身份",
+                )
+            })?;
+        let dst_build = data
+            .get("dstBuild")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "RELEASE_DELETE_PROTOCOL_INVALID",
+                    "Release 删除预览缺少版本",
+                )
+            })?;
+        let image_digest = data
+            .get("imageDigest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "RELEASE_DELETE_PROTOCOL_INVALID",
+                    "Release 删除预览缺少镜像摘要",
+                )
+            })?;
+        let string_list = |field: &str| -> CommandResult<Vec<String>> {
+            serde_json::from_value(data.get(field).cloned().unwrap_or(Value::Null))
+                .map_err(|_| error("RELEASE_DELETE_PROTOCOL_INVALID", "Release 引用列表无效"))
+        };
+        if release_id != request.release_id || !image_digest.starts_with("sha256:") {
+            return Err(error(
+                "RELEASE_DELETE_PROTOCOL_INVALID",
+                "Release 删除预览身份不匹配",
+            ));
+        }
+        Ok(ReleaseDeletePreviewResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            release_id: release_id.to_owned(),
+            dst_build: dst_build.to_owned(),
+            image_digest: image_digest.to_owned(),
+            instance_references: string_list("instanceReferences")?,
+            task_references: string_list("taskReferences")?,
+            container_references: string_list("containerReferences")?,
+            shared_image: data
+                .get("sharedImage")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            allowed,
+            catalog_digest: data
+                .get("catalogDigest")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+    })
+}
+
+pub fn delete_release(
+    database: &Path,
+    request: ReleaseDeleteRequest,
+) -> CommandResult<ReleaseDeleteResponse> {
+    validate_delete_request(request.schema_version, &request.target, &request.release_id)?;
+    if !request.catalog_digest.starts_with("sha256:") || request.typed_name.trim().is_empty() {
+        return Err(error(
+            "RELEASE_DELETE_INPUT_INVALID",
+            "Release 删除确认无效",
+        ));
+    }
+    let connection = ConnectionRequest {
+        schema_version: request.schema_version,
+        request_id: request.request_id.clone(),
+        server_id: request.target.server_id.clone(),
+        expected_record_version: request.expected_record_version,
+    };
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "Release 目标主机不一致"));
+        }
+        let data = execute(
+            session,
+            DELETE_RELEASE,
+            &json!({
+                "action":"delete", "hostId":request.target.host_id, "releaseId":request.release_id,
+                "catalogDigest":request.catalog_digest, "typedName":request.typed_name
+            }),
+            90,
+        )?;
+        if data.get("releaseId").and_then(Value::as_str) != Some(request.release_id.as_str()) {
+            return Err(error(
+                "RELEASE_DELETE_PROTOCOL_INVALID",
+                "Release 删除结果身份无效",
+            ));
+        }
+        Ok(ReleaseDeleteResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            release_id: request.release_id,
+            image_removed: data
+                .get("imageRemoved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            image_shared: data
+                .get("imageShared")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            staging_removed: data
+                .get("stagingRemoved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_error;
+
+    #[test]
+    fn runtime_rejection_codes_have_actionable_errors() {
+        let cases = [
+            (
+                "CREATE_RELEASE_NOT_VERIFIED",
+                "CREATE_RELEASE_NOT_VERIFIED",
+                "基础镜像验证",
+            ),
+            (
+                "CREATE_RELEASE_METADATA_INVALID",
+                "CREATE_RELEASE_METADATA_INVALID",
+                "metadata",
+            ),
+            (
+                "CREATE_RELEASE_BINARY_CHECK_FAILED",
+                "CREATE_RELEASE_BINARY_CHECK_FAILED",
+                "不可执行或缺少动态库",
+            ),
+            (
+                "CREATE_DOCKER_UNAVAILABLE",
+                "CREATE_DOCKER_UNAVAILABLE",
+                "Docker CLI",
+            ),
+            (
+                "RELEASE_RUNTIME_DOCKER_TIMEOUT",
+                "RELEASE_RUNTIME_DOCKER_TIMEOUT",
+                "超时",
+            ),
+            (
+                "RELEASE_RUNTIME_CHECK_FAILED",
+                "RELEASE_RUNTIME_VERIFY_FAILED",
+                "未完成",
+            ),
+        ];
+
+        for (remote_code, expected_code, message_fragment) in cases {
+            let error = remote_error(remote_code);
+            assert_eq!(error.code, expected_code);
+            assert!(error.message.contains(message_fragment));
+        }
+    }
 }

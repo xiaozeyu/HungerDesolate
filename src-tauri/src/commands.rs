@@ -373,6 +373,20 @@ pub async fn get_instance_create_status(
 }
 
 #[tauri::command]
+pub async fn cleanup_orphan_instance(
+    state: State<'_, AppState>,
+    request: crate::instance_cleanup::Request,
+) -> CommandResult<crate::instance_cleanup::Response> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "cleanupOrphanInstance",
+        safe_request_id(&request.request_id),
+        move || crate::instance_cleanup::cleanup(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn list_instance_releases(
     state: State<'_, AppState>,
     request: crate::ssh_dto::ConnectionRequest,
@@ -410,6 +424,90 @@ pub async fn import_instance_release(
         "importInstanceRelease",
         safe_request_id(&request.request_id),
         move || crate::release_import::import(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn verify_instance_release_runtime(
+    state: State<'_, AppState>,
+    request: crate::release_import::RuntimeVerifyRequest,
+) -> CommandResult<crate::release_import::RuntimeVerifyResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "verifyInstanceReleaseRuntime",
+        safe_request_id(&request.request_id),
+        move || crate::release_import::verify_runtime(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn verify_instance_release_base(
+    state: State<'_, AppState>,
+    request: crate::release_import::BaseVerifyRequest,
+) -> CommandResult<crate::release_import::BaseVerifyResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "verifyInstanceReleaseBase",
+        safe_request_id(&request.request_id),
+        move || crate::release_import::verify_base(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_instance_release_delete(
+    state: State<'_, AppState>,
+    request: crate::release_import::ReleaseDeletePreviewRequest,
+) -> CommandResult<crate::release_import::ReleaseDeletePreviewResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "previewInstanceReleaseDelete",
+        safe_request_id(&request.request_id),
+        move || crate::release_import::preview_delete(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_instance_release(
+    state: State<'_, AppState>,
+    request: crate::release_import::ReleaseDeleteRequest,
+) -> CommandResult<crate::release_import::ReleaseDeleteResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "deleteInstanceRelease",
+        safe_request_id(&request.request_id),
+        move || crate::release_import::delete_release(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn build_dst_image(
+    state: State<'_, AppState>,
+    request: crate::image_build::BuildImageRequest,
+) -> CommandResult<crate::image_build::BuildImageResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "buildDstImage",
+        safe_request_id(&request.request_id),
+        move || crate::image_build::build_dst_image(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_build_status(
+    state: State<'_, AppState>,
+    request: crate::image_build::GetBuildStatusRequest,
+) -> CommandResult<crate::image_build::GetBuildStatusResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getBuildStatus",
+        safe_request_id(&request.request_id),
+        move || crate::image_build::get_build_status(&path, request),
     )
     .await
 }

@@ -12,14 +12,20 @@ SPEC = importlib.util.spec_from_file_location("release_prepare", PROJECT / "remo
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 HOST = "11111111-1111-4111-8111-111111111111"
-RELEASE = {"releaseId": "22222222-2222-4222-8222-222222222222", "verified": True}
+RELEASE = {"releaseId": "22222222-2222-4222-8222-222222222222", "platform": "linux/amd64",
+           "image": "hungerdesolate/dst-runtime", "imageDigest": "sha256:" + "a" * 64,
+           "dstBuild": "build-1", "artifactDigest": "sha256:" + "b" * 64,
+           "scriptVersion": "scripts-1", "verified": True, "runtimeVerified": False,
+           "commands": {"master": ["/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64", "master"],
+                        "caves": ["/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64", "caves"]}}
 
 
 class PrepareTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="release-prepare-")
         root = Path(self.temp.name) / "famine-hub"
-        (root / "releases" / "staging").mkdir(parents=True, mode=0o700)
+        (root / "staging").mkdir(parents=True, mode=0o700)
+        (root / "releases").mkdir(mode=0o700)
         (root / "host.json").write_text(json.dumps({"schemaVersion": 1, "hostId": HOST}))
         (root / "host.json").chmod(0o600)
         self.root = root
@@ -27,7 +33,7 @@ class PrepareTests(unittest.TestCase):
         def root_owned(info):
             values = list(info); values[4] = 0
             return os.stat_result(values)
-        self.patches = [patch.object(MODULE, "ROOT", root), patch.object(MODULE, "CATALOG", root / "releases" / "catalog.json"), patch.object(MODULE, "STAGING", root / "releases" / "staging"), patch.object(MODULE.os, "geteuid", return_value=0), patch.object(Path, "lstat", lambda path: root_owned(original_lstat(path))), patch.object(MODULE.os, "fstat", lambda fd: root_owned(original_fstat(fd)))]
+        self.patches = [patch.object(MODULE, "ROOT", root), patch.object(MODULE, "CATALOG", root / "releases" / "catalog.json"), patch.object(MODULE, "STAGING", root / "staging"), patch.object(MODULE.os, "geteuid", return_value=0), patch.object(Path, "lstat", lambda path: root_owned(original_lstat(path))), patch.object(MODULE.os, "fstat", lambda fd: root_owned(original_fstat(fd)))]
         for item in self.patches: item.start()
 
     def tearDown(self):
@@ -45,15 +51,19 @@ class PrepareTests(unittest.TestCase):
             MODULE.inspect({"hostId": HOST, "releaseId": RELEASE["releaseId"], "catalogDigest": "sha256:" + "a" * 64})
         self.assertEqual(str(failure.exception), "RELEASE_CATALOG_CHANGED")
 
-    def test_verified_release_requires_artifact_staging(self):
+    def test_verified_release_requires_its_build_metadata_staging(self):
         catalog = {"schemaVersion": 1, "hostId": HOST, "releases": [RELEASE]}
         MODULE.CATALOG.write_text(json.dumps(catalog)); MODULE.CATALOG.chmod(0o600)
         digest = MODULE.catalog_digest(catalog)
         result = MODULE.inspect({"hostId": HOST, "releaseId": RELEASE["releaseId"], "catalogDigest": digest})
-        self.assertEqual(result["blockers"], ["CREATE_RELEASE_ARTIFACT_REQUIRED"])
-        (MODULE.STAGING / RELEASE["releaseId"]).mkdir(mode=0o700)
+        self.assertEqual(result["blockers"], ["CREATE_RELEASE_STAGING_MISSING"])
+        staging = MODULE.STAGING / RELEASE["releaseId"]
+        staging.mkdir(mode=0o700)
+        (staging / "release-metadata.json").write_text(json.dumps({"schemaVersion": 1, **RELEASE}))
+        (staging / "release-metadata.json").chmod(0o600)
         ready = MODULE.inspect({"hostId": HOST, "releaseId": RELEASE["releaseId"], "catalogDigest": digest})
         self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["artifactPath"], "/var/lib/famine-hub/staging/" + RELEASE["releaseId"])
 
 
 if __name__ == "__main__":

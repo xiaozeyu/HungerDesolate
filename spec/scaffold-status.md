@@ -14,7 +14,7 @@
 
 实际命令包含本地连接 CRUD，以及下文列出的 SSH 查询、信任、凭据和只读登录验证；不插入演示主机。元数据保存不自动连接 SSH，普通 DTO 不包含凭据。
 
-界面预览必须显式开启，使用内存 fixture，地址为文档专用示例网段；切换主机清除选中实例，冷启动或直接详情地址回主机/列表。所有远端操作按钮禁用；真实连接信息的新增、编辑、删除可用。演示数据不写数据库。
+主机列表不再提供演示界面入口；真实连接信息的新增、编辑、删除从真实主机流程进入。自动化 fixture 只用于测试，不写数据库，也不作为产品状态展示。
 
 ## 后续依赖
 
@@ -101,7 +101,7 @@ S0 与 S2–S4 尚未全部完成；S2 已实现连接、只读身份检查和 B
 ## 2026-10-19：持久创建任务基础设施
 
 - 新增 `remote-scripts/actions/instance-create-task.py` 和 `remote-scripts/actions/instance-create-worker.py`：持久化创建 request、admission、status、journal，使用 systemd transient unit 脱离 SSH，按 sequence 更新状态，并在 worker 消失后对账为 `interrupted`。
-- 当前 worker 在 `download` 阶段没有 release 时返回 `CREATE_RELEASE_REQUIRED`；runtime 未验证时在 `publish` 返回 `CREATE_DOCKER_RUNTIME_REQUIRED`，保留实例/端口现场和恢复动作。创建 command 已注册，但不写世界配置、不写 Token。
+- 当前 worker 在 `download` 阶段要求基础验证 `verified=true` 的 release；`runtimeVerified` 是额外运行证据，不再阻断创建。创建 command 已注册，但不写世界配置、不写 Token。
 - 隔离测试覆盖任务接纳、同 operation 重放、输入复用冲突、部署门禁失败和进程消失对账：`python3 scripts/test-instance-create-task.py`。
 
 ## 2026-10-19：实例目录与初始 manifest
@@ -112,25 +112,25 @@ S0 与 S2–S4 尚未全部完成；S2 已实现连接、只读身份检查和 B
 ## 2026-10-19：release 校验与 Compose staging
 
 - 新增 `remote-scripts/actions/instance-release.py`：校验固定 `linux/amd64` release、镜像/产物摘要和启动命令，并生成 Master/Caves digest pin Compose。
-- worker 只把合格 release 的 Compose 写入 `staging/<taskId>`，通过 config 后生成资源计划并在 `publish` 返回 `CREATE_DOCKER_RUNTIME_REQUIRED`；没有 release 时返回 `CREATE_RELEASE_REQUIRED`，不会覆盖活动 Compose 或启动 Docker。
-- staging Compose 通过受控 `docker compose config --quiet` 后写入资源计划；config 失败保留 staging 并返回 `CREATE_COMPOSE_CONFIG_FAILED`，config 成功后在 `publish` 以 `CREATE_DOCKER_RUNTIME_REQUIRED` 阻断，不创建容器。
+- worker 只把基础验证通过的 release 的 Compose 写入 `staging/<taskId>`；没有基础验证通过的 release 时返回 `CREATE_RELEASE_REQUIRED`，不会覆盖活动 Compose 或启动 Docker。
+- staging Compose 通过受控 `docker compose config --quiet` 后写入资源计划；config 失败保留 staging 并返回 `CREATE_COMPOSE_CONFIG_FAILED`，config 成功后创建带身份标签的网络和 `--no-start` 容器，再验证 labels、挂载和端口。
 - 测试入口：`python3 scripts/test-instance-release.py`；真实 release 获取、Compose config、网络/卷、容器和联网仍待阶段 0。
 
 ## 2026-10-19：Docker 资源创建内核
 
-- 新增 `remote-scripts/actions/instance-docker.py`：runtimeVerified release 才能创建带 host/instance/schema 标签的独立 bridge network，并执行 `docker compose create --no-start`。
-- 默认任务因 runtime 尚未经过阶段 0 验证继续返回 `CREATE_DOCKER_RUNTIME_REQUIRED`；runtimeVerified 路径已覆盖 network/容器创建、labels/挂载/端口验证和 runtime/active-release 发布，不会自动启动游戏。隔离测试入口：`python3 scripts/test-instance-docker.py`。
+- 新增 `remote-scripts/actions/instance-docker.py`：基础验证通过的 release 才能创建带 host/instance/schema 标签的独立 bridge network，并执行 `docker compose create --no-start`。
+- 创建路径覆盖 network/容器创建、labels/挂载/端口验证和 runtime/active-release 发布，不会自动启动游戏；Klei 配置隔离运行验证为可选额外证据。隔离测试入口：`python3 scripts/test-instance-docker.py`。
 
 ## 2026-10-19：容器创建与 runtime 验证
 
-- runtimeVerified release 会创建或复用带身份标签的 network，执行 `docker compose create --no-start`，验证容器 labels、挂载源和端口发布。
+- 基础验证通过的 release 会创建或复用带身份标签的 network，执行 `docker compose create --no-start`，验证容器 labels、挂载源和端口发布。
 - 验证通过后发布实例 `compose.yaml`、`active-release.json`、`runtime.json`，创建任务进入 succeeded；不写世界配置、不写 Token、不启动游戏。
 - 下一阶段是容器环境就绪后的世界配置、Token 和启动任务。
 
 ## 2026-10-19：DST release catalog 只读发现
 
-- 新增 `list_instance_releases` command 和 `probes/instance-release-catalog.py`：只读验证远端 hostId、releaseId、Linux amd64、镜像/产物摘要、启动命令和 runtimeVerified 标记。
-- 缺少 catalog 或没有 verified/runtimeVerified release 时返回 `CREATE_RELEASE_REQUIRED`；不会下载镜像、覆盖 catalog 或伪造可用 release。
+- 新增 `list_instance_releases` command 和 `probes/instance-release-catalog.py`：只读验证远端 hostId、releaseId、Linux amd64、镜像/产物摘要、启动命令和验证标记。
+- 缺少 catalog 或没有 `verified=true` release 时返回 `CREATE_RELEASE_REQUIRED`；不会下载镜像、覆盖 catalog 或伪造可用 release。
 - 测试入口：`python3 scripts/test-instance-release-catalog.py`。
 
 ## 2026-10-19：release 准备前置校验
@@ -142,7 +142,7 @@ S0 与 S2–S4 尚未全部完成；S2 已实现连接、只读身份检查和 B
 ## 2026-10-19：release 导入任务与前端入口
 
 - 新增 `preview_instance_release` 和 `import_instance_release` command；导入任务校验 catalogDigest、release metadata、staging artifact 和 runtime evidence，成功后原子更新 catalog 的 `runtimeVerified`。
-- 创建窗口显示 release 状态；存在 verified 但未 runtimeVerified 的 release 时可点击“验证 release”，成功后刷新 catalog，再允许创建容器。
+- DST Release 管理页提供基础验证与隔离运行时验证；新建专服窗口选择 `verified` 的 Release，并将 releaseId/catalogDigest 固定进创建请求。运行时验证状态只增加证据，不改变基础验证状态。
 - 导入流程不下载任意远程资源，不覆盖活动 release；没有 staging artifact 或 runtime evidence 时保留失败状态。
 
 ## 2026-10-19：前端创建任务集成

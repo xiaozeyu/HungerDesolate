@@ -248,6 +248,11 @@ def start(request, worker_source, runtime_source, release_source, docker_source)
         if (admitted.get("operationId") != operation_id or not valid_uuid(admitted.get("instanceId"))
                 or admitted.get("hostId") != request.get("hostId")):
             reject("CREATE_ADMISSION_INVALID")
+        release = admitted.get("release")
+        if (not isinstance(release, dict)
+                or release.get("releaseId") != request["input"].get("releaseId")
+                or release.get("verified") is not True):
+            reject("CREATE_RELEASE_REQUIRED")
         directory.mkdir(mode=0o700)
         request_record = {"schemaVersion": 1, "requestDigest": request_digest(request),
                           "operationId": operation_id, "planId": request.get("planId"),
@@ -255,6 +260,7 @@ def start(request, worker_source, runtime_source, release_source, docker_source)
                           "admission": admitted}
         write_json(directory / "request.json", request_record)
         write_json(directory / "admission.json", admitted)
+        write_json(directory / "release.json", release)
         write_json(directory / "status.json", initial_status(admitted))
         append_journal(directory, {"sequence": 1, "status": "queued", "stage": "queued", "at": now()})
         atomic_bytes(directory / "worker.py", worker_source.encode(), 0o700)

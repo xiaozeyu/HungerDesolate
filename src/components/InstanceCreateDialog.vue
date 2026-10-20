@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, toRef, watch } from "vue";
+import { computed, ref, toRef, watch } from "vue";
 import AppDialog from "./AppDialog.vue";
 import StatusLabel from "./StatusLabel.vue";
 import { useInstanceCreation } from "../composables/useInstanceCreation";
@@ -10,7 +10,7 @@ import type { ServerSummary, InstanceTarget } from "../types/contracts";
 const props=defineProps<{open:boolean;server:ServerSummary|null;registryRevision:number}>();
 const emit=defineEmits<{"update:open":[value:boolean];"creationSucceeded":[target:InstanceTarget]}>();
 const purposes={game:"游戏",steamAuth:"Steam 认证",steamMaster:"Steam 查询"};
-watch(()=>props.open,(open)=>{if(open){editPreview();} });
+const recoveryFeedback=ref("");
 function nextStep(){
   if(!fields.displayName.trim()){error.value={code:"INPUT_INVALID",message:"名称不能为空",recoverySteps:[],field:"displayName"};return;}
   if(!fields.autostart && fields.startAfterCreate){error.value={code:"INPUT_INVALID",message:"未自动启动时不能设置创建后启动",recoverySteps:[],field:"startAfterCreate"};return;}
@@ -19,41 +19,47 @@ function nextStep(){
 function edit(){editPreview();}
 const recoveryActions=computed(()=>task.value?creationTaskRecoveryActions(task.value):[]);
 function handleRecoveryAction(action:string){
-  console.warn("恢复动作尚未实现",action);
-  // TODO: 实现恢复动作：resumeCreate / cleanupCreate / inspectLogs
+  const feedback:Record<string,string>={
+    resumeCreate:"继续创建尚未接入，远端 staging 现场保持不变。",
+    cleanupCreate:"创建现场清理尚未接入，未删除或移动任何数据。",
+    inspectLogs:"任务日志接口尚未接入。当前任务状态和失败阶段显示在上方，详细错误与恢复步骤如下。",
+  };
+  recoveryFeedback.value=feedback[action]??"此恢复操作暂不可用，远端现场未更改。";
 }
-const {fields,result,task,releaseCatalog,releaseError,releaseReady,releasePreparing,prepareRelease,error,loading,creating,preview,create,refreshReleaseCatalog,edit:editPreview}=useInstanceCreation(computed(()=>props.server),computed(()=>props.registryRevision),toRef(props,"open"),(event,target)=>{if(event==="creationSucceeded"){emit("update:open",false);emit("creationSucceeded",target);}});
+const {fields,result,task,releaseReady,selectedReleaseId,releaseOptions,error,loading,creating,preview,create,refreshReleaseCatalog,edit:editPreview}=useInstanceCreation(computed(()=>props.server),computed(()=>props.registryRevision),toRef(props,"open"),(event,target)=>{if(event==="creationSucceeded"){emit("update:open",false);emit("creationSucceeded",target);}});
+
+watch(()=>props.open,(open)=>{
+  if(open){recoveryFeedback.value="";editPreview();return;}
+});
 </script>
 <template>
-  <AppDialog :open="open" :title="result ? '创建预览' : '新建专服（预览）'" @update:open="emit('update:open',$event)">
-    <div v-if="!result" class="creation-execution-gate"><StatusLabel tone="warning" label="仅预览"/><span>创建执行未开放，当前不会创建远端目录或容器</span></div>
-    <div v-if="!result" class="creation-release-state"><StatusLabel :tone="releaseReady()?'success':'warning'" :label="releaseReady()?'release 已准备':'release 未准备'"/><span>{{releaseReady()?`${releaseCatalog?.releases.filter(item=>item.verified&&item.runtimeVerified).length} 个可用 release`:'需先准备并验证 DST release'}}</span><button class="text-button" type="button" @click="refreshReleaseCatalog">重新检查</button><button v-if="!releaseReady() && releaseCatalog?.releases.some(item=>item.verified)" class="text-button" type="button" :disabled="releasePreparing" @click="prepareRelease">{{releasePreparing?'验证中…':'验证 release'}}</button></div>
+  <AppDialog :open="open" :title="result ? '创建预览' : '新建专服'" @update:open="emit('update:open',$event)">
+    <div v-if="!result && releaseReady()" class="creation-release-state"><StatusLabel tone="success" label="基础验证通过"/><span class="mono">DST {{releaseOptions().find(item=>item.releaseId===selectedReleaseId)?.dstBuild}}</span><button class="text-button" type="button" @click="refreshReleaseCatalog">重新检查</button></div>
     <form v-if="!result" id="instance-create-form" class="creation-form" @submit.prevent="nextStep">
-      <h3 class="creation-step-title">专服设置</h3>
-      <div class="form-grid">
-        <label class="creation-name">专服名称<input v-model="fields.displayName" autocomplete="off" placeholder="生存一服" required maxlength="128"/></label>
-        <div class="form-field"><span>启动策略</span><label class="creation-switch"><input v-model="fields.autostart" type="checkbox"/>主机启动时启动</label><label class="creation-switch"><input v-model="fields.startAfterCreate" type="checkbox" :disabled="!fields.autostart"/>创建后启动</label></div>
-        <div class="form-field"><span>容器拓扑</span><label class="creation-switch"><input v-model="fields.cavesEnabled" type="checkbox"/>创建洞穴容器</label></div>
-        <div class="form-field"><span>端口策略</span><div class="creation-static-value">自动分配（固定公网）</div></div>
+      <div class="creation-form-heading"><span class="eyebrow">专服设置</span><h3>配置基础运行方式</h3></div>
+      <div class="creation-settings-grid">
+        <label class="creation-field creation-field-wide">专服名称<input v-model="fields.displayName" autocomplete="off" placeholder="生存一服" required maxlength="128"/></label>
+        <fieldset class="creation-option-group"><legend>启动策略</legend><label class="creation-switch"><input v-model="fields.autostart" type="checkbox"/>主机启动时启动</label><label class="creation-switch"><input v-model="fields.startAfterCreate" type="checkbox" :disabled="!fields.autostart"/>创建后启动</label></fieldset>
+        <fieldset class="creation-option-group"><legend>是否启用洞穴</legend><label class="creation-switch"><input v-model="fields.cavesEnabled" type="checkbox"/>启用 Caves 分片</label></fieldset>
       </div>
     </form>
     <template v-else>
-      <div class="creation-preview-state"><StatusLabel tone="warning" label="仅预览"/><StatusLabel tone="warning" label="端口未预留"/><span>创建执行未开放 · {{new Date(result.capturedAtUnixSeconds*1000).toLocaleString()}}</span></div>
+      <div class="creation-preview-heading"><div><span class="eyebrow">创建预览</span><h3>{{result.input.displayName}}</h3></div><div class="creation-preview-badges"><StatusLabel tone="warning" label="端口未预留"/><span class="muted-text">{{new Date(result.capturedAtUnixSeconds*1000).toLocaleString()}}</span></div></div>
       <div v-if="result.blockers.length" class="environment-error" role="alert"><ul><li v-for="code in result.blockers" :key="code">{{creationBlockerLabel(code)}}</li></ul></div>
-      <dl class="environment-facts creation-facts">
-        <div><dt>主机</dt><dd>{{server?.displayName}}</dd></div>
-        <div><dt>专服名称</dt><dd>{{result.input.displayName}}</dd></div>
-        <div><dt>启动策略</dt><dd>{{result.input.autostart?'自动启动':'手动启动'}} / {{result.input.startAfterCreate?'创建后启动':'创建后停止'}}</dd></div>
-        <div><dt>容器拓扑</dt><dd>{{result.input.cavesEnabled?'Master + Caves':'Master'}}</dd></div>
-        <div><dt>可用磁盘</dt><dd>{{formatBytes(result.availableBytes)}}</dd></div>
-        <div><dt>Docker / Compose</dt><dd>{{result.dockerVersion ?? '未知'}} / {{result.composeVersion ?? '未知'}}</dd></div>
-        <div><dt>建议目录</dt><dd class="mono">{{result.storagePath}}</dd></div>
-        <div><dt>Compose 项目</dt><dd class="mono">{{result.composeProject}}</dd></div>
-      </dl>
-      <div v-if="result.ports.length" class="table-wrap creation-ports"><table><thead><tr><th>分片</th><th>用途</th><th>主机端口</th><th>容器端口</th></tr></thead><tbody><tr v-for="port in result.ports" :key="`${port.shard}:${port.purpose}`"><td>{{port.shard==='master'?'主世界':'洞穴'}}</td><td>{{purposes[port.purpose]}}</td><td class="mono">{{port.hostPort}}/udp</td><td class="mono">{{port.containerPort}}/udp</td></tr></tbody></table></div>
+      <div class="creation-preview-grid">
+        <section class="creation-panel creation-panel-wide"><h4>目标摘要</h4><dl class="creation-facts"><div><dt>主机</dt><dd>{{server?.displayName ?? '—'}}</dd></div><div><dt>DST Release</dt><dd class="mono">{{releaseOptions().find(item=>item.releaseId===selectedReleaseId)?.dstBuild ?? '—'}}</dd></div><div><dt>启动策略</dt><dd>{{result.input.autostart?'主机启动时启动':'手动启动'}} · {{result.input.startAfterCreate?'创建后启动':'创建后停止'}}</dd></div><div><dt>洞穴分片</dt><dd>{{result.input.cavesEnabled?'启用':'关闭'}}</dd></div></dl></section>
+        <section class="creation-panel"><h4>资源计划</h4><dl class="creation-facts"><div><dt>可用磁盘</dt><dd>{{formatBytes(result.availableBytes)}}</dd></div><div><dt>Docker / Compose</dt><dd>{{result.dockerVersion ?? '未知'}} / {{result.composeVersion ?? '未知'}}</dd></div><div><dt>存储目录</dt><dd class="mono">{{result.storagePath}}</dd></div><div><dt>Compose 项目</dt><dd class="mono">{{result.composeProject}}</dd></div></dl></section>
+        <section v-if="result.ports.length" class="creation-panel creation-panel-wide"><div class="creation-panel-heading"><h4>端口计划</h4><span class="muted-text">自动分配 · 同号发布</span></div><div class="table-wrap creation-ports"><table><thead><tr><th>分片</th><th>用途</th><th>UDP 端口</th></tr></thead><tbody><tr v-for="port in result.ports" :key="`${port.shard}:${port.purpose}`"><td>{{port.shard==='master'?'主世界':'洞穴'}}</td><td>{{purposes[port.purpose]}}</td><td class="mono">{{port.hostPort}}</td></tr></tbody></table></div></section>
+      </div>
       <div v-if="task" class="creation-task-state" :class="task.status"><StatusLabel :tone="task.status==='failed'?'danger':task.status==='succeeded'?'success':'warning'" :label="task.status==='failed'?'创建失败':task.status==='succeeded'?'容器已验证':'创建容器中'"/><span>{{task.status==='failed'?creationTaskErrorLabel(task.error?.code):task.status==='succeeded'?'容器环境已完成验证，可进入世界配置':creationTaskStageLabel(task.stage)}}</span></div>
       <div v-if="task && task.status==='failed' && recoveryActions.length" class="creation-recovery-actions"><strong>恢复选项：</strong><button v-for="action in recoveryActions" :key="action.action" class="text-button" @click="handleRecoveryAction(action.action)">{{action.label}}</button></div>
-      <div v-if="releaseError" class="environment-error" role="alert">{{releaseError.message}}</div>
+      <div v-if="recoveryFeedback" class="environment-error" role="status" aria-live="polite">
+        <p>{{recoveryFeedback}}</p>
+        <template v-if="task?.error">
+          <p v-if="task.error.message">{{task.error.message}}</p>
+          <ul v-if="task.error.recoverySteps?.length"><li v-for="step in task.error.recoverySteps" :key="step">{{step}}</li></ul>
+        </template>
+      </div>
     </template>
     <p v-if="error" class="environment-error" role="alert">{{error.message}}</p>
     <template #footer>

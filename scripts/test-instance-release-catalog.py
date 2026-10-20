@@ -58,8 +58,14 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result["blockers"], [])
         self.assertEqual(MODULE.CATALOG.read_bytes(), before)
 
-    def test_unverified_release_does_not_clear_blocker(self):
+    def test_base_verified_release_clears_blocker_without_runtime_smoke_test(self):
         release = dict(RELEASE, runtimeVerified=False)
+        MODULE.CATALOG.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "releases": [release]}))
+        MODULE.CATALOG.chmod(0o600)
+        self.assertEqual(MODULE.inspect({"hostId": HOST})["blockers"], [])
+
+    def test_unverified_release_does_not_clear_blocker(self):
+        release = dict(RELEASE, verified=False, runtimeVerified=False)
         MODULE.CATALOG.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "releases": [release]}))
         MODULE.CATALOG.chmod(0o600)
         self.assertEqual(MODULE.inspect({"hostId": HOST})["blockers"], ["CREATE_RELEASE_REQUIRED"])

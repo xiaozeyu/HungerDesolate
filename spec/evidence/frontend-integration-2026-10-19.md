@@ -41,7 +41,7 @@
   ↓
 显示端口计划与阻断
   ↓
-点击"验证 release"（如需） → prepareRelease → importInstanceRelease
+在 DST Release 管理页完成镜像与运行时验证；创建窗口只选择已验证 Release
   ↓
 点击"创建容器" → createInstance
   ↓
@@ -57,7 +57,7 @@ succeeded + verification=passed → 关闭对话框 → 刷新列表
   → 显示阻断项，禁用"创建容器"
 
 Release 未准备
-  → 显示警告，提供"验证 release"按钮
+  → 显示未就绪状态，不提供创建窗口内验证操作
 
 创建失败（CREATE_RELEASE_REQUIRED / CREATE_DOCKER_RUNTIME_REQUIRED）
   → 显示错误消息，保留创建现场

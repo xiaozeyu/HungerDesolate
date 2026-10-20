@@ -5,6 +5,8 @@ mod dto;
 mod environment;
 mod environment_dto;
 mod host_initialization;
+mod image_build;
+mod instance_cleanup;
 mod instance_creation;
 mod instance_dto;
 mod instance_task;
@@ -63,9 +65,16 @@ pub fn run() -> tauri::Result<()> {
             commands::preview_instance_create,
             commands::create_instance,
             commands::get_instance_create_status,
+            commands::cleanup_orphan_instance,
             commands::list_instance_releases,
             commands::preview_instance_release,
             commands::import_instance_release,
+            commands::verify_instance_release_runtime,
+            commands::verify_instance_release_base,
+            commands::preview_instance_release_delete,
+            commands::delete_instance_release,
+            commands::build_dst_image,
+            commands::get_build_status,
         ])
         .run(tauri::generate_context!())
 }

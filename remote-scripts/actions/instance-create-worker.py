@@ -32,8 +32,7 @@ def captured_at():
 
 def resource_plan(manifest, release):
     project = manifest["composeProject"]
-    mounts = ["config", "data/Master", "dst/releases/" + release["releaseId"],
-              "mods/releases/" + release["releaseId"] + "/Master"]
+    mounts = ["config", "data/Master", "mods/releases/" + release["releaseId"] + "/Master"]
     if manifest.get("cavesEnabled"):
         mounts.extend(["data/Caves", "mods/releases/" + release["releaseId"] + "/Caves"])
     return {"schemaVersion": 1, "instanceId": manifest["instanceId"],
@@ -100,7 +99,7 @@ def prepare_instance(task_dir, admission, request_record, controller):
     settings = request_record["input"]
     caves = settings["cavesEnabled"]
     directories = [
-        "config", "desired", "desired-secrets", "dst", "dst/releases",
+        "config", "desired", "desired-secrets",
         "mods", "mods/releases", "data", "data/Master", "logs", "staging",
         "staging/" + task_dir.name, "tasks", "tasks/" + task_dir.name, "locks",
     ]
@@ -192,12 +191,6 @@ def main(task_path):
                       result=controller["recovery_result"](admission["hostId"], admission["instanceId"]))
         return 1
     update_status(task_dir, "running", "publish", last_completed="stagingVerify", cancel_allowed=False)
-    if not release.get("runtimeVerified"):
-        update_status(task_dir, "failed", "publish", last_completed="stagingVerify",
-                      error=task_error(task_id, target, "CREATE_DOCKER_RUNTIME_REQUIRED", "publish",
-                                       "Compose 结构已校验，但真实 Docker runtime 和游戏容器仍未验收"),
-                      result=controller["recovery_result"](admission["hostId"], admission["instanceId"]))
-        return 1
     try:
         network = docker_module["ensure_network"](manifest_value["composeProject"], admission["hostId"], admission["instanceId"])
         containers = docker_module["create_containers"](str(staging / "compose.yaml"), manifest_value["composeProject"], str(controller["ROOT"]))

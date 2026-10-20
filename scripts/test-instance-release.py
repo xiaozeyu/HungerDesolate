@@ -46,6 +46,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("master:", result)
         self.assertIn("caves:", result)
         self.assertIn("11000:11000/udp", result)
+        self.assertNotIn("/srv/dst:ro", result)
         self.assertIn("depends_on:", result)
         self.assertNotIn("token", result.lower())
         self.assertNotIn("password", result.lower())

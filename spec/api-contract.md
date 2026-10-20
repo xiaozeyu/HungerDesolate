@@ -529,13 +529,17 @@ interface InstanceCreationResult {
 | `CREATE_RELEASE_NOT_VERIFIED` | release 未通过 verified 标记 | 同上 |
 | `CREATE_RELEASE_NOT_RUNTIME_VERIFIED` | release 未通过 runtime 验证 | 提供"验证 release"入口 |
 | `CREATE_COMPOSE_CONFIG_FAILED` | docker compose config 校验失败 | 查看日志、清理现场 |
-| `CREATE_DOCKER_RUNTIME_REQUIRED` | Docker 资源创建前置门禁 | 阻断直到 runtime 验证通过 |
+| `CREATE_DOCKER_RUNTIME_REQUIRED` | 旧任务的 Docker runtime 前置门禁错误 | 新任务以 `verified=true` 基础验证放行；此码仅用于识别旧任务 |
 | `CREATE_NETWORK_FAILED` | Docker network 创建失败 | 查看日志、重试或清理 |
 | `CREATE_CONTAINER_FAILED` | docker compose create 失败 | 查看日志、重试或清理 |
 | `CREATE_CONTAINER_VERIFICATION_FAILED` | 容器 labels/挂载/端口验证失败 | 查看日志、清理现场 |
 | `CREATE_DIRECTORY_CONFLICT` | 实例目录已存在 | 清理现场或恢复 |
 | `CREATE_MANIFEST_CONFLICT` | manifest 已存在且内容不符 | 清理现场 |
 | `CREATE_PORT_CONFLICT` | 端口在执行时被占用 | 重新预览、清理现场 |
+
+无容器专服提供专用 `cleanup_orphan_instance` 确认命令：远端 registry lock 内重查任务、受管容器和网络后才允许移出活动列表并释放端口；空目录会移除，目录内有文件时整体移入 `retired/<instanceId>` 保留。它不执行备份，也不替代正常运行实例的 `preview_instance_delete/delete_instance`。
+
+Release 删除通过 `preview_instance_release_delete/delete_instance_release` 执行。删除重查 catalog digest、实例/manifest、未结束任务、容器引用及共享镜像；只有无引用 Release 可移除，用户须输入 DST build 确认。镜像只按该 Release 的固定 digest 删除，共用 digest 不删除。
 | `CREATE_REGISTRY_CHANGED` | 注册表在执行期间变化 | 重新预览 |
 | `CREATE_ADMISSION_FAILED` | 接纳阶段失败（注册锁内检查） | 查看错误详情、重新预览 |
 

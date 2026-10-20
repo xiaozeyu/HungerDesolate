@@ -2,7 +2,7 @@
 
 Windows/macOS 桌面控制台，通过 SSH/SFTP 管理 Linux 上的独立 DST Docker Compose 专服。
 
-当前版本 `0.1.0` 已具备项目骨架与本地连接管理。桌面环境可以添加、编辑、删除连接元数据；点击“查看界面预览”可使用隔离的示例数据查看主机 → 专服列表 → 专服详情两层导航。预览不连接远端、不下载游戏、不执行写入。
+当前版本 `0.1.0` 已具备项目骨架与本地连接管理。桌面环境可以添加、编辑、删除连接元数据；远端流程均从真实主机连接进入，不使用演示主机入口。
 
 SSH 连接设置已接入指纹扫描与确认、密码/私钥保存到系统凭据库、只读登录验证和 hostId 发现。“主机环境”已支持真实系统、Docker/Compose、资源和目录权限检查。已支持管理目录初始化与 Ubuntu 26.04 root SSH 的 Docker/Compose 安装。用户已确认安装主路径通过；真实 DST 部署仍待阶段 0 验证。
 
@@ -22,7 +22,7 @@ npm ci
 npm run dev
 ```
 
-浏览器访问本地 `http://127.0.0.1:1421`。首次显示空主机列表，点击“查看界面预览”即可检查导航和示例页面。
+浏览器访问本地 `http://127.0.0.1:1421`。首次显示空主机列表；远端功能需要在桌面环境中添加并连接真实主机。
 
 ```bash
 npm run desktop:dev
@@ -52,7 +52,7 @@ npm run desktop:build
 | `src/api` | Tauri 调用入口；远端未实现功能显式返回不可用 |
 | `src/context`、`src/composables` | 活动实例代次、列表选择授权、请求隔离与任务事件 |
 | `src/lib` | 生产调用的身份/请求/事件合并规则及回归测试 |
-| `src/fixtures` | 仅明确开启预览时使用的演示数据 |
+| `src/fixtures` | 自动化测试 fixture，不作为产品入口数据 |
 | `src-tauri/src` | Rust command、DTO、本地 SQLite 初始化、连接 CRUD 与输入校验 |
 | `src-tauri/migrations` | 追加式数据库迁移 |
 | `remote-scripts`、`docker` | 只读环境探测脚本；部署编排和生产镜像待实现 |
@@ -106,8 +106,57 @@ python3 scripts/test-local-ssh.py
 
 隔离探测测试：`python3 scripts/test-host-environment.py`，使用临时目录、命令 fixture 和 Unix socket，不操作真实 Docker。`python3 scripts/test-local-ssh.py` 同时验证脚本通过已认证 SSH 通道执行。
 
-## 新建专服预览
+## 新建专服与 DST Release
 
-专服列表读取成功后，点击“新建专服”，填写专服名称、启动策略、自动端口策略，再填写世界模式、人数、洞穴、PVP、说明和 Token。网络路线固定为公网。点击“预览”后，桌面后端真实核对远端注册表、已有端口保留、IPv4/IPv6 占用和 Docker 发布端口，展示建议目录与完整同号端口表。
+### 当前状态
 
-此功能只预览，不创建目录、不预留端口、不安装/启动专服，也不收集 Klei Token。阶段 0 游戏镜像和部署兼容性尚未验证时显示真实阻断；Docker 安装成功不等于游戏部署门禁通过。隔离测试：`python3 scripts/test-instance-create-preview.py`。
+专服列表读取成功后，点击”新建专服”，填写专服名称、启动策略、自动端口策略，再填写世界模式、人数、洞穴、PVP、说明和 Token。网络路线固定为公网。点击”预览”后，桌面后端真实核对远端注册表、已有端口保留、IPv4/IPv6 占用和 Docker 发布端口，展示建议目录与完整同号端口表。
+
+此功能只预览，不创建目录、不预留端口、不安装/启动专服，也不收集 Klei Token。隔离测试：`python3 scripts/test-instance-create-preview.py`。
+
+### DST Release 管理
+
+创建专服需要基础验证通过的 DST release（包含 DST Dedicated Server 的 Docker 镜像）。当前阶段需要手动构建和导入 release；Klei 配置 ZIP 只用于可选的隔离运行验证：
+
+**1. 构建 DST runtime 镜像**
+
+```bash
+cd docker/runtime
+./build.sh
+```
+
+脚本通过 SteamCMD 下载 DST 服务端，构建 Docker 镜像，并生成 release 元数据和 tar 包。
+
+**2. 传输到远端主机**
+
+```bash
+# 获取 release ID
+RELEASE_ID=$(jq -r '.releaseId' release-metadata.json)
+
+# 创建 staging 目录
+ssh user@host “sudo mkdir -p /var/lib/famine-hub/staging/${RELEASE_ID} && \
+               sudo chown $(whoami) /var/lib/famine-hub/staging/${RELEASE_ID}”
+
+# 传输文件
+scp release-metadata.json user@host:/var/lib/famine-hub/staging/${RELEASE_ID}/
+scp dst-runtime-*.tar user@host:/var/lib/famine-hub/staging/${RELEASE_ID}/artifact.tar
+
+# 加载镜像
+ssh user@host “cd /var/lib/famine-hub/staging/${RELEASE_ID} && sudo docker load -i artifact.tar”
+```
+
+**3. 在应用中导入**
+
+创建专服对话框会检测到 staging 中的 release 并提供导入选项。导入成功后，该 release 可用于创建新实例。
+
+详细步骤参见 [DST Release 准备指南](docs/dst-release-setup.md)。
+
+### 限制与未来计划
+
+当前阶段 0 游戏镜像和部署兼容性尚未验证。Docker 安装成功不等于游戏部署门禁通过。未来版本将支持：
+- 官方预构建镜像（无需本地构建）
+- 从容器仓库自动拉取
+- 版本更新通知
+- 一键更新流程
+
+完整实施状态见 [当前状态文档](docs/current-status.md)。

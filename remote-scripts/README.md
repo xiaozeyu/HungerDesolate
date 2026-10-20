@@ -28,6 +28,6 @@ Docker 安装预检只读 `/etc/os-release`、管理身份、dpkg/source 配置�
 
 `actions/instance-release.py` 负责校验固定 Linux amd64 release 和 digest pin Compose 渲染。worker 只把结果写入 `staging/<taskId>`，执行 `docker compose config --quiet` 并生成资源计划；随后在 `publish` 等待阶段 0 的真实产物和容器验证，不执行 `up` 或创建容器。测试入口为 `python3 scripts/test-instance-release.py`。
 
-`actions/instance-docker.py` 是 gated 资源创建与验证内核：只有 `runtimeVerified=true` 的 release 才能创建带身份标签的 `<project>_instance` network 和 `docker compose create --no-start` 容器，并验证 labels、挂载源和端口发布。默认 worker 仍因 runtime 未验收而阻断；测试入口为 `python3 scripts/test-instance-docker.py`。
+`actions/instance-docker.py` 是 gated 资源创建与验证内核：只有基础验证 `verified=true` 的 release 才能创建带身份标签的 `<project>_instance` network 和 `docker compose create --no-start` 容器，并验证 labels、挂载源和端口发布。额外的 Klei 配置隔离运行验证不作为创建门槛；测试入口为 `python3 scripts/test-instance-docker.py`。
 
 `probes/instance-release-catalog.py` 与 `list_instance_releases` command 只读核对远端 release catalog；没有合格 release 时返回 `CREATE_RELEASE_REQUIRED`，不下载、不覆盖、不伪造 release。

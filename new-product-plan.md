@@ -255,7 +255,6 @@ Master/Caves 可以共享同一实例的只读二进制，但不能并发改同�
     compose.yaml                         # 固定项目身份与同号发布端口
     config/                              # 集群、分片、名单和敏感文件
     data/                                # Master/Caves 世界数据
-    dst/releases/<releaseId>/            # 完整服务端发布
     mods/releases/<releaseId>/           # 实例 MOD 发布
     staging/
     backups/

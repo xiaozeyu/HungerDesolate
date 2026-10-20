@@ -98,7 +98,7 @@ def inspect(request):
     return {"schemaVersion": 1, "hostId": host_id,
             "catalogDigest": "sha256:" + hashlib.sha256(json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             "releases": releases,
-            "blockers": [] if any(item["verified"] and item["runtimeVerified"] for item in releases) else ["CREATE_RELEASE_REQUIRED"]}
+            "blockers": [] if any(item["verified"] for item in releases) else ["CREATE_RELEASE_REQUIRED"]}
 
 
 def main(request):

@@ -22,4 +22,10 @@ describe("server form", () => {
     assert.equal(error.field, "host"); assert.equal(error.code, "INPUT_INVALID");
     assert.equal(describeError("INPUT_INVALID").code, "CLIENT_ERROR");
   });
+  it("shows a safe remote code for otherwise unknown Release verification failures", () => {
+    const error = describeError({code: "RELEASE_RUNTIME_VERIFY_FAILED", message: "验证失败", details: {remoteCode: "NEW_RUNTIME_FAILURE"}});
+    assert.match(error.message, /NEW_RUNTIME_FAILURE/);
+    const unsafe = describeError({code: "RELEASE_RUNTIME_VERIFY_FAILED", message: "验证失败", details: {remoteCode: "token-secret"}});
+    assert.equal(unsafe.message, "验证失败");
+  });
 });

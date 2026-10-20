@@ -168,15 +168,29 @@ svg { stroke-width: 1.75; }
 .initialization-facts dd { overflow-wrap: anywhere; }
 .initialization-paths { margin: 20px 0 0; padding-left: 20px; font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; }
 
-.creation-form .form-grid { margin-bottom: 0; }
-.creation-step-title { margin: 0 0 var(--space-4); font-size: 15px; font-weight: 600; }
-.creation-name { grid-column: 1 / -1; }
-.creation-form .creation-switch { display: flex; flex-direction: row; align-items: center; gap: var(--space-2); min-height: 36px; }
-.creation-static-value { min-height: 36px; display: flex; align-items: center; color: var(--text-secondary); }
-.creation-preview-state { display: flex; gap: var(--space-4); align-items: center; font-size: 12px; color: var(--text-secondary); }
-.creation-execution-gate { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; }
-.creation-release-state { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-5); color: var(--text-secondary); font-size: 12px; }
-.creation-release-state .text-button { margin-left: auto; }
-.creation-facts { margin-bottom: var(--space-6); }
-.creation-facts dd { overflow-wrap: anywhere; }
-.creation-ports table { min-width: 0; width: 100%; }
+.creation-form-heading { display: grid; gap: var(--space-1); margin-bottom: var(--space-6); }
+.creation-form-heading h3, .creation-preview-heading h3 { margin: 0; font-size: 18px; font-weight: 600; }
+.creation-settings-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); gap: var(--space-6); }
+.creation-field { display: grid; gap: var(--space-2); min-width: 0; font-size: 13px; }
+.creation-field-wide { grid-column: 1 / -1; }
+.creation-option-group { display: grid; gap: var(--space-2); min-width: 0; margin: 0; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+.creation-option-group legend { padding: 0 var(--space-1); color: var(--text-secondary); font-size: 12px; }
+.creation-form .creation-switch { display: flex; flex-direction: row; align-items: center; gap: var(--space-2); min-height: 32px; font-size: 13px; }
+.creation-preview-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); padding-bottom: var(--space-5); border-bottom: 1px solid var(--border); }
+.creation-preview-badges { display: flex; align-items: center; gap: var(--space-3); font-size: 12px; }
+.creation-preview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); margin-top: var(--space-5); }
+.creation-panel { min-width: 0; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface-muted); }
+.creation-panel-wide { grid-column: 1 / -1; }
+.creation-panel h4 { margin: 0 0 var(--space-3); font-size: 13px; font-weight: 600; }
+.creation-panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.creation-facts { margin: 0; }
+.creation-facts > div { display: grid; grid-template-columns: minmax(90px, .8fr) minmax(0, 1.5fr); gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.creation-facts > div:last-child { border-bottom: 0; }
+.creation-facts dt { color: var(--text-secondary); }
+.creation-facts dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.creation-ports { margin: 0; }
+.creation-ports table { min-width: 0; width: 100%; background: var(--surface); }
+.creation-ports th, .creation-ports td { padding: var(--space-2); }
+.creation-task-state { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-5); padding: var(--space-3) 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); font-size: 13px; }
+.creation-task-state .status-label { flex-shrink: 0; }
+@media (max-width: 720px) { .creation-settings-grid, .creation-preview-grid { grid-template-columns: 1fr; } .creation-panel-wide, .creation-field-wide { grid-column: auto; } .creation-preview-heading { align-items: flex-start; flex-direction: column; } }

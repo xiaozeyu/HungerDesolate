@@ -8,6 +8,7 @@ import HostsPage from "./pages/HostsPage.vue";
 import InstanceListPage from "./pages/InstanceListPage.vue";
 import HostEnvironmentPage from "./pages/HostEnvironmentPage.vue";
 import ConnectionSettingsPage from "./pages/ConnectionSettingsPage.vue";
+import ReleaseManagementPage from "./pages/ReleaseManagementPage.vue";
 import InstanceOverviewPage from "./pages/InstanceOverviewPage.vue";
 import WorldPage from "./pages/WorldPage.vue";
 import ModsPage from "./pages/ModsPage.vue";
@@ -23,6 +24,7 @@ export const router = createRouter({
         { path: "/hosts/:serverId/instances", component: InstanceListPage, meta: { title: "专服列表" } },
         { path: "/hosts/:serverId/environment", component: HostEnvironmentPage, meta: { title: "主机环境" } },
         { path: "/hosts/:serverId/connection", component: ConnectionSettingsPage, meta: { title: "连接设置" } },
+        { path: "/hosts/:serverId/releases", component: ReleaseManagementPage, meta: { title: "Release 管理" } },
         ...[
             { name: "overview", title: "概览", component: InstanceOverviewPage },
             { name: "world", title: "世界", component: WorldPage },

@@ -115,7 +115,6 @@ SSH/桌面中断只表示结果未知；页面重开按原连接版本和 plan �
     desired-secrets/<secretVersion>/      # 权限受限的期望秘密文件，不覆盖活动秘密
     config/                              # 实际部署的集群/分片配置及秘密文件
     data/{Master,Caves}/                  # 世界数据
-    dst/releases/<releaseId>/
     mods/releases/<releaseId>/{Master,Caves}/
     active-release.json                  # 一份原子发布指针，记录完整发布组合
     staging/<taskId>/
@@ -172,7 +171,8 @@ Compose 模板从已验证 manifest + active-release 生成：
 
 - 项目名显式 `docker compose -p <project>`，不依赖执行目录推断。
 - 对外 ports 为 hostPort:containerPort/protocol，必须相等；分片通信 UDP 不 publish。
-- DST 二进制只读 bind；配置、data、每分片 UGC 的可写权限分别限定。
+- DST 二进制包含在 digest 固定的 runtime image 中；配置、data、每分片 UGC 使用独立 bind mount，不覆盖镜像内 `/srv/dst`。
+- Release runtime 验证使用一次性 Klei 配置包，在 `/run` 下建立隔离的 LAN-only Master/Caves 测试集群；不发布宿主端口，不挂实例数据，清理后仅发布不含 token 的 digest 绑定 evidence。
 - runtime 镜像固定 digest；使用经阶段 0 证实的非 root UID/GID、init、信号退出与最小权限。
 - Token/cluster_key 以限制权限文件提供，实际 DST 需要的文件名与位置在实验中确认；不进入 argv 或内联环境。
 - 工作目录、启动参数、UGC 路径必须通过真实产物验证，不复制社区镜像自动更新入口。

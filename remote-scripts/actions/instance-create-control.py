@@ -20,6 +20,7 @@ ROOT = Path("/var/lib/famine-hub")
 LOCKS = ROOT / "locks"
 LOCK_PATH = LOCKS / "registry.lock"
 OWNER_PATH = LOCKS / "registry-owner.json"
+CATALOG = ROOT / "releases" / "catalog.json"
 MAX_REVISION = 9007199254740991
 MAX_INSTANCES = 200
 MAX_RESERVATIONS = 2400
@@ -189,7 +190,7 @@ def validate_input(request):
     if request["expectedRegistryRevision"] < 0 or request["expectedRegistryRevision"] > MAX_REVISION:
         reject("CREATE_INPUT_INVALID")
     settings = request.get("input")
-    if not isinstance(settings, dict) or set(settings) != {"displayName", "autostart", "startAfterCreate", "portPolicy", "cavesEnabled", "expectedPorts"}:
+    if not isinstance(settings, dict) or set(settings) != {"displayName", "autostart", "startAfterCreate", "portPolicy", "cavesEnabled", "expectedPorts", "releaseId", "releaseCatalogDigest"}:
         reject("CREATE_INPUT_INVALID")
     if (not isinstance(settings["displayName"], str) or not settings["displayName"].strip()
             or len(settings["displayName"]) > 64 or any(ord(char) < 32 for char in settings["displayName"])
@@ -199,6 +200,10 @@ def validate_input(request):
         reject("CREATE_INPUT_INVALID")
     if type(settings["cavesEnabled"]) is not bool:
         reject("CREATE_INPUT_INVALID")
+    if (not valid_uuid(settings["releaseId"])
+            or not isinstance(settings["releaseCatalogDigest"], str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", settings["releaseCatalogDigest"]) is None):
+        reject("CREATE_RELEASE_REQUIRED")
     if not isinstance(settings["expectedPorts"], list) or len(settings["expectedPorts"]) not in (3, 6):
         reject("CREATE_INPUT_INVALID")
 
@@ -360,6 +365,15 @@ def admit(request):
                 return operation["result"]
         if registry["registryRevision"] != request["expectedRegistryRevision"]:
             reject("REGISTRY_CHANGED")
+        catalog = read_json(CATALOG, 1024 * 1024)
+        if (catalog.get("schemaVersion") != 1 or catalog.get("hostId") != host_id
+                or digest(catalog) != request["input"]["releaseCatalogDigest"]):
+            reject("RELEASE_CATALOG_CHANGED")
+        release = next((item for item in catalog.get("releases", [])
+                        if isinstance(item, dict) and item.get("releaseId") == request["input"]["releaseId"]), None)
+        if release is None or release.get("verified") is not True:
+            reject("CREATE_RELEASE_REQUIRED")
+        release = dict(release, schemaVersion=1)
         used = {("udp" if item["protocol"] == "udp" else "tcp", item["hostPort"])
                 for item in registry["portReservations"]}
         used |= socket_ports()
@@ -375,13 +389,15 @@ def admit(request):
         task_id = request["operationId"]
         now = int(time.time())
         entry = {"instanceId": instance_id, "lifecycle": "creating", "relativePath": "instances/" + instance_id,
-                 "displayName": settings["displayName"].strip(), "pendingTaskId": task_id}
+                 "displayName": settings["displayName"].strip(), "pendingTaskId": task_id,
+                 "dstReleaseId": release["releaseId"]}
         registry["instances"].append(entry)
         registry["portReservations"].extend({"hostId": host_id, "instanceId": instance_id, **port, "reservedAtUnixSeconds": now}
                                              for port in ports)
         result = {"schemaVersion": 1, "operationId": task_id, "hostId": host_id, "instanceId": instance_id,
                   "taskId": task_id, "registryRevision": registry["registryRevision"] + 1,
-                  "lifecycle": "creating", "ports": ports, "reservedAtUnixSeconds": now}
+                  "lifecycle": "creating", "ports": ports, "reservedAtUnixSeconds": now,
+                  "release": release, "releaseCatalogDigest": request["input"]["releaseCatalogDigest"]}
         registry["registryRevision"] += 1
         registry["operations"].append({"operationId": task_id, "payloadDigest": payload_digest, "result": result})
         registry["operations"] = registry["operations"][-MAX_OPERATIONS:]

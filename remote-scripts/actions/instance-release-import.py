@@ -15,7 +15,7 @@ import uuid
 
 ROOT = Path("/var/lib/famine-hub")
 CATALOG = ROOT / "releases" / "catalog.json"
-STAGING = ROOT / "releases" / "staging"
+STAGING = ROOT / "staging"
 TASKS = ROOT / "releases" / "tasks"
 
 
@@ -136,13 +136,19 @@ def run(request):
         if release is None or release.get("verified") is not True: reject("CREATE_RELEASE_NOT_VERIFIED")
         write_status(operation_id, "running", "stagingVerify")
         artifact = STAGING / release_id
-        if not artifact.is_dir() or artifact.is_symlink(): reject("CREATE_RELEASE_ARTIFACT_REQUIRED")
+        if not artifact.is_dir() or artifact.is_symlink(): reject("CREATE_RELEASE_STAGING_MISSING")
         try:
-            metadata = read_json(artifact / "release.json", 65536)
+            metadata = read_json(artifact / "release-metadata.json", 65536)
             evidence = read_json(artifact / "runtime.json", 65536)
         except FileNotFoundError:
-            reject("CREATE_RELEASE_ARTIFACT_REQUIRED")
-        if metadata != release or evidence.get("runtimeVerified") is not True or evidence.get("verification") != "passed":
+            reject("CREATE_RELEASE_RUNTIME_EVIDENCE_REQUIRED")
+        metadata_entry = dict(metadata)
+        metadata_entry.pop("schemaVersion", None)
+        if (metadata_entry != release or evidence.get("schemaVersion") != 1
+                or evidence.get("releaseId") != release_id
+                or evidence.get("imageDigest") != release.get("imageDigest")
+                or evidence.get("runtimeVerified") is not True
+                or evidence.get("verification") != "passed"):
             reject("CREATE_RELEASE_ARTIFACT_INVALID")
         updated = dict(catalog)
         updated["releases"] = [dict(item, runtimeVerified=True) if item.get("releaseId") == release_id else item for item in catalog["releases"]]

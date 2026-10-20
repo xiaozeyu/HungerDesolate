@@ -60,6 +60,15 @@ export function getInstanceCreateStatus(request: {schemaVersion:1;requestId:stri
 export interface OrphanInstanceCleanupRequest {schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRegistryRevision:number;typedName:string;}
 export interface OrphanInstanceCleanupResponse {schemaVersion:1;requestId:string;target:InstanceTarget;registryRevision:number;releasedReservations:number;removed:boolean;retired:boolean;}
 export function cleanupOrphanInstance(request:OrphanInstanceCleanupRequest):Promise<OrphanInstanceCleanupResponse>{return call("cleanup_orphan_instance",request);}
+export interface InstanceDeletePreview {
+  schemaVersion:1;requestId:string;target:InstanceTarget;recordVersion:number;registryRevision:number;
+  displayName:string;lifecycle:string;containers:{id:string;role:string;status:string}[];
+  networks:{id:string;name:string;endpointIds:string[]}[];dataPresent:boolean;worldData:boolean;archived:boolean;
+  blockers:string[];allowed:boolean;planId:string;
+}
+export function previewInstanceDelete(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRegistryRevision:number}):Promise<InstanceDeletePreview>{return call("preview_instance_delete",request);}
+export interface InstanceDeleteResponse {schemaVersion:1;requestId:string;target:InstanceTarget;recordVersion:number;registryRevision:number;releasedReservations:number;removed:boolean;retired:boolean;removedContainers:number;removedNetworks:number;}
+export function deleteInstance(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRegistryRevision:number;planId:string;operationId:string;typedName:string}):Promise<InstanceDeleteResponse>{return call("delete_instance",request);}
 export interface InstanceReleaseSummary { releaseId:string; platform:string; image:string; imageDigest:string; dstBuild:string; artifactDigest:string; scriptVersion:string; verified:boolean; runtimeVerified:boolean; commands:Record<string,string[]>; }
 export interface InstanceReleaseCatalogResponse { schemaVersion:1; requestId:string; serverId:string; hostId:string; recordVersion:number; catalogDigest:string|null; releases:InstanceReleaseSummary[]; blockers:string[]; }
 export function listInstanceReleases(request: ConnectionRequest): Promise<InstanceReleaseCatalogResponse> { return call("list_instance_releases",request); }

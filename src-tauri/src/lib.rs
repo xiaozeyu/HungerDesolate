@@ -8,6 +8,7 @@ mod host_initialization;
 mod image_build;
 mod instance_cleanup;
 mod instance_creation;
+mod instance_deletion;
 mod instance_dto;
 mod instance_task;
 mod managed_files;
@@ -20,6 +21,7 @@ mod server_input;
 mod ssh;
 mod ssh_dto;
 mod ssh_state;
+mod world_config;
 
 use std::{error::Error, path::PathBuf};
 use tauri::Manager;
@@ -66,6 +68,11 @@ pub fn run() -> tauri::Result<()> {
             commands::create_instance,
             commands::get_instance_create_status,
             commands::cleanup_orphan_instance,
+            commands::preview_instance_delete,
+            commands::delete_instance,
+            commands::get_world_config,
+            commands::save_world_config,
+            commands::preview_world_apply,
             commands::list_instance_releases,
             commands::preview_instance_release,
             commands::import_instance_release,

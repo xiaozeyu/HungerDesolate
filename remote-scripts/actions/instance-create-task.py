@@ -19,6 +19,8 @@ ROOT = globals().get("ROOT", Path("/var/lib/famine-hub"))
 TASKS = ROOT / "tasks"
 MAX_TASKS = 200
 MAX_STATUS_BYTES = 65536
+MAX_REGISTRY_BYTES = 1024 * 1024
+MAX_REVISION = 9007199254740991
 
 
 class TaskRejected(Exception):
@@ -128,6 +130,29 @@ def load_status(task_id):
     return validate_status(read_json(directory / "status.json", MAX_STATUS_BYTES), task_id)
 
 
+def journal_tail(task_id, limit=100):
+    directory = task_path(task_id)
+    safe_directory(directory)
+    path = directory / "journal.jsonl"
+    if not path.exists():
+        return []
+    raw = read_bytes(path, 1024 * 1024)
+    entries = []
+    for line in raw.splitlines()[-limit:]:
+        try:
+            item = json.loads(line)
+        except (TypeError, ValueError):
+            reject("CREATE_TASK_STATE_INVALID")
+        if (not isinstance(item, dict) or type(item.get("sequence")) is not int
+                or item["sequence"] < 1 or item.get("status") not in
+                ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")
+                or not isinstance(item.get("stage"), str) or len(item["stage"]) > 64
+                or not isinstance(item.get("at"), str) or len(item["at"]) > 64):
+            reject("CREATE_TASK_STATE_INVALID")
+        entries.append({key: item[key] for key in ("sequence", "status", "stage", "at")})
+    return entries
+
+
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -185,7 +210,70 @@ def update_status(directory, status, stage, *, last_completed=None, error=None,
     write_json(directory / "status.json", body)
     append_journal(directory, {"sequence": sequence, "status": status, "stage": stage,
                                 "observation": observation, "at": now()})
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
+        sync_registry_lifecycle(body)
     return body
+
+
+def sync_registry_lifecycle(state):
+    task_id = state.get("taskId")
+    target = state.get("target")
+    if not valid_uuid(task_id) or not isinstance(target, dict):
+        reject("CREATE_TASK_STATE_INVALID")
+    host_id, instance_id = target.get("hostId"), target.get("instanceId")
+    if not valid_uuid(host_id) or not valid_uuid(instance_id):
+        reject("CREATE_TASK_STATE_INVALID")
+    success = state.get("status") == "succeeded"
+    if success and (not isinstance(state.get("result"), dict)
+                    or state["result"].get("verification") != "passed"):
+        reject("CREATE_TASK_STATE_INVALID")
+
+    locks = ROOT / "locks"
+    safe_directory(ROOT)
+    safe_directory(locks)
+    lock_path = locks / "registry.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077):
+            reject("CREATE_TASK_PATH_UNSAFE")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        registry_path = ROOT / "registry.json"
+        registry = read_json(registry_path, MAX_REGISTRY_BYTES)
+        if (not isinstance(registry, dict) or registry.get("schemaVersion") != 1
+                or registry.get("hostId") != host_id
+                or type(registry.get("registryRevision")) is not int
+                or not isinstance(registry.get("instances"), list)):
+            reject("CREATE_REGISTRY_INVALID")
+        matches = [entry for entry in registry["instances"]
+                   if isinstance(entry, dict) and entry.get("instanceId") == instance_id]
+        if len(matches) != 1:
+            reject("CREATE_REGISTRY_INVALID")
+        entry = matches[0]
+        lifecycle = "ready" if success else "createFailed"
+        if (entry.get("lifecycle") == lifecycle
+                and ((success and entry.get("pendingTaskId") is None)
+                     or (not success and entry.get("pendingTaskId") == task_id))):
+            return
+        if entry.get("lifecycle") not in ("creating", lifecycle) or entry.get("pendingTaskId") != task_id:
+            reject("CREATE_REGISTRY_CONFLICT")
+        if success:
+            manifest = read_json(ROOT / "instances" / instance_id / "manifest.json", 65536)
+            if (manifest.get("hostId") != host_id or manifest.get("instanceId") != instance_id
+                    or manifest.get("deploymentId") != state["result"].get("deploymentId")):
+                reject("CREATE_MANIFEST_CONFLICT")
+        revision = registry["registryRevision"]
+        if revision < 0 or revision >= MAX_REVISION:
+            reject("REGISTRY_REVISION_EXHAUSTED")
+        entry["lifecycle"] = lifecycle
+        if success:
+            entry["pendingTaskId"] = None
+        registry["registryRevision"] = revision + 1
+        write_json(registry_path, registry)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def request_digest(request):
@@ -300,6 +388,8 @@ def status(task_id):
         tasks.sort(key=lambda value: load_status(value).get("createdAt", 0), reverse=True)
         task_id = tasks[0]
     state = load_status(task_id)
+    if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
+        sync_registry_lifecycle(state)
     if state["status"] == "running" and not worker_active(task_id):
         directory = task_path(task_id)
         return update_status(directory, "interrupted", state["stage"], observation="reconciling",
@@ -317,6 +407,8 @@ def main(request):
             data = status(request.get("taskId"))
         else:
             reject("CREATE_TASK_ACTION_INVALID")
+        if isinstance(data, dict) and isinstance(data.get("taskId"), str):
+            data["journal"] = journal_tail(data["taskId"])
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)
     except TaskRejected as error:
         print(json.dumps({"ok": False, "code": str(error)}, separators=(",", ":")), flush=True)

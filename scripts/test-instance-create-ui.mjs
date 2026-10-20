@@ -22,11 +22,12 @@ test('creation form exposes the preview action without world settings', async()=
   assert.match(releases,/previewInstanceReleaseDelete/);
   assert.match(releases,/deleteInstanceRelease/);
   assert.match(releases,/输入 DST 版本确认/);
-  assert.match(instanceList,/cleanupOrphanInstance/);
-  assert.match(instanceList,/pythonException/);
-  assert.match(instanceList,/pythonLine/);
+  assert.match(instanceList,/previewInstanceDelete/);
+  assert.match(instanceList,/deleteInstance/);
+  assert.match(instanceList,/planId:plan\.planId/);
   assert.match(instanceList,/manifestAvailable/);
-  assert.match(instanceList,/确认移出列表/);
+  assert.match(instanceList,/确认并归档删除/);
+  assert.match(instanceList,/selectedTask\.journal/);
   assert.match(instanceList,/输入专服名称确认/);
   assert.doesNotMatch(hosts,/查看界面预览|退出预览|setPreview/);
   assert.doesNotMatch(source,/端口策略|容器拓扑/);
@@ -35,7 +36,8 @@ test('creation form exposes the preview action without world settings', async()=
   assert.match(source,/role="status" aria-live="polite"/);
   assert.match(source,/继续创建尚未接入，远端 staging 现场保持不变/);
   assert.match(source,/创建现场清理尚未接入，未删除或移动任何数据/);
-  assert.match(source,/任务日志接口尚未接入/);
+  assert.match(source,/持久化阶段记录和错误详情/);
+  assert.match(source,/task\.error\.details\.composeDiagnostic/);
 });
 before(async()=>{
   vite=await createServer({configFile:false,logLevel:'error',optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,watch:null},plugins:[{

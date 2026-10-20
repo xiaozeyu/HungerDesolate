@@ -83,6 +83,7 @@ interface Invalidation {
 }
 interface MutationResult<T> {
   schemaVersion: 1;
+  requestId: string;
   target: InstanceTarget;
   operationId: OperationId;
   verifiedRevision: number;
@@ -122,14 +123,14 @@ interface MutationResult<T> {
 | InstanceOverview | identity、manifestSummary、runtime、blockers、desiredVsDeployed；不返回整个 MOD 或备份数组 |
 | InstanceRuntime | snapshotId、capturedAt、status、shards[]、players/null、build/null、verificationLevel、evidence[] |
 | ShardRuntime | shardKind、enabled、status、containerId/null、actualBuild/null、observedPorts、logAvailable、players/null |
-| WorldConfig | revision、desired、deployed/null、desiredDigest、deployedDigest/null、tokenStatus、shardKeyStatus、validationWarnings |
-| WorldSettings | roomName、description、gameMode、maxPlayers、pvp、cavesEnabled、masterRules、cavesRules；允许字段由领域 schema 白名单定义 |
+| WorldConfig | revision、desired、deployed/null、desiredDigest、deployedDigest/null、tokenStatus、serverPasswordStatus、validationWarnings |
+| WorldSettings | roomName、description、gameMode、maxPlayers、pvp、language、pauseWhenEmpty、cavesEnabled、advanced、worldgen.master/caves；每分片包含固定 preset 与 worldgen/worldSettings overrides |
 
 `lifecycle`：creating/ready/createFailed/deleting/deleteFailed/retired。`runtimeStatus`：unknown/stopped/starting/running/degraded/stopping/failed。创建生命周期与运行状态分开。
 
 `verificationLevel`：processOnly/localVerified/networkVerified。容器 running 仅能证明进程层，不等价玩家可进入。玩家数不可确认时 `null` 显示“未知”；停止时显示“—”。启用洞穴但洞穴失败时专服为 degraded，不能因为 Master running 就显示全部正常。
 
-Token 与分片密钥普通 DTO 只暴露 configured/missing/unknown；不回填明文。Token 更换请求为 `tokenChange: { action: "replace", value: string }` 或 `{ action: "keep" }`，敏感输入只允许从内存送入专用命令，禁止进入调试、请求通用日志、fixture、草稿与任务摘要。删除 Token 首期不提供独立按钮；缺失 Token 时阻断需要认证的部署启动。
+Token、服务器密码与分片密钥普通 DTO 只暴露 configured/missing/unknown；不回填明文。Token 与服务器密码更换请求分别使用 `tokenChange`、`serverPasswordChange`，形状为 `{ action: "replace", value: string }` 或 `{ action: "keep" }`；敏感输入只保留在组件内存并经专用命令写入远端受保护文件，禁止进入通用草稿、任务摘要、日志或诊断。首期不提供删除凭据按钮；更换为空白保持已配置值不变。
 
 ### 4.3 MOD、备份、更新、日志
 
@@ -178,6 +179,7 @@ interface TaskSnapshot {
   finishedAt: string | null;
   cancelAllowed: boolean;
   observation: "live" | "stale" | "reconciling";
+  journal?: Array<{ sequence: number; status: TaskStatus; stage: string; at: string }>;
   result: TaskResult | null;
   error: CommandError | null;
 }
@@ -280,8 +282,8 @@ planId 在远端记录，绑定目标、规范化输入、revision、环境证�
 | restart_instance / restartInstance | T/InstanceTarget | expectedRevision、operationId、停服确认 | stop/start，不隐式更新 |
 | set_instance_autostart / setInstanceAutostart | T/InstanceTarget | enabled、expectedRevision、operationId | 保存策略、更新容器策略并验证 |
 | rename_instance / renameInstance | M/InstanceTarget | displayName、expectedRevision、operationId | revision 增加；ID/目录/项目不改 |
-| preview_instance_delete / previewInstanceDelete | P/InstanceTarget | expectedRevision | 停服、目录、备份、端口与影响 |
-| delete_instance / deleteInstance | T/InstanceTarget | planId、typedName、expectedRevision、operationId | 保护删除；结果可继续读取历史备份 |
+| preview_instance_delete / previewInstanceDelete | P/InstanceTarget | expectedRecordVersion、expectedRegistryRevision | 核对容器/网络归属与状态、待执行任务、世界数据和归档目标，返回绑定快照的 planId |
+| delete_instance / deleteInstance | T/InstanceTarget | planId、typedName、expectedRecordVersion、expectedRegistryRevision、operationId | 二次核对后移除已停止且身份匹配的容器/网络；有世界文件时阻断并要求保护备份；其余实例目录归档到 retired，再释放端口 |
 
 CreateInput：displayName、autostart、startAfterCreate、portPolicy(auto)、cavesEnabled。`cavesEnabled` 是容器拓扑字段，决定 Master/Caves 服务和完整端口计划；gameMode、maxPlayers、pvp、description 与 Token 属于容器环境完成后的世界配置，不进入创建容器预览 DTO。首期固定公网路线，创建请求不接收 networkMode。世界配置通过 `save_world_config`/`apply_world_config` 处理，人数范围以阶段 0 确认的 DST 支持范围固化。
 
@@ -539,6 +541,10 @@ interface InstanceCreationResult {
 
 无容器专服提供专用 `cleanup_orphan_instance` 确认命令：远端 registry lock 内重查任务、受管容器和网络后才允许移出活动列表并释放端口；空目录会移除，目录内有文件时整体移入 `retired/<instanceId>` 保留。它不执行备份，也不替代正常运行实例的 `preview_instance_delete/delete_instance`。
 
+`delete_instance` 只按 hostId/instanceId/schema 标签处理资源；不执行宽泛的 `compose down`、`prune` 或删镜像。预览计划绑定注册版本、容器状态/ID、网络端点和实例目录快照；执行时任一变化都要求重新预览。运行中的容器、活动或待核实任务、资源标签不匹配、归档冲突均阻断。世界数据目录存在文件时须先有保护备份；不含世界数据时移除容器与网络并将实例目录整体归档到 retired，最后才释放端口。operationId 重放返回原删除结果。
+
+创建任务的 `journal` 只包含持久化阶段变更，不代表容器 stdout/stderr。Compose/Docker 校验诊断按错误详情单独返回并限长；不读取或保存完整游戏日志。
+
 Release 删除通过 `preview_instance_release_delete/delete_instance_release` 执行。删除重查 catalog digest、实例/manifest、未结束任务、容器引用及共享镜像；只有无引用 Release 可移除，用户须输入 DST build 确认。镜像只按该 Release 的固定 digest 删除，共用 digest 不删除。
 | `CREATE_REGISTRY_CHANGED` | 注册表在执行期间变化 | 重新预览 |
 | `CREATE_ADMISSION_FAILED` | 接纳阶段失败（注册锁内检查） | 查看错误详情、重新预览 |
@@ -582,8 +588,8 @@ type GetInstanceCreationStatusResponse = {
 | command / wrapper | 类型 | 业务输入 | 返回与要求 |
 | --- | --- | --- | --- |
 | get_world_config / getWorldConfig | Q | InstanceTarget | WorldConfig |
-| save_world_config / saveWorldConfig | M | target、settings、tokenChange、expectedRevision、operationId | MutationResult<WorldConfig>，只保存期望，不宣称已部署 |
-| preview_world_apply / previewWorldApply | P | target、expectedRevision | 差异、备份和停服影响 |
+| save_world_config / saveWorldConfig | M | target、settings、tokenChange、serverPasswordChange、expectedRevision、operationId | MutationResult<WorldConfig>，只保存期望，不宣称已部署 |
+| preview_world_apply / previewWorldApply | P/InstanceTarget | expectedRecordVersion、expectedRevision | 差异、新世界生成项、现有存档文件数和保护备份要求；绑定读到的期望配置摘要 |
 | apply_world_config / applyWorldConfig | T | target、planId、expectedRevision、operationId | 应用已保存的世界配置，不读前端隐式草稿 |
 | get_workshop_metadata / getWorkshopMetadata | Q/global | workshopIds[] | 元数据；上限 100，不需要实例，不含启用状态 |
 | search_workshop / searchWorkshop | Q/global | query、cursor、limit | 元数据搜索，外部来源能力待验证，失败允许手工输入 ID |

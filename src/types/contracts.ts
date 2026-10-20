@@ -104,6 +104,7 @@ export interface TaskSnapshot {
     finishedAt: string | null;
     cancelAllowed: boolean;
     observation: "live" | "stale" | "reconciling";
+    journal?: {sequence:number;status:TaskStatus;stage:string;at:string}[];
     result?: TaskResult | null;
     error?: CommandError | null;
 }
@@ -125,6 +126,7 @@ export interface TaskResult {
 
 export interface MutationResult<T> {
     schemaVersion: 1;
+    requestId: string;
     target: InstanceTarget;
     operationId: string;
     verifiedRevision: number;

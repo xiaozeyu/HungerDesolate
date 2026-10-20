@@ -1,242 +1,397 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
+import { Eye, RefreshCw, Save } from "@lucide/vue";
+import AppDialog from "../components/AppDialog.vue";
+import AppSelect from "../components/AppSelect.vue";
+import PageHeader from "../components/PageHeader.vue";
+import PreviewNotice from "../components/PreviewNotice.vue";
+import StatusLabel from "../components/StatusLabel.vue";
+import { getWorldConfig, previewWorldApply, saveWorldConfig, type WorldApplyPreview } from "../api/world";
 import { useWorkspace } from "../composables/useWorkspace";
 import { usePageTarget } from "../composables/usePageTarget";
-import AppSelect from "../components/AppSelect.vue";
-import PreviewNotice from "../components/PreviewNotice.vue";
-import PageHeader from "../components/PageHeader.vue";
-import StatusLabel from "../components/StatusLabel.vue";
-import { Save, Eye, RefreshCw } from "@lucide/vue";
-import type { WorldSettings } from "../types/world";
+import { describeError, type UserError } from "../lib/commandError";
+import { dstGameModeOptions, languageOptions } from "../lib/dstGameModes";
+import { defaultWorldSettings, optionValue, optionValuesForShard, updateShardOption, visibleWorldOptions } from "../lib/dstWorldOptions";
+import { copyWorldSettings } from "../lib/worldConfigDraft";
+import type { DstWorldCategory, DstWorldShard, WorldConfig, WorldSettings } from "../types/world";
 
-const domainWorkspace = useWorkspace();
-const { instanceName } = usePageTarget();
+const workspace = useWorkspace();
+const { server, instance, target, instanceName } = usePageTarget();
+const data = ref<WorldConfig | null>(null);
+const applyPreview = ref<WorldApplyPreview|null>(null), previewBusy = ref(false);
+const draft = reactive<WorldSettings>(defaultWorldSettings(false));
+const baseDesired = ref<WorldSettings | null>(null), baseRevision = ref(0);
+const loading = ref(false), saving = ref(false), stale = ref(false);
+const error = ref<UserError | null>(null);
+const saveMessage = ref("");
+const tokenStatus = ref<WorldConfig["tokenStatus"]>("unknown");
+const passwordStatus = ref<WorldConfig["serverPasswordStatus"]>("unknown");
+const tokenValue = ref(""), passwordValue = ref("");
+const activeView = ref<"basic" | "access" | "worldgen" | "worldSettings">("basic");
+const selectedShard = ref<DstWorldShard>("master");
+const activeGroup = ref("misc");
+const draftVersion = ref(0), pendingOperationId = ref("");
+let epoch = 0, querySequence = 0, latestRequestId = "";
 
-// 临时状态（待实现真实读取）
-const loading = ref(false);
-const saving = ref(false);
-const tokenStatus = ref<"configured" | "missing" | "unknown">("unknown");
-const desiredVsDeployed = ref<"inSync" | "pending" | "drifted" | "unknown">("unknown");
-
-const draft = ref<WorldSettings>({
-  roomName: instanceName.value || "",
-  description: "",
-  gameMode: "survival",
-  maxPlayers: 16,
-  pvp: false,
-  cavesEnabled: true,
-  masterRules: {
-    worldSize: "medium",
-    seasonStart: "autumn",
-    dayLength: "default",
-  },
-  cavesRules: {
-    worldSize: "medium",
-    seasonStart: "autumn",
-    dayLength: "default",
-  },
+const hasChanges = computed(() => {
+  if (!baseDesired.value) return false;
+  return JSON.stringify(draft) !== JSON.stringify(baseDesired.value)
+    || tokenValue.value.length > 0 || passwordValue.value.length > 0;
 });
+const status = computed(() => {
+  if (!data.value) return "unknown";
+  return data.value.deployedDigest !== null && data.value.deployedDigest === data.value.desiredDigest
+    ? "inSync" : "pending";
+});
+const selectedCategory = computed<DstWorldCategory | null>(() =>
+  activeView.value === "worldgen" || activeView.value === "worldSettings" ? activeView.value : null);
+const visibleOptions = computed(() => selectedCategory.value
+  ? visibleWorldOptions(selectedShard.value, selectedCategory.value) : []);
+const optionGroups = computed(() => {
+  const seen = new Set<string>();
+  return visibleOptions.value.flatMap((item) => {
+    if (seen.has(item.group)) return [];
+    seen.add(item.group);
+    return [{ key: item.group, label: item.groupLabel, count: visibleOptions.value.filter((option) => option.group === item.group).length }];
+  });
+});
+const selectedGroupOptions = computed(() => visibleOptions.value.filter((item) => item.group === activeGroup.value));
 
-const hasChanges = ref(false);
-const canApply = computed(() => desiredVsDeployed.value === "pending");
-const tokenChanging = ref(false);
-const tokenValue = ref("");
-
-const gameModeOptions = [
-  { label: "生存", value: "survival" },
-  { label: "无尽", value: "endless" },
-  { label: "荒野", value: "wilderness" },
-];
-
-const worldSizeOptions = [
-  { label: "小", value: "small" },
-  { label: "中", value: "medium" },
-  { label: "大", value: "large" },
-  { label: "巨大", value: "huge" },
-];
-
-const seasonOptions = [
-  { label: "秋", value: "autumn" },
-  { label: "冬", value: "winter" },
-  { label: "春", value: "spring" },
-  { label: "夏", value: "summer" },
-];
-
-const dayLengthOptions = [
-  { label: "默认", value: "default" },
-  { label: "长", value: "long" },
-  { label: "短", value: "short" },
-];
-
-function refresh() {
-  console.log("TODO: 实现刷新");
+function selectView(view: typeof activeView.value) {
+  activeView.value = view;
+  if (view === "worldgen" || view === "worldSettings") {
+    const groups = new Set(visibleWorldOptions(selectedShard.value, view).map((item) => item.group));
+    if (!groups.has(activeGroup.value)) activeGroup.value = groups.values().next().value ?? "";
+  }
 }
 
-function save() {
-  console.log("TODO: 实现保存", { draft: draft.value, tokenChanging: tokenChanging.value });
+function selectShard(shard: DstWorldShard) {
+  selectedShard.value = shard;
+  const category = selectedCategory.value;
+  if (!category) return;
+  const groups = new Set(visibleWorldOptions(shard, category).map((item) => item.group));
+  if (!groups.has(activeGroup.value)) activeGroup.value = groups.values().next().value ?? "";
+}
+
+function copySettings(value: WorldSettings): WorldSettings {
+  return copyWorldSettings(value);
+}
+
+function assignSettings(value: WorldSettings) {
+  Object.assign(draft, copySettings(value));
+  if (!draft.cavesEnabled) selectedShard.value = "master";
+}
+
+function current(ticket: { epoch: number; sequence: number; requestId: string; serverId: string; recordVersion: number; target: string }) {
+  return epoch === ticket.epoch && querySequence === ticket.sequence && latestRequestId === ticket.requestId
+    && server.value?.serverId === ticket.serverId && server.value.recordVersion === ticket.recordVersion
+    && target.value !== null && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === ticket.target;
+}
+
+async function refresh() {
+  const connection = server.value, instanceTarget = target.value;
+  if (!connection || !instanceTarget) return;
+  const preserveDraft = data.value !== null && hasChanges.value;
+  const requestId = crypto.randomUUID();
+  latestRequestId = requestId;
+  const ticket = { epoch, sequence: ++querySequence, requestId, serverId: connection.serverId,
+    recordVersion: connection.recordVersion,
+    target: `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}` };
+  loading.value = true;
+  error.value = null;
+  try {
+    if (workspace.preview.value) {
+      const settings = defaultWorldSettings(instance.value?.cavesEnabled ?? false);
+      if (!current(ticket)) return;
+      data.value = { revision: 0, desired: settings, deployed: null, desiredDigest: "preview",
+        deployedDigest: null, tokenStatus: "unknown", serverPasswordStatus: "unknown",
+        validationWarnings: [] };
+      assignSettings(settings);
+      baseDesired.value = copySettings(settings);
+      baseRevision.value = 0;
+      tokenStatus.value = "unknown";
+      passwordStatus.value = "unknown";
+      stale.value = false;
+      return;
+    }
+    const response = await getWorldConfig({
+      schemaVersion: 1, requestId, target: instanceTarget,
+      expectedRecordVersion: connection.recordVersion,
+    });
+    if (!current(ticket)) return;
+    if (response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId
+      || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId
+      || response.configRevision !== response.data.revision) {
+      throw new Error("世界配置响应身份或版本不匹配");
+    }
+    if (baseRevision.value > response.data.revision || (data.value && data.value.revision > response.data.revision)) {
+      throw new Error("世界配置版本早于已读取结果");
+    }
+    data.value = response.data;
+    if (!preserveDraft) {
+      assignSettings(response.data.desired);
+      baseDesired.value = copySettings(response.data.desired);
+      baseRevision.value = response.data.revision;
+      tokenValue.value = "";
+      passwordValue.value = "";
+    } else if (response.data.revision !== baseRevision.value) {
+      error.value = { code: "REVISION_CONFLICT", message: "期望配置已被其他操作更新；本地草稿已保留，请比较后重载或重新编辑。", recoverySteps: [], field: null };
+    }
+    tokenStatus.value = response.data.tokenStatus;
+    passwordStatus.value = response.data.serverPasswordStatus;
+    stale.value = false;
+    if (!preserveDraft) pendingOperationId.value = "";
+  } catch (cause) {
+    if (current(ticket)) {
+      error.value = describeError(cause);
+      stale.value = data.value !== null;
+    }
+  } finally {
+    if (current(ticket)) loading.value = false;
+  }
+}
+
+function listDraft(value: string): string[] {
+  return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function validateDraft(): string | null {
+  if (!draft.roomName.trim()) return "世界名称不能为空";
+  if (draft.roomName.trim().length > 64) return "世界名称不能超过 64 个字符";
+  if (draft.description.length > 256) return "世界描述不能超过 256 个字符";
+  if (!Number.isInteger(draft.maxPlayers) || draft.maxPlayers < 1 || draft.maxPlayers > 128) return "最大玩家数必须在 1 到 128 之间";
+  if (!Number.isInteger(draft.advanced.voteKickPercentage) || draft.advanced.voteKickPercentage < 0 || draft.advanced.voteKickPercentage > 100) return "踢人投票比例必须在 0 到 100 之间";
+  if (!Number.isInteger(draft.advanced.whitelistSlots) || draft.advanced.whitelistSlots < 0 || draft.advanced.whitelistSlots > draft.maxPlayers) return "白名单预留位不能超过最大玩家数";
+  if (draft.advanced.whitelistSlots > 0 && draft.advanced.whitelist.length === 0) return "设置白名单预留位前，请先填写白名单";
+  for (const value of [tokenValue.value, passwordValue.value]) if (value.length > 8192 || value.includes("\0")) return "凭据长度或字符无效";
+  return null;
+}
+
+async function save() {
+  const instanceTarget = target.value, connection = server.value, currentConfig = data.value;
+  if (saving.value) {
+    saveMessage.value = "保存请求正在处理中，请等待结果。";
+    return;
+  }
+  if (!instanceTarget || !connection || !currentConfig) {
+    saveMessage.value = "尚未读取到可保存的专服配置，请先刷新。";
+    return;
+  }
+  if (loading.value) {
+    saveMessage.value = "专服配置仍在读取，请稍后保存。";
+    return;
+  }
+  if (stale.value) {
+    saveMessage.value = "当前配置读取已过期，请刷新后再保存。";
+    return;
+  }
+  if (workspace.preview.value) {
+    saveMessage.value = "界面预览数据不能保存，请在桌面应用中编辑真实专服。";
+    return;
+  }
+  if (!hasChanges.value) {
+    saveMessage.value = "当前配置没有更改，无需保存。";
+    return;
+  }
+  const validation = validateDraft();
+  if (validation) {
+    error.value = { code: "WORLD_CONFIG_INPUT_INVALID", message: validation, recoverySteps: [], field: null };
+    return;
+  }
+  const savedTarget = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  const savedEpoch = epoch, version = draftVersion.value;
+  const expectedRevision = baseRevision.value;
+  const operationId = pendingOperationId.value || crypto.randomUUID();
+  pendingOperationId.value = operationId;
   saving.value = true;
-  setTimeout(() => {
-    saving.value = false;
-    hasChanges.value = false;
-  }, 1000);
+  error.value = null;
+  saveMessage.value = "正在提交期望配置…";
+  try {
+    const settings = copySettings(draft);
+    const requestId = crypto.randomUUID();
+    const tokenChange = tokenValue.value ? { action: "replace" as const, value: tokenValue.value } : null;
+    const serverPasswordChange = passwordValue.value ? { action: "replace" as const, value: passwordValue.value } : null;
+    const response = await saveWorldConfig({
+      schemaVersion: 1, requestId, target: instanceTarget,
+      expectedRecordVersion: connection.recordVersion, expectedRevision,
+      operationId, settings, tokenChange, serverPasswordChange,
+    });
+    if (epoch !== savedEpoch || target.value === null
+      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== savedTarget
+      || server.value?.recordVersion !== connection.recordVersion) return;
+    if (response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
+      || response.target.instanceId !== instanceTarget.instanceId || response.operationId !== operationId
+      || response.data.revision !== response.verifiedRevision || response.verifiedRevision <= expectedRevision) {
+      throw new Error("保存结果身份或版本不匹配");
+    }
+    data.value = response.data;
+    baseDesired.value = copySettings(response.data.desired);
+    baseRevision.value = response.data.revision;
+    tokenStatus.value = response.data.tokenStatus;
+    passwordStatus.value = response.data.serverPasswordStatus;
+    if (draftVersion.value === version) {
+      assignSettings(response.data.desired);
+      tokenValue.value = "";
+      passwordValue.value = "";
+    }
+    pendingOperationId.value = "";
+    saveMessage.value = `期望配置已保存（版本 ${response.data.revision}），尚未应用到运行中的世界。`;
+  } catch (cause) {
+    if (epoch === savedEpoch && target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget) {
+      error.value = describeError(cause);
+      saveMessage.value = "";
+    }
+  } finally {
+    if (epoch === savedEpoch) saving.value = false;
+  }
 }
 
-function apply() {
-  console.log("TODO: 实现应用配置");
+async function previewApply() {
+  const instanceTarget=target.value,connection=server.value,config=data.value;
+  if(!instanceTarget||!connection||!config||loading.value||saving.value||hasChanges.value||stale.value)return;
+  const ticketEpoch=epoch,version=draftVersion.value,revision=config.revision,requestId=crypto.randomUUID();
+  previewBusy.value=true;error.value=null;
+  try {
+    const result=await previewWorldApply({
+      schemaVersion: 1, requestId, target: instanceTarget,
+      expectedRecordVersion: connection.recordVersion, expectedRevision: revision,
+    });
+    if(epoch!==ticketEpoch||draftVersion.value!==version||target.value?.instanceId!==instanceTarget.instanceId
+      ||server.value?.recordVersion!==connection.recordVersion||data.value?.revision!==revision)return;
+    if(result.requestId!==requestId||result.revision!==revision||result.target.serverId!==instanceTarget.serverId
+      ||result.target.hostId!==instanceTarget.hostId||result.target.instanceId!==instanceTarget.instanceId)
+      throw new Error("配置应用预览身份或版本不匹配");
+    applyPreview.value=result;
+  }catch(cause){if(epoch===ticketEpoch)error.value=describeError(cause);}
+  finally{if(epoch===ticketEpoch)previewBusy.value=false;}
 }
 
-function cancelTokenChange() {
-  tokenChanging.value = false;
+function changeWorldOption(itemKey: string, value: string) {
+  const item = visibleOptions.value.find((option) => option.key === itemKey);
+  if (!item) return;
+  draft.worldgen[draft.cavesEnabled ? selectedShard.value : "master"] = updateShardOption(
+    draft.worldgen[draft.cavesEnabled ? selectedShard.value : "master"], item, value,
+    draft.cavesEnabled ? selectedShard.value : "master");
+}
+
+function updateList(key: "adminList" | "whitelist" | "blocklist", value: string) {
+  draft.advanced[key] = listDraft(value);
+}
+
+watch([() => target.value?.serverId, () => target.value?.hostId, () => target.value?.instanceId,
+  () => server.value?.recordVersion, () => workspace.preview.value], () => {
+  epoch++;
+  querySequence++;
+  latestRequestId = "";
+  data.value = null;
+  applyPreview.value=null;
+  baseDesired.value = null;
+  baseRevision.value = 0;
+  stale.value = false;
+  error.value = null;
+  loading.value = false;
+  saving.value = false;
+  pendingOperationId.value = "";
   tokenValue.value = "";
-}
+  passwordValue.value = "";
+  assignSettings(defaultWorldSettings(instance.value?.cavesEnabled ?? false));
+  if (target.value) void refresh();
+}, { immediate: true, flush: "sync" });
 
-watch(draft, () => {
-  hasChanges.value = true;
-}, { deep: true });
-
+watch(draft, () => { draftVersion.value++; pendingOperationId.value = ""; applyPreview.value=null; saveMessage.value = ""; }, { deep: true, flush: "sync" });
+watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperationId.value = ""; saveMessage.value = ""; }, { flush: "sync" });
 </script>
+
 <template>
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="世界配置">
       <template #actions>
-        <button class="button" :disabled="loading || saving" @click="refresh">
-          <RefreshCw :size="16"/>
-          {{ loading ? '读取中…' : '刷新' }}
-        </button>
-        <button v-if="canApply" class="button" :disabled="saving" @click="apply">
-          <Eye :size="16"/>
-          应用配置
-        </button>
-        <button class="button primary" :disabled="!hasChanges || saving || loading" @click="save">
-          <Save :size="16"/>
-          {{ saving ? '保存中…' : '保存' }}
-        </button>
+        <StatusLabel v-if="status==='inSync'" tone="success" label="已应用"/>
+        <StatusLabel v-else-if="status==='pending'" tone="warning" label="待应用"/>
+        <button class="button" :disabled="loading || saving || !target" @click="refresh"><RefreshCw :size="16"/>{{loading?'读取中…':'刷新'}}</button>
+        <button v-if="status==='pending'&&!hasChanges" class="button" :disabled="previewBusy || stale" @click="previewApply"><Eye :size="16"/>{{previewBusy?'预览中…':'预览应用'}}</button>
       </template>
     </PageHeader>
     <PreviewNotice/>
-
-    <template v-if="domainWorkspace.preview.value">
-      <!-- 状态指示 -->
-      <div v-if="desiredVsDeployed === 'pending'" class="section-block">
-        <StatusLabel tone="warning" label="待应用"/>
-        <span>配置已保存，点击"应用配置"以更新运行环境</span>
-      </div>
-
-      <!-- 基础设置 -->
-      <section class="section-block">
-        <h2>基础设置</h2>
-        <div class="form-grid">
-          <label>
-            专服名称
-            <input v-model="draft.roomName" maxlength="64" required autocomplete="off"/>
-          </label>
-
-          <label>
-            说明
-            <textarea v-model="draft.description" maxlength="256" rows="3" autocomplete="off"/>
-          </label>
-
-          <label>
-            游戏模式
-            <AppSelect v-model="draft.gameMode" :options="gameModeOptions" label="游戏模式"/>
-          </label>
-
-          <label>
-            最大玩家数
-            <input v-model.number="draft.maxPlayers" type="number" min="1" max="128"/>
-          </label>
-
-          <label class="switch-field">
-            <input v-model="draft.pvp" type="checkbox"/>
-            PVP 模式
-          </label>
-
-          <div class="form-field">
-            <span>洞穴分片</span>
-            <div class="creation-static-value">
-              {{ draft.cavesEnabled ? '已启用（容器创建时确定）' : '未启用' }}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 主世界规则 -->
-      <details class="section-block" open>
-        <summary><h2>主世界规则</h2></summary>
-        <div class="form-grid">
-          <label>
-            世界大小
-            <AppSelect v-model="draft.masterRules.worldSize" :options="worldSizeOptions" label="世界大小"/>
-          </label>
-
-          <label>
-            起始季节
-            <AppSelect v-model="draft.masterRules.seasonStart" :options="seasonOptions" label="起始季节"/>
-          </label>
-
-          <label>
-            昼夜长度
-            <AppSelect v-model="draft.masterRules.dayLength" :options="dayLengthOptions" label="昼夜长度"/>
-          </label>
-        </div>
-      </details>
-
-      <!-- 洞穴规则 -->
-      <details v-if="draft.cavesEnabled && draft.cavesRules" class="section-block">
-        <summary><h2>洞穴规则</h2></summary>
-        <div class="form-grid">
-          <label>
-            世界大小
-            <AppSelect v-model="draft.cavesRules.worldSize" :options="worldSizeOptions" label="世界大小"/>
-          </label>
-
-          <label>
-            起始季节
-            <AppSelect v-model="draft.cavesRules.seasonStart" :options="seasonOptions" label="起始季节"/>
-          </label>
-
-          <label>
-            昼夜长度
-            <AppSelect v-model="draft.cavesRules.dayLength" :options="dayLengthOptions" label="昼夜长度"/>
-          </label>
-        </div>
-      </details>
-
-      <!-- Token 输入 -->
-      <section class="section-block">
-        <h2>凭据</h2>
-        <div class="credential-row">
-          <span>Klei Token</span>
-          <StatusLabel
-            v-if="tokenStatus !== 'unknown'"
-            :tone="tokenStatus === 'configured' ? 'success' : 'warning'"
-            :label="tokenStatus === 'configured' ? '已配置' : '未配置'"
-          />
-          <strong v-else class="muted-text">未采集</strong>
-
-          <div v-if="tokenChanging" class="token-input-field">
-            <input
-              v-model="tokenValue"
-              type="password"
-              placeholder="pds-g^KU_..."
-              autocomplete="off"
-              maxlength="256"
-            />
-            <button class="text-button" @click="cancelTokenChange">取消</button>
-          </div>
-          <button v-else class="text-button" :disabled="saving" @click="tokenChanging = true">
-            {{ tokenStatus === 'configured' ? '更换 Token' : '设置 Token' }}
-          </button>
-        </div>
-        <p v-if="tokenStatus === 'missing'" class="muted-text">
-          启动需要认证时必须配置 Token
-        </p>
-      </section>
-    </template>
-
-    <div v-else class="empty-state">
-      <h2>暂不可用</h2>
-      <p>世界配置需要真实连接</p>
+    <div v-if="error" class="environment-error" role="alert">
+      <strong>{{error.message}}</strong>
+      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul>
     </div>
+    <p v-if="saveMessage" class="success-message" role="status" aria-live="polite">{{saveMessage}}</p>
+    <div v-if="loading && !data" class="empty-state" role="status">读取世界配置…</div>
+    <div v-else-if="!target && !workspace.preview.value" class="empty-state"><h2>无法确定专服</h2><p>返回专服列表后重新进入。</p></div>
+    <template v-else>
+      <div v-if="stale" class="environment-error" role="status">显示上次读取的配置；当前结果已过期，保存已停用。</div>
+      <nav class="world-view-tabs" aria-label="世界配置分类">
+        <button type="button" :aria-pressed="activeView==='basic'" :class="{active:activeView==='basic'}" @click="selectView('basic')">基本设置</button>
+        <button type="button" :aria-pressed="activeView==='access'" :class="{active:activeView==='access'}" @click="selectView('access')">访问与联机</button>
+        <button type="button" :aria-pressed="activeView==='worldgen'" :class="{active:activeView==='worldgen'}" @click="selectView('worldgen')">世界生成</button>
+        <button type="button" :aria-pressed="activeView==='worldSettings'" :class="{active:activeView==='worldSettings'}" @click="selectView('worldSettings')">世界规则</button>
+      </nav>
+
+      <section v-if="activeView==='basic'" class="section-block world-form-panel">
+        <div class="section-heading"><h2>基本设置</h2><span class="muted-text">配置版本 {{data?.revision ?? 0}}</span></div>
+        <div class="form-grid">
+          <label>世界名称<input v-model="draft.roomName" maxlength="64" autocomplete="off"/></label>
+          <label>游戏模式<AppSelect v-model="draft.gameMode" :options="dstGameModeOptions" label="游戏模式"/></label>
+          <label>最大玩家数<input v-model.number="draft.maxPlayers" type="number" min="1" max="128"/></label>
+          <label>语言<AppSelect v-model="draft.language" :options="languageOptions" label="语言"/></label>
+          <label>服务器密码<input v-model="passwordValue" type="password" autocomplete="new-password" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'"/></label>
+          <label>Klei Token<input v-model="tokenValue" type="password" autocomplete="off" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'"/></label>
+          <label>世界描述<textarea v-model="draft.description" maxlength="256" rows="3"/></label>
+          <div class="form-field world-secret-status"><span>服务器密码状态</span><StatusLabel :tone="passwordStatus==='configured'?'success':passwordStatus==='missing'?'warning':'muted'" :label="passwordStatus==='configured'?'已配置':passwordStatus==='missing'?'未配置':'未采集'"/></div>
+          <div class="form-field world-secret-status"><span>Klei Token 状态</span><StatusLabel :tone="tokenStatus==='configured'?'success':tokenStatus==='missing'?'warning':'muted'" :label="tokenStatus==='configured'?'已配置':tokenStatus==='missing'?'未配置':'未采集'"/></div>
+          <label class="switch-field"><input v-model="draft.pvp" type="checkbox"/>允许 PVP</label>
+          <label class="switch-field"><input v-model="draft.pauseWhenEmpty" type="checkbox"/>无人时暂停</label>
+          <div class="form-field"><span>洞穴分片</span><StatusLabel :tone="draft.cavesEnabled?'success':'muted'" :label="draft.cavesEnabled?'已启用':'未启用'"/></div>
+        </div>
+        <p v-if="data?.validationWarnings.length" class="muted-text">{{data.validationWarnings.join('；')}}</p>
+      </section>
+
+      <section v-else-if="activeView==='access'" class="section-block world-form-panel">
+        <div class="section-heading"><h2>访问与联机</h2></div>
+        <div class="form-grid">
+          <label class="switch-field"><input v-model="draft.advanced.voteEnabled" type="checkbox"/>启用踢人投票</label>
+          <label>踢人投票比例<input v-model.number="draft.advanced.voteKickPercentage" type="number" min="0" max="100" :disabled="!draft.advanced.voteEnabled"/></label>
+          <label>白名单预留位<input v-model.number="draft.advanced.whitelistSlots" type="number" min="0" :max="draft.maxPlayers"/></label>
+          <label>管理员 Klei ID<textarea :value="draft.advanced.adminList.join('\n')" rows="5" @input="updateList('adminList',($event.target as HTMLTextAreaElement).value)"/></label>
+          <label>白名单 Klei ID<textarea :value="draft.advanced.whitelist.join('\n')" rows="5" @input="updateList('whitelist',($event.target as HTMLTextAreaElement).value)"/></label>
+          <label>封禁名单 Klei ID<textarea :value="draft.advanced.blocklist.join('\n')" rows="5" @input="updateList('blocklist',($event.target as HTMLTextAreaElement).value)"/></label>
+        </div>
+      </section>
+
+      <section v-else class="section-block world-form-panel">
+        <div class="section-heading"><h2>{{activeView==='worldgen'?'世界生成':'世界规则'}}</h2><span class="muted-text">{{optionGroups.reduce((total, group) => total + group.count, 0)}} 项</span></div>
+        <div class="world-shard-tabs" aria-label="选择分片">
+          <button type="button" :aria-pressed="selectedShard==='master'" :class="{active:selectedShard==='master'}" @click="selectShard('master')">Master</button>
+          <button v-if="draft.cavesEnabled" type="button" :aria-pressed="selectedShard==='caves'" :class="{active:selectedShard==='caves'}" @click="selectShard('caves')">Caves</button>
+        </div>
+        <nav class="world-group-tabs" aria-label="选项分组">
+          <button v-for="group in optionGroups" :key="group.key" type="button" :aria-pressed="activeGroup===group.key" :class="{active:activeGroup===group.key}" @click="activeGroup=group.key">{{group.label}} <span>{{group.count}}</span></button>
+        </nav>
+        <div class="form-grid world-option-grid">
+          <label v-for="item in selectedGroupOptions" :key="item.key">{{item.label}}
+            <AppSelect :model-value="optionValue(draft.worldgen[selectedShard],item,selectedShard)"
+              :options="optionValuesForShard(item,selectedShard)" :label="item.label"
+              @update:model-value="changeWorldOption(item.key,$event)"/>
+          </label>
+        </div>
+      </section>
+      <div v-if="activeView!=='basic' && data?.validationWarnings.length" class="muted-text world-validation-warnings">{{data.validationWarnings.join('；')}}</div>
+      <div class="world-page-actions">
+        <span class="world-action-feedback" :class="{'world-action-error':!!error}" :role="error?'alert':'status'" aria-live="polite">{{error?.message || saveMessage || (loading?'正在读取配置…':stale?'读取结果已过期':hasChanges?'有未保存的更改':'没有未保存的更改')}}</span>
+        <button class="button primary" :disabled="saving || loading || stale || !data || !target" @click="save"><Save :size="16"/>{{saving?'保存中…':'保存期望配置'}}</button>
+      </div>
+    </template>
+    <AppDialog :open="!!applyPreview" title="应用世界配置预览" @update:open="value=>{if(!value)applyPreview=null}">
+      <div v-if="applyPreview" class="form-stack">
+        <dl class="creation-facts"><div><dt>配置版本</dt><dd>{{applyPreview.revision}}</dd></div><div><dt>世界存档</dt><dd>{{applyPreview.worldDataPresent?`${applyPreview.worldDataFileCount} 个文件`:"未发现现有存档文件"}}</dd></div><div><dt>Token</dt><dd>{{applyPreview.tokenStatus==='configured'?'已配置':'缺失'}}</dd></div><div><dt>世界生成选项</dt><dd>{{applyPreview.newWorldOptions.length}} 项会影响新世界生成</dd></div></dl>
+        <p v-if="applyPreview.backupRequirement==='required'">应用前需要创建并验证保护备份。</p>
+        <ul v-if="applyPreview.newWorldOptions.length"><li v-for="option in applyPreview.newWorldOptions.slice(0,12)" :key="`${option.shard}:${option.key}`">{{option.shard==='master'?'Master':'Caves'}} · {{option.label}}</li></ul>
+        <ul v-if="applyPreview.blockers.length" class="environment-error"><li v-for="blocker in applyPreview.blockers" :key="blocker">{{blocker==='WORLD_APPLY_NOT_IMPLEMENTED'?'配置发布与备份任务尚未接入':blocker==='PROTECTION_BACKUP_REQUIRED'?'需要保护备份':blocker==='WORLD_CONFIG_RENDER_UNSUPPORTED'?'当前期望配置无法安全转换为 DST 配置文件':'Klei Token 尚未配置'}}</li></ul>
+        <ul v-if="applyPreview.warnings.length"><li v-for="warning in applyPreview.warnings" :key="warning">{{warning}}</li></ul>
+      </div>
+      <template #footer><button class="button" @click="applyPreview=null">关闭</button><button class="button primary" disabled>应用</button></template>
+    </AppDialog>
   </div>
 </template>

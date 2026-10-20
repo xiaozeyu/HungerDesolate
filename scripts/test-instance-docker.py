@@ -46,9 +46,23 @@ class DockerTests(unittest.TestCase):
         with patch.object(MODULE, "run", side_effect=command):
             result = MODULE.create_containers("/var/lib/famine-hub/instances/x/staging/t/compose.yaml", PROJECT_NAME)
         self.assertEqual(result, {"project": PROJECT_NAME, "created": True, "started": False})
-        self.assertEqual(calls[0][-2:], ["create", "--no-start"])
+        self.assertEqual(calls[0][-1], "create")
+        self.assertNotIn("--no-start", calls[0])
         with self.assertRaises(MODULE.DockerRejected):
             MODULE.create_containers("/tmp/compose.yaml", PROJECT_NAME)
+
+    def test_container_create_preserves_bounded_docker_diagnostic(self):
+        diagnostic = "failed to bind host port 11000: address already in use"
+        with patch.object(MODULE, "run", return_value=type(
+                "Result", (), {"returncode": 1, "stdout": "", "stderr": diagnostic})()):
+            with self.assertRaises(MODULE.DockerRejected) as failure:
+                MODULE.create_containers("/var/lib/famine-hub/instances/x/staging/t/compose.yaml", PROJECT_NAME)
+        self.assertEqual(str(failure.exception), "CREATE_CONTAINERS_FAILED")
+        self.assertEqual(failure.exception.diagnostic, diagnostic)
+
+    def test_diagnostics_remove_control_characters_and_are_bounded(self):
+        self.assertEqual(MODULE.diagnostic_text("bad\x1b[31m compose\x1b[0m\n"), "bad compose")
+        self.assertEqual(len(MODULE.diagnostic_text("x" * 3000)), 2000)
 
     def test_verification_requires_identity_labels_and_expected_container_roles(self):
         ids = "a" * 64 + "\n" + "b" * 64 + "\n"

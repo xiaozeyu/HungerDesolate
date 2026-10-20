@@ -22,7 +22,7 @@ function handleRecoveryAction(action:string){
   const feedback:Record<string,string>={
     resumeCreate:"继续创建尚未接入，远端 staging 现场保持不变。",
     cleanupCreate:"创建现场清理尚未接入，未删除或移动任何数据。",
-    inspectLogs:"任务日志接口尚未接入。当前任务状态和失败阶段显示在上方，详细错误与恢复步骤如下。",
+    inspectLogs:"以下为持久化阶段记录和错误详情；容器标准输出日志当前不采集。",
   };
   recoveryFeedback.value=feedback[action]??"此恢复操作暂不可用，远端现场未更改。";
 }
@@ -57,7 +57,10 @@ watch(()=>props.open,(open)=>{
         <p>{{recoveryFeedback}}</p>
         <template v-if="task?.error">
           <p v-if="task.error.message">{{task.error.message}}</p>
+          <pre v-if="typeof task.error.details.composeDiagnostic==='string'">{{task.error.details.composeDiagnostic}}</pre>
+          <pre v-if="typeof task.error.details.dockerDiagnostic==='string'">{{task.error.details.dockerDiagnostic}}</pre>
           <ul v-if="task.error.recoverySteps?.length"><li v-for="step in task.error.recoverySteps" :key="step">{{step}}</li></ul>
+          <ol v-if="task.journal?.length" class="task-journal"><li v-for="entry in task.journal" :key="entry.sequence"><time>{{new Date(entry.at).toLocaleString()}}</time><span>{{entry.stage}}</span><StatusLabel :tone="entry.status==='failed'?'danger':entry.status==='succeeded'?'success':'muted'" :label="entry.status"/></li></ol>
         </template>
       </div>
     </template>

@@ -24,10 +24,12 @@ Docker 安装预检只读 `/etc/os-release`、管理身份、dpkg/source 配置�
 
 `actions/instance-create-task.py` 负责持久任务目录、幂等 request、status、journal、systemd transient unit 和 interrupted 对账；`actions/instance-create-worker.py` 负责阶段更新并在部署兼容性未验证时返回固定 `DEPLOYMENT_VALIDATION_REQUIRED`。测试入口 `python3 scripts/test-instance-create-task.py`。
 
+`actions/instance-delete.py` 提供删除预览与确认执行：planId 绑定 registry revision、停止容器身份、网络端点和实例目录快照；执行时重新核验，只移除归属明确的停止容器/网络。Master/Caves 世界目录含文件时要求先完成保护备份；实例目录归档到 `retired`，仅在资源清除后释放端口。测试入口为 `python3 scripts/test-instance-delete.py`。
+
 当前 worker 已实现实例目录树和初始 manifest 的安全发布；目录/manifest 完成后在 `download` 阶段等待已验证 release，不生成未验证的 Compose，不创建网络/卷，不启动游戏容器。
 
 `actions/instance-release.py` 负责校验固定 Linux amd64 release 和 digest pin Compose 渲染。worker 只把结果写入 `staging/<taskId>`，执行 `docker compose config --quiet` 并生成资源计划；随后在 `publish` 等待阶段 0 的真实产物和容器验证，不执行 `up` 或创建容器。测试入口为 `python3 scripts/test-instance-release.py`。
 
-`actions/instance-docker.py` 是 gated 资源创建与验证内核：只有基础验证 `verified=true` 的 release 才能创建带身份标签的 `<project>_instance` network 和 `docker compose create --no-start` 容器，并验证 labels、挂载源和端口发布。额外的 Klei 配置隔离运行验证不作为创建门槛；测试入口为 `python3 scripts/test-instance-docker.py`。
+`actions/instance-docker.py` 是 gated 资源创建与验证内核：只有基础验证 `verified=true` 的 release 才能创建带身份标签的 `<project>_instance` network 和 `docker compose create` 未启动容器，并验证 labels、挂载源和端口发布。额外的 Klei 配置隔离运行验证不作为创建门槛；测试入口为 `python3 scripts/test-instance-docker.py`。
 
 `probes/instance-release-catalog.py` 与 `list_instance_releases` command 只读核对远端 release catalog；没有合格 release 时返回 `CREATE_RELEASE_REQUIRED`，不下载、不覆盖、不伪造 release。

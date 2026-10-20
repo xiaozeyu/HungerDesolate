@@ -1,6 +1,7 @@
 """Validation and deterministic Compose rendering for a verified DST release."""
 import re
 import uuid
+from pathlib import PurePosixPath
 
 
 class ReleaseRejected(Exception):
@@ -79,7 +80,10 @@ def render_compose(manifest, release, instance_root):
     instance_id = manifest.get("instanceId")
     if not valid_uuid(instance_id) or manifest.get("composeProject") != "fh_" + instance_id.replace("-", ""):
         reject("CREATE_MANIFEST_INVALID")
-    if not isinstance(instance_root, str) or instance_root.startswith("/") or ".." in instance_root.split("/"):
+    root_path = PurePosixPath(instance_root) if isinstance(instance_root, str) else None
+    if (root_path is None or not root_path.is_absolute() or str(root_path) != instance_root
+            or ".." in root_path.parts or root_path.name != instance_id
+            or root_path.parent.name != "instances"):
         reject("CREATE_PATH_INVALID")
     caves = manifest.get("cavesEnabled") is True
     services = ["master"] + (["caves"] if caves else [])

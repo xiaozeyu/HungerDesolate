@@ -4,6 +4,7 @@
 - 优先级：P0 核心
 - 依赖：容器创建框架已完成
 - 可并行：阶段 0 准备
+- 当前实现：基础/联机字段、Master/Caves 选项、期望配置 CAS 保存和应用影响预览已落地；应用仍被 `WORLD_APPLY_NOT_IMPLEMENTED` 阻断，需先完成保护备份、配置发布与运行验证。
 
 ## 1. 功能范围
 
@@ -19,29 +20,41 @@ interface WorldConfig {
   desiredDigest: string;
   deployedDigest: string | null;
   tokenStatus: "configured" | "missing" | "unknown";
-  shardKeyStatus: "configured" | "missing" | "unknown";
+  serverPasswordStatus: "configured" | "missing" | "unknown";
   validationWarnings: string[];
 }
 
 interface WorldSettings {
-  roomName: string;          // 1-64 字符
-  description: string;        // 0-256 字符
-  gameMode: "survival" | "endless" | "wilderness";
-  maxPlayers: number;         // 1-128 (实际范围待阶段 0 确认)
+  roomName: string;
+  description: string;
+  gameMode: "relaxed" | "survival" | "endless" | "wilderness" | "lightsout";
+  maxPlayers: number;         // 1-128
   pvp: boolean;
-  cavesEnabled: boolean;      // 只读（容器创建时确定）
-  masterRules: WorldRules;    // 主世界规则
-  cavesRules: WorldRules | null; // 洞穴规则（cavesEnabled 时必填）
+  language: "zh" | "en";
+  pauseWhenEmpty: boolean;
+  cavesEnabled: boolean;      // 只读，容器创建时确定
+  advanced: {
+    voteEnabled: boolean;
+    voteKickPercentage: number;
+    adminList: string[];
+    whitelist: string[];
+    whitelistSlots: number;
+    blocklist: string[];
+  };
+  worldgen: {
+    master: ShardWorldConfig;
+    caves: ShardWorldConfig;
+  };
 }
 
-interface WorldRules {
-  // 基础规则（示例，完整 schema 待 DST 文档确认）
-  worldSize: "small" | "medium" | "large" | "huge";
-  season_start: "autumn" | "winter" | "spring" | "summer";
-  day_length: "default" | "long" | "short";
-  // ... 更多规则待补充
+interface ShardWorldConfig {
+  preset: "SURVIVAL_TOGETHER" | "DST_CAVE";
+  worldgenOverrides: Record<string, string>;
+  worldSettingsOverrides: Record<string, string>;
 }
 ```
+
+DST 选项 key、标签、分组、分片适用范围、默认值和可选值由迁移的 `dst-world-options.json` 定义；远端只接受该 schema 中对应分片允许的值。世界配置保存为期望配置，当前不填充 `deployed`，直到配置发布和运行验证能力实现。
 
 ### 关键约束
 

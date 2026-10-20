@@ -5,31 +5,69 @@ export interface WorldConfig {
   desiredDigest: string;
   deployedDigest: string | null;
   tokenStatus: "configured" | "missing" | "unknown";
-  shardKeyStatus: "configured" | "missing" | "unknown";
+  serverPasswordStatus: "configured" | "missing" | "unknown";
   validationWarnings: string[];
+}
+
+export interface ClusterAdvancedConfig {
+  voteEnabled: boolean;
+  voteKickPercentage: number;
+  adminList: string[];
+  whitelist: string[];
+  whitelistSlots: number;
+  blocklist: string[];
+}
+
+export type DstWorldCategory = "worldgen" | "worldSettings";
+export type DstWorldShard = "master" | "caves";
+export type DstWorldEffectScope = "newWorld" | "restart" | "runtime";
+
+export interface ShardWorldConfig {
+  preset: string;
+  worldgenOverrides: Record<string, string>;
+  worldSettingsOverrides: Record<string, string>;
+}
+
+export interface WorldgenConfig {
+  master: ShardWorldConfig;
+  caves: ShardWorldConfig;
+}
+
+export interface DstWorldOptionValue {
+  label: string;
+  value: string;
+}
+
+export interface DstWorldOption {
+  key: string;
+  label: string;
+  category: DstWorldCategory;
+  group: string;
+  groupLabel: string;
+  worlds: DstWorldShard[];
+  defaultValue: string;
+  shardDefaultValues?: Partial<Record<DstWorldShard, string>>;
+  valueKind: string;
+  values: DstWorldOptionValue[];
+  shardValues?: Partial<Record<DstWorldShard, DstWorldOptionValue[]>>;
+  effectScope: DstWorldEffectScope;
 }
 
 export interface WorldSettings {
   roomName: string;
   description: string;
-  gameMode: "survival" | "endless" | "wilderness";
+  gameMode: "relaxed" | "survival" | "endless" | "wilderness" | "lightsout";
   maxPlayers: number;
   pvp: boolean;
-  cavesEnabled: boolean; // 只读，容器创建时确定
-  masterRules: WorldRules;
-  cavesRules: WorldRules | null;
-}
-
-export interface WorldRules {
-  worldSize: "small" | "medium" | "large" | "huge";
-  seasonStart: "autumn" | "winter" | "spring" | "summer";
-  dayLength: "default" | "long" | "short";
+  language: "zh" | "en";
+  pauseWhenEmpty: boolean;
+  cavesEnabled: boolean;
+  advanced: ClusterAdvancedConfig;
+  worldgen: WorldgenConfig;
 }
 
 export type TokenChange =
   | { action: "replace"; value: string }
   | { action: "keep" };
 
-export interface WorldConfigDraft extends WorldSettings {
-  tokenChange: TokenChange | null;
-}
+export type ServerPasswordChange = TokenChange;

@@ -188,6 +188,39 @@ svg { stroke-width: 1.75; }
 .creation-facts > div:last-child { border-bottom: 0; }
 .creation-facts dt { color: var(--text-secondary); }
 .creation-facts dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.delete-resource-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--border); }
+.delete-resource-list li { padding: var(--space-2) 0; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; }
+.task-journal { margin: 0; padding-left: var(--space-6); }
+.task-journal li { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(80px, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.task-journal time { color: var(--text-secondary); }
+.world-option-group { border-top: 1px solid var(--border); }
+.world-option-group:last-child { border-bottom: 1px solid var(--border); }
+.world-option-group > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) 0; cursor: pointer; list-style: none; }
+.world-option-group > summary::-webkit-details-marker { display: none; }
+.world-option-group > summary span { color: var(--text-secondary); font-size: 12px; }
+.world-option-group > .form-grid { padding-bottom: var(--space-4); }
+.world-view-tabs, .world-shard-tabs, .world-group-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.world-view-tabs { margin: 0 0 var(--space-6); border-bottom: 1px solid var(--border); gap: var(--space-1); }
+.world-view-tabs button, .world-shard-tabs button, .world-group-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-height: 36px; padding: 0 var(--space-3); border-radius: var(--radius-control); color: var(--text-secondary); font-size: 13px; }
+.world-view-tabs button { border-radius: var(--radius-control) var(--radius-control) 0 0; border-bottom: 2px solid transparent; }
+.world-view-tabs button:hover, .world-shard-tabs button:hover, .world-group-tabs button:hover { background: var(--surface-hover); color: var(--text); }
+.world-view-tabs button.active, .world-shard-tabs button.active, .world-group-tabs button.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.world-view-tabs button.active { border-bottom-color: var(--accent); background: transparent; }
+.world-form-panel { min-height: 360px; }
+.world-form-panel .form-grid { margin-bottom: var(--space-4); }
+.world-secret-status { align-self: center; min-height: 36px; flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.world-shard-tabs { margin: 0 0 var(--space-4); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
+.world-group-tabs { margin: 0 0 var(--space-5); }
+.world-group-tabs button { border: 1px solid var(--border); }
+.world-group-tabs button span { color: var(--text-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.world-group-tabs button.active span { color: var(--accent); }
+.world-option-grid { padding: 0 var(--space-2) var(--space-2) 0; }
+.world-validation-warnings { margin: 0 0 var(--space-4); }
+.world-page-actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); min-height: 64px; margin: var(--space-4) calc(-1 * var(--space-6)) calc(-1 * var(--space-6)); padding: var(--space-3) var(--space-6); border-top: 1px solid var(--border); background: var(--surface); }
+.world-page-actions > span { min-width: 0; overflow-wrap: anywhere; }
+.world-action-feedback { color: var(--text-secondary); }
+.world-action-feedback.world-action-error { color: var(--danger); }
+@media (max-width: 1040px) { .world-page-actions { margin-left: calc(-1 * var(--space-4)); margin-right: calc(-1 * var(--space-4)); padding-left: var(--space-4); padding-right: var(--space-4); } }
 .creation-ports { margin: 0; }
 .creation-ports table { min-width: 0; width: 100%; background: var(--surface); }
 .creation-ports th, .creation-ports td { padding: var(--space-2); }

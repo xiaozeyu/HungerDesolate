@@ -65,6 +65,15 @@ struct RemoteTarget {
     instance_id: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskJournalEntry {
+    pub sequence: u64,
+    pub status: String,
+    pub stage: String,
+    pub at: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteTask {
@@ -85,6 +94,8 @@ struct RemoteTask {
     observation: String,
     result: Option<Value>,
     error: Option<Value>,
+    #[serde(default)]
+    journal: Vec<TaskJournalEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +118,7 @@ pub struct TaskSnapshot {
     observation: String,
     result: Option<Value>,
     error: Option<Value>,
+    journal: Vec<TaskJournalEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -222,6 +234,21 @@ fn task_snapshot(remote: RemoteTask, server_id: &str) -> CommandResult<TaskSnaps
         || !valid_uuid(&remote.target.host_id)
         || !valid_uuid(&remote.target.instance_id)
         || remote.sequence == 0
+        || remote.journal.len() > 100
+        || remote.journal.iter().any(|entry| {
+            entry.sequence == 0
+                || ![
+                    "queued",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                ]
+                .contains(&entry.status.as_str())
+                || entry.stage.len() > 64
+                || entry.at.len() > 64
+        })
     {
         return Err(error(
             "CREATE_TASK_PROTOCOL_INVALID",
@@ -250,6 +277,7 @@ fn task_snapshot(remote: RemoteTask, server_id: &str) -> CommandResult<TaskSnaps
         observation: remote.observation,
         result: remote.result,
         error: remote.error,
+        journal: remote.journal,
     })
 }
 

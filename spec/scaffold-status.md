@@ -113,17 +113,17 @@ S0 与 S2–S4 尚未全部完成；S2 已实现连接、只读身份检查和 B
 
 - 新增 `remote-scripts/actions/instance-release.py`：校验固定 `linux/amd64` release、镜像/产物摘要和启动命令，并生成 Master/Caves digest pin Compose。
 - worker 只把基础验证通过的 release 的 Compose 写入 `staging/<taskId>`；没有基础验证通过的 release 时返回 `CREATE_RELEASE_REQUIRED`，不会覆盖活动 Compose 或启动 Docker。
-- staging Compose 通过受控 `docker compose config --quiet` 后写入资源计划；config 失败保留 staging 并返回 `CREATE_COMPOSE_CONFIG_FAILED`，config 成功后创建带身份标签的网络和 `--no-start` 容器，再验证 labels、挂载和端口。
+- staging Compose 通过受控 `docker compose config --quiet` 后写入资源计划；config 失败保留 staging 并返回 `CREATE_COMPOSE_CONFIG_FAILED`，config 成功后创建带身份标签的网络和未启动容器，再验证 labels、挂载和端口。
 - 测试入口：`python3 scripts/test-instance-release.py`；真实 release 获取、Compose config、网络/卷、容器和联网仍待阶段 0。
 
 ## 2026-10-19：Docker 资源创建内核
 
-- 新增 `remote-scripts/actions/instance-docker.py`：基础验证通过的 release 才能创建带 host/instance/schema 标签的独立 bridge network，并执行 `docker compose create --no-start`。
+- 新增 `remote-scripts/actions/instance-docker.py`：基础验证通过的 release 才能创建带 host/instance/schema 标签的独立 bridge network，并执行 `docker compose create` 创建未启动容器。
 - 创建路径覆盖 network/容器创建、labels/挂载/端口验证和 runtime/active-release 发布，不会自动启动游戏；Klei 配置隔离运行验证为可选额外证据。隔离测试入口：`python3 scripts/test-instance-docker.py`。
 
 ## 2026-10-19：容器创建与 runtime 验证
 
-- 基础验证通过的 release 会创建或复用带身份标签的 network，执行 `docker compose create --no-start`，验证容器 labels、挂载源和端口发布。
+- 基础验证通过的 release 会创建或复用带身份标签的 network，执行 `docker compose create` 创建未启动容器，验证容器 labels、挂载源和端口发布。
 - 验证通过后发布实例 `compose.yaml`、`active-release.json`、`runtime.json`，创建任务进入 succeeded；不写世界配置、不写 Token、不启动游戏。
 - 下一阶段是容器环境就绪后的世界配置、Token 和启动任务。
 

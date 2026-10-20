@@ -1,13 +1,15 @@
 import { onBeforeUnmount, ref, shallowRef, watch, type Ref } from "vue";
-import { listInstances, type InstanceListResponse } from "../api/instances";
+import { getInstanceCreateStatus, listInstances, type InstanceListResponse } from "../api/instances";
 import { demoInstances } from "../fixtures/workspace";
 import { validateInstanceList } from "../lib/instanceList";
 import { currentConnection, type ConnectionTicket } from "../lib/connectionGuard";
 import { describeError, type UserError } from "../lib/commandError";
 import { useWorkspace } from "./useWorkspace";
+import { useTasks } from "./useTasks";
 import type { ServerSummary } from "../types/contracts";
 export function useInstanceList(server: Ref<ServerSummary | null>, preview: Readonly<Ref<boolean>>) {
   const workspace = useWorkspace();
+  const taskStore = useTasks();
   const data = shallowRef<InstanceListResponse | null>(null), error = shallowRef<UserError | null>(null);
   const loading = ref(false), stale = ref(false);
   let epoch = 0, sequence = 0, requestId = "";
@@ -27,9 +29,35 @@ export function useInstanceList(server: Ref<ServerSummary | null>, preview: Read
       if (data.value && data.value.hostId === result.hostId && result.registryRevision < data.value.registryRevision) throw new Error("注册表版本早于已读取结果，请核对远端数据");
       workspace.commitInstances(result);
       data.value = result;stale.value = false;
+      if (!preview.value) void reconcileCreationTasks(target, result, ticket);
     } catch (cause) {
       if (current(ticket)) {error.value = describeError(cause);stale.value = data.value !== null;workspace.invalidateSelection();}
     } finally {if (current(ticket)) loading.value = false;}
+  }
+  async function reconcileCreationTasks(target:ServerSummary, snapshot:InstanceListResponse, ticket:ConnectionTicket) {
+    const terminalStatuses=["succeeded","failed","cancelled","interrupted"];
+    const pending=snapshot.instances.filter(item=>(item.lifecycle==="creating"||item.lifecycle==="createFailed")
+      &&item.activeTaskId&&!taskStore.tasks.value.some(task=>task.taskId===item.activeTaskId
+        &&task.target.serverId===target.serverId&&"hostId" in task.target&&task.target.hostId===item.hostId
+        &&"instanceId" in task.target&&task.target.instanceId===item.instanceId&&terminalStatuses.includes(task.status)));
+    if(!pending.length)return;
+    const results=await Promise.all(pending.map(async item=>{
+      try{return await getInstanceCreateStatus({schemaVersion:1,requestId:crypto.randomUUID(),
+        target:{serverId:target.serverId,hostId:item.hostId},expectedRecordVersion:target.recordVersion,
+        operationId:item.activeTaskId!});}catch{return null;}
+    }));
+    if(!current(ticket))return;
+    let terminal=false;
+    for(let index=0;index<pending.length;index++){
+      const response=results[index],item=pending[index],task=response?.task;
+      if(!response||!item||response.serverId!==target.serverId||response.recordVersion!==target.recordVersion
+        ||!task||!("hostId" in task.target)||!("instanceId" in task.target)
+        ||task.operationId!==item.activeTaskId||task.target.serverId!==target.serverId
+        ||task.target.hostId!==item.hostId||task.target.instanceId!==item.instanceId)continue;
+      taskStore.receive(task);
+      if(terminalStatuses.includes(task.status))terminal=true;
+    }
+    if(terminal&&current(ticket))await refresh();
   }
   // hostId is bound on the first successful discovery without changing its connection version.
   watch([() => server.value?.serverId, () => server.value?.recordVersion, () => preview.value], () => {

@@ -15,6 +15,7 @@ SPEC.loader.exec_module(CONTROL)
 HOST = "11111111-1111-4111-8111-111111111111"
 PLAN = "22222222-2222-4222-8222-222222222222"
 OPERATION = "33333333-3333-4333-8333-333333333333"
+RELEASE = "44444444-4444-4444-8444-444444444444"
 
 
 class AdmissionTests(unittest.TestCase):
@@ -23,16 +24,26 @@ class AdmissionTests(unittest.TestCase):
         root = Path(self.temp.name) / "famine-hub"
         root.mkdir(mode=0o700)
         (root / "locks").mkdir(mode=0o700)
+        (root / "releases").mkdir(mode=0o700)
         (root / "host.json").write_text(json.dumps({"schemaVersion": 1, "hostId": HOST}))
         self.registry = {"schemaVersion": 1, "hostId": HOST, "registryRevision": 3,
                          "instances": [], "portReservations": [], "operations": []}
         (root / "registry.json").write_text(json.dumps(self.registry))
+        release = {"releaseId": RELEASE, "platform": "linux/amd64", "image": "registry.example/dst",
+                   "imageDigest": "sha256:" + "a" * 64, "dstBuild": "build-2026",
+                   "artifactDigest": "sha256:" + "b" * 64, "scriptVersion": "scripts-1",
+                   "verified": True, "runtimeVerified": False,
+                   "commands": {"master": ["/opt/dst", "master"], "caves": ["/opt/dst", "caves"]}}
+        catalog = {"schemaVersion": 1, "hostId": HOST, "releases": [release]}
+        (root / "releases" / "catalog.json").write_text(json.dumps(catalog))
         self.root = root
         self.request = {"action": "admit", "schemaVersion": 1, "operationId": OPERATION,
                         "planId": PLAN, "hostId": HOST, "expectedRegistryRevision": 3,
                         "input": {"displayName": " 生存一服 ", "autostart": True,
                                    "startAfterCreate": True, "portPolicy": "auto",
                                    "cavesEnabled": False,
+                                   "releaseId": RELEASE,
+                                   "releaseCatalogDigest": CONTROL.digest(catalog),
                                    "expectedPorts": CONTROL.allocate(set(), False)}}
         original_lstat, original_fstat = Path.lstat, os.fstat
         def root_owned(info):
@@ -41,6 +52,7 @@ class AdmissionTests(unittest.TestCase):
             return os.stat_result(fields)
         self.patches = [
             patch.object(CONTROL, "ROOT", root),
+            patch.object(CONTROL, "CATALOG", root / "releases" / "catalog.json"),
             patch.object(CONTROL, "LOCKS", root / "locks"),
             patch.object(CONTROL, "LOCK_PATH", root / "locks" / "registry.lock"),
             patch.object(CONTROL, "OWNER_PATH", root / "locks" / "registry-owner.json"),

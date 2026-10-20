@@ -6,11 +6,22 @@ import subprocess
 
 
 class DockerRejected(Exception):
-    pass
+    def __init__(self, code, diagnostic=None):
+        super().__init__(code)
+        self.code = code
+        self.diagnostic = diagnostic
 
 
 def reject(code):
     raise DockerRejected(code)
+
+
+def diagnostic_text(value):
+    if not isinstance(value, str):
+        return None
+    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+    cleaned = "".join(char for char in value if char in "\n\t" or ord(char) >= 32).strip()
+    return cleaned[:2000] or None
 
 
 def safe_label(value):
@@ -24,7 +35,7 @@ def run(command, timeout=30):
     environment.update({"LC_ALL": "C", "DOCKER_HOST": "unix:///var/run/docker.sock"})
     try:
         result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True, timeout=timeout,
+                                stderr=subprocess.PIPE, text=True, errors="replace", timeout=timeout,
                                 check=False, env=environment)
     except FileNotFoundError:
         reject("CREATE_DOCKER_UNAVAILABLE")
@@ -32,6 +43,7 @@ def run(command, timeout=30):
         reject("CREATE_DOCKER_TIMEOUT")
     if len(result.stdout) > 65536:
         reject("CREATE_DOCKER_RESPONSE_INVALID")
+    result.stderr = diagnostic_text(result.stderr)
     return result
 
 
@@ -56,7 +68,7 @@ def ensure_network(project, host_id, instance_id):
     command.append(name)
     created = run(command)
     if created.returncode != 0:
-        reject("CREATE_NETWORK_FAILED")
+        raise DockerRejected("CREATE_NETWORK_FAILED", created.stderr)
     return name
 
 
@@ -65,9 +77,9 @@ def create_containers(compose_path, project, root="/var/lib/famine-hub"):
         reject("CREATE_PATH_INVALID")
     if not safe_label(project):
         reject("CREATE_DOCKER_LABEL_INVALID")
-    result = run(["docker", "compose", "-p", project, "-f", compose_path, "create", "--no-start"], timeout=120)
+    result = run(["docker", "compose", "-p", project, "-f", compose_path, "create"], timeout=120)
     if result.returncode != 0:
-        reject("CREATE_CONTAINERS_FAILED")
+        raise DockerRejected("CREATE_CONTAINERS_FAILED", result.stderr)
     return {"project": project, "created": True, "started": False}
 
 

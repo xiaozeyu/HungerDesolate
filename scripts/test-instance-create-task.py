@@ -104,6 +104,9 @@ class TaskTests(unittest.TestCase):
         self.assertTrue((task / "request.json").exists())
         self.assertTrue((task / "status.json").exists())
         self.assertEqual(runner.call_args.args[0][0], "/usr/bin/systemd-run")
+        journal = CONTROL.journal_tail(OPERATION)
+        self.assertEqual(len(journal), 1)
+        self.assertEqual(journal[0]["stage"], "queued")
         self.assertTrue((task / "release.json").exists())
         (task / "release.json").unlink()
 
@@ -117,6 +120,9 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(status["status"], "failed")
         self.assertEqual(status["stage"], "download")
         self.assertEqual(status["error"]["code"], "CREATE_RELEASE_REQUIRED")
+        registry = json.loads((self.root / "registry.json").read_text())
+        self.assertEqual(registry["instances"][0]["lifecycle"], "createFailed")
+        self.assertEqual(registry["instances"][0]["pendingTaskId"], OPERATION)
         manifest = json.loads((self.root / "instances" / state["target"]["instanceId"] / "manifest.json").read_text())
         self.assertEqual(manifest["instanceId"], state["target"]["instanceId"])
         self.assertNotIn("token", json.dumps(manifest))
@@ -193,7 +199,9 @@ class TaskTests(unittest.TestCase):
         worker_source = PROJECT / "remote-scripts/actions/instance-create-worker.py"
         (task / "worker.py").write_text(worker_source.read_text())
         def command_result(command, **_kwargs):
-            return type("Result", (), {"returncode": 1 if command[:2] == ["docker", "compose"] else 0})()
+            failed = command[:2] == ["docker", "compose"]
+            return type("Result", (), {"returncode": 1 if failed else 0,
+                                        "stdout": "", "stderr": "services.master.volumes must be a list" if failed else ""})()
         with patch.object(CONTROL.os, "geteuid", return_value=0), \
              patch.object(CONTROL.subprocess, "run", side_effect=command_result):
             worker = __import__("runpy").run_path(str(task / "worker.py"))
@@ -201,6 +209,7 @@ class TaskTests(unittest.TestCase):
         status = json.loads((task / "status.json").read_text())
         staging = next((self.root / "instances").rglob("staging")) / OPERATION
         self.assertEqual(status["error"]["code"], "CREATE_COMPOSE_CONFIG_FAILED")
+        self.assertEqual(status["error"]["details"]["composeDiagnostic"], "services.master.volumes must be a list")
         self.assertTrue((staging / "compose.yaml").exists())
         self.assertFalse((staging / "resource-plan.json").exists())
 
@@ -230,6 +239,18 @@ class TaskTests(unittest.TestCase):
         instance = self.root / "instances" / state["target"]["instanceId"]
         self.assertEqual(status["status"], "succeeded")
         self.assertEqual(status["stage"], "finalize")
+        registry = json.loads((self.root / "registry.json").read_text())
+        self.assertEqual(registry["instances"][0]["lifecycle"], "ready")
+        self.assertIsNone(registry["instances"][0]["pendingTaskId"])
+        registry["instances"][0]["lifecycle"] = "creating"
+        registry["instances"][0]["pendingTaskId"] = OPERATION
+        registry["registryRevision"] += 1
+        (self.root / "registry.json").write_text(json.dumps(registry))
+        observed = CONTROL.status(OPERATION)
+        self.assertEqual(observed["status"], "succeeded")
+        reconciled = json.loads((self.root / "registry.json").read_text())
+        self.assertEqual(reconciled["instances"][0]["lifecycle"], "ready")
+        self.assertIsNone(reconciled["instances"][0]["pendingTaskId"])
         self.assertTrue((instance / "compose.yaml").exists())
         self.assertTrue((instance / "runtime.json").exists())
         manifest = json.loads((instance / "manifest.json").read_text())

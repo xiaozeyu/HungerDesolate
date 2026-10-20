@@ -281,7 +281,7 @@ SSH 断开不停止 controller/worker。客户端标 observation=stale，重连�
 
 ### 9.2 世界配置
 
-save 只更新 desired 与 revision；不立即改活动 config/data。tokenChange 由 keyring/受保护远端 desired-secrets 文件处理，普通 desired JSON 不存明文。apply 才将选定 secretVersion 发布为活动配置；保护备份保留原秘密恢复材料/受保护引用。CAS 或写入失败不得提前覆盖正在运行实例的 Token。
+save 只更新 desired 与 manifest configRevision；不立即改活动 config/data。tokenChange 与 serverPasswordChange 由独立字段写入 `desired-secrets/<credentialRef>.<kind>` 的 root-only 文件，普通 desired JSON、事务回执只保存随机引用。写操作在实例锁内使用 `expectedRevision` CAS，原子 journal 协调 desired/manifest/operation receipt，秘密值在 Rust 请求边界使用 Zeroizing；失败和重放不得泄露或覆盖已有凭据。
 
 apply 以已保存 revision 生成预览，实例锁内重查 → staging 渲染/解析校验 → 如需停服先优雅停止 → 创建一致保护备份 → 发布配置与完整 active-release 组合 → 按原运行状态或明确用户选择启动 → 实际重读 digest/状态。
 

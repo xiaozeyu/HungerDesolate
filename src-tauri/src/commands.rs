@@ -387,6 +387,76 @@ pub async fn cleanup_orphan_instance(
 }
 
 #[tauri::command]
+pub async fn preview_instance_delete(
+    state: State<'_, AppState>,
+    request: crate::instance_deletion::PreviewRequest,
+) -> CommandResult<crate::instance_deletion::PreviewResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "previewInstanceDelete",
+        safe_request_id(&request.request_id),
+        move || crate::instance_deletion::preview(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_instance(
+    state: State<'_, AppState>,
+    request: crate::instance_deletion::DeleteRequest,
+) -> CommandResult<crate::instance_deletion::DeleteResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "deleteInstance",
+        safe_request_id(&request.request_id),
+        move || crate::instance_deletion::delete(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_world_config(
+    state: State<'_, AppState>,
+    request: crate::world_config::GetRequest,
+) -> CommandResult<crate::world_config::WorldQueryResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getWorldConfig",
+        safe_request_id(&request.request_id),
+        move || crate::world_config::get(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn save_world_config(
+    state: State<'_, AppState>,
+    request: crate::world_config::SaveRequest,
+) -> CommandResult<crate::world_config::WorldMutationResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "saveWorldConfig",
+        safe_request_id(&request.request_id),
+        move || crate::world_config::save(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_world_apply(
+    state: State<'_, AppState>,
+    request: crate::world_config::PreviewApplyRequest,
+) -> CommandResult<crate::world_config::WorldApplyPreview> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "previewWorldApply",
+        safe_request_id(&request.request_id),
+        move || crate::world_config::preview_apply(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn list_instance_releases(
     state: State<'_, AppState>,
     request: crate::ssh_dto::ConnectionRequest,

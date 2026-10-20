@@ -28,4 +28,14 @@ describe("server form", () => {
     const unsafe = describeError({code: "RELEASE_RUNTIME_VERIFY_FAILED", message: "验证失败", details: {remoteCode: "token-secret"}});
     assert.equal(unsafe.message, "验证失败");
   });
+
+  it("shows safe remote diagnostics for world config preview failures", () => {
+    const error = describeError({code: "WORLD_CONFIG_FAILED", message: "操作失败",
+      details: {remoteCode: "WORLD_CONFIG_FAILED", remoteFailureType: "KeyError", remoteFailureKey: "configRevision"}});
+    assert.equal(error.message, "操作失败（远端错误码：WORLD_CONFIG_FAILED，异常类型：KeyError，缺失字段：configRevision）");
+    assert.deepEqual(error.recoverySteps, ["请将错误码和异常类型提供给开发人员；未修改已保存配置"]);
+    const unsafe = describeError({code: "WORLD_CONFIG_FAILED", message: "操作失败",
+      details: {remoteCode: "secret-value", remoteFailureType: "secret-value"}});
+    assert.equal(unsafe.message, "操作失败");
+  });
 });

@@ -189,7 +189,7 @@ docker network create \
 
 # 2. 创建容器（不启动）
 docker compose -f /var/lib/famine-hub/instances/<instanceId>/compose.yaml \
-  create --no-start
+  create
 
 # 3. 验证容器
 MASTER_ID=$(docker ps -a --filter "label=app.hungerdesolate.instanceId=<instanceId>" \

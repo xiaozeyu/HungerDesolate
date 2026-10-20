@@ -44,7 +44,7 @@ A1 已得到用户人工验证的主路径证据，平台/异常矩阵仍需补�
 | B1 | 环境准备（实现完成，实机验收待做） | 管理目录初始化、Ubuntu 26.04 root-only Docker/Compose APT 安装、固定包清单、冲突阻断、apt removal simulation、systemd 持久任务与断线对账已实现；仍需 Ubuntu 26.04 干净机安装/重启/断线验收，再由阶段 0 验证三专服部署 |
 | B2 | 注册表、manifest、端口计划 | 已落地创建接纳内核：注册锁、不可变身份、完整端口预留、实际占用重查与 operation 幂等；尚未接入持久 controller，不能创建真实专服 |
 | B3 | 远端任务与对账 | 已完成创建任务持久接纳、request/status/journal、systemd controller 启动、sequence、interrupted 对账和恢复动作；真实部署 worker、维护锁租约、取消与主机重任务队列仍待完成 |
-| B4 | 创建专服 | 已完成受控实例目录树、拓扑 manifest、release 元数据校验、staging Compose、Compose config、资源计划、Docker network/容器创建、runtime 验证和前端任务提交；真实 DST 产物/容器实验、启动和后续世界配置仍待完成 |
+| B4 | 创建专服与生命周期 | 已完成受控目录、Compose/Docker 创建、容器验证、终态注册表对账；新增持久任务阶段记录查看及受控删除预览/执行，数据归档到 retired；继续创建恢复和真实 DST/联网实验仍待完成 |
 | B5 | 启停/重启/开机策略 | 实例级操作、Master/Caves 绑定、实际 build/监听证据；手动停止及重启语义明确 |
 | B6 | 完整任务 UI | 单一底栏、详情/错误/恢复动作、应用级对账；A 完成不会覆盖 B 页或抢导航 |
 
@@ -54,7 +54,7 @@ B3 必须先于安装/恢复等长任务成熟。现有 task reducer 和本地�
 
 | 顺序 | 功能 | 关键交付/验收 |
 | --- | --- | --- |
-| C1 | 世界配置 | 期望/部署/运行分离，实例草稿、revision CAS、预览；洞穴关闭保留存档 |
+| C1 | 世界配置 | 基础/联机字段、Master/Caves DST 选项、期望配置 CAS 保存与应用影响预览已实现；实际 apply 仍由备份与配置发布任务阻断，待实现保护备份、渲染、发布和运行验证。洞穴拓扑只读，拓扑变更需专门迁移并保留存档 |
 | C2 | 备份与恢复基础 | 停服一致备份、校验/归属、下载、恢复前保护点；拒绝跨实例恢复，失败保留原世界 |
 | C3 | MOD 管理 | Workshop 元数据、实例启用/配置、受限 Lua 解析、检查更新、staging 下载/应用、分片 UGC 一致性 |
 | C4 | DST/MOD 更新 | 固定目标版本、保护备份、发布切换、实际版本验证与完整恢复点回滚 |
@@ -105,7 +105,7 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 
 ## 12. 2026-10-19：Docker 资源创建内核
 
-新增 `remote-scripts/actions/instance-docker.py`，只有 release 的 `runtimeVerified=true` 时才允许执行资源创建：网络名称固定为 `<composeProject>_instance`，创建/复用必须匹配 hostId、instanceId 和 schema 标签；容器使用 `docker compose create --no-start`，随后验证容器 labels、挂载源和端口发布。验证通过后 worker 发布活动 `compose.yaml`、`active-release.json`、`runtime.json` 并完成创建任务；不自动启动游戏。
+新增 `remote-scripts/actions/instance-docker.py`，只有 release 的 `runtimeVerified=true` 时才允许执行资源创建：网络名称固定为 `<composeProject>_instance`，创建/复用必须匹配 hostId、instanceId 和 schema 标签；容器使用 `docker compose create` 创建但不启动，随后验证容器 labels、挂载源和端口发布。验证通过后 worker 发布活动 `compose.yaml`、`active-release.json`、`runtime.json` 并完成创建任务；不自动启动游戏。
 
 当前默认 release 未通过 runtime 验证，因此 worker 仍在 `publish` 返回 `CREATE_DOCKER_RUNTIME_REQUIRED`；runtimeVerified fixture 已覆盖创建、验证和发布路径。隔离测试入口为 `python3 scripts/test-instance-docker.py`；真实 network/container 创建与阶段 0 产物验证仍待完成。下一步是容器就绪后的世界配置与 Token 流程。
 
@@ -163,6 +163,13 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 ## 19. 2026-10-19：基础验证 Release 可创建
 
 - Release 构建登记后的基础验证（镜像 digest、`version.txt`、DST 可执行文件与动态依赖）通过后即可用于创建容器；`runtimeVerified` 不再是创建门槛。
-- Klei 配置 ZIP 的 Master/Caves 隔离启动和 UDP listener 检查保留为可选增强证据。创建任务只创建 `--no-start` 容器并验证 Docker 身份标签、挂载和端口，不把容器创建成功表述为游戏已启动。
+- Klei 配置 ZIP 的 Master/Caves 隔离启动和 UDP listener 检查保留为可选增强证据。创建任务只创建未启动的容器并验证 Docker 身份标签、挂载和端口，不把容器创建成功表述为游戏已启动。
 - 前后端 catalog、创建 admission、worker 与 UI 均以 `verified=true` 为放行条件；`runtimeVerified` 仍独立记录，不能由基础验证伪造。
 - 测试：`scripts/test-instance-release-catalog.py`、`scripts/test-instance-create-task.py`、`scripts/test-instance-create-ui.mjs`。
+
+## 20. 2026-10-20：B4 删除与任务阶段记录
+
+- 新增 `preview_instance_delete` / `delete_instance`：预览绑定 registry revision、停止容器 ID/状态、network endpoint 和实例目录快照；执行时在 registry lock 内重验，并按 operationId 幂等。
+- 仅删除身份标签匹配的 stopped/created/exited/dead 容器和 network；运行容器、活动/待核实任务、外部 network endpoint、路径异常和计划变化均阻断。Master/Caves 世界目录有文件时要求保护备份；删除后实例目录归档到 retired，再释放端口。
+- 创建任务状态查询附带有界持久 journal 阶段记录。专服列表恢复 creating/createFailed 的远端任务，并可查看失败摘要、诊断和阶段时间线；不声称采集容器标准输出日志。
+- 继续创建仍未实现；真实删除需 Linux Docker 主机实测，隔离测试入口为 `scripts/test-instance-delete.py`。

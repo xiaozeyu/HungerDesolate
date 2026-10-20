@@ -41,24 +41,28 @@ class ReleaseTests(unittest.TestCase):
                 MODULE.validate_release(value)
 
     def test_renders_digest_pinned_master_and_caves_compose_without_secrets(self):
-        result = MODULE.render_compose(manifest(), release(), "instances/" + INSTANCE_ID)
+        instance_root = "/var/lib/famine-hub/instances/" + INSTANCE_ID
+        result = MODULE.render_compose(manifest(), release(), instance_root)
         self.assertIn("registry.example/dst@sha256:" + "a" * 64, result)
         self.assertIn("master:", result)
         self.assertIn("caves:", result)
         self.assertIn("11000:11000/udp", result)
+        self.assertIn(instance_root + "/config:/srv/config:rw", result)
         self.assertNotIn("/srv/dst:ro", result)
         self.assertIn("depends_on:", result)
         self.assertNotIn("token", result.lower())
         self.assertNotIn("password", result.lower())
 
     def test_disabled_caves_do_not_render_caves_service_or_ports(self):
-        result = MODULE.render_compose(manifest(False), release(), "instances/" + INSTANCE_ID)
+        result = MODULE.render_compose(manifest(False), release(), "/var/lib/famine-hub/instances/" + INSTANCE_ID)
         self.assertIn("master:", result)
         self.assertNotIn("\n  caves:", result)
         self.assertNotIn("11001:11001/udp", result)
 
     def test_rejects_absolute_or_traversal_paths(self):
-        for path in ("/var/lib/famine-hub/instances/x", "instances/../x"):
+        for path in ("instances/" + INSTANCE_ID,
+                     "/var/lib/famine-hub/instances/../" + INSTANCE_ID,
+                     "/var/lib/famine-hub/other/" + INSTANCE_ID):
             with self.subTest(path=path), self.assertRaises(MODULE.ReleaseRejected):
                 MODULE.render_compose(manifest(), release(), path)
 

@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 
 
 def task_error(task_id, target, code="DEPLOYMENT_VALIDATION_REQUIRED", category="stagingVerify",
-               message="游戏镜像和 Compose 部署兼容性尚未验证"):
+               message="游戏镜像和 Compose 部署兼容性尚未验证", details=None):
     return {"schemaVersion": 1, "code": code, "category": category,
             "operation": "instanceCreate", "requestId": None,
             "target": target, "message": message,
             "retryable": False, "remoteChanged": True, "taskId": task_id,
             "recoverySteps": ["完成阶段 0 验证后重新预览并继续创建", "或使用创建清理预览释放现场"],
-            "details": {}}
+            "details": details or {}}
 
 
 def success_result(host_id, instance_id, deployment_id):
@@ -49,13 +49,18 @@ def compose_config(controller, compose_path, project):
     try:
         result = controller["subprocess"].run(
             ["docker", "compose", "-p", project, "-f", str(compose_path), "config", "--quiet"],
-            stdin=controller["subprocess"].DEVNULL, stdout=controller["subprocess"].DEVNULL,
-            stderr=controller["subprocess"].DEVNULL, timeout=30, check=False, env=environment)
+            stdin=controller["subprocess"].DEVNULL, stdout=controller["subprocess"].PIPE,
+            stderr=controller["subprocess"].PIPE, timeout=30, check=False, env=environment,
+            text=True, errors="replace")
     except FileNotFoundError:
-        return "CREATE_COMPOSE_CONFIG_UNAVAILABLE"
+        return "CREATE_COMPOSE_CONFIG_UNAVAILABLE", None
     except controller["subprocess"].TimeoutExpired:
-        return "CREATE_COMPOSE_CONFIG_TIMEOUT"
-    return None if result.returncode == 0 else "CREATE_COMPOSE_CONFIG_FAILED"
+        return "CREATE_COMPOSE_CONFIG_TIMEOUT", None
+    if result.returncode == 0:
+        return None, None
+    diagnostic = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part and part.strip())
+    diagnostic = "".join(char for char in diagnostic if char in "\n\t" or ord(char) >= 32)[:2000]
+    return "CREATE_COMPOSE_CONFIG_FAILED", diagnostic or None
 
 
 def reject(code):
@@ -171,12 +176,12 @@ def main(task_path):
         release = release_module["validate_release"](release)
         instance = controller["ROOT"] / "instances" / admission["instanceId"]
         manifest_value = read_json(instance / "manifest.json", 65536)
-        compose = release_module["render_compose"](manifest_value, release,
-                                                    "instances/" + admission["instanceId"])
+        compose = release_module["render_compose"](manifest_value, release, str(instance))
         staging = instance / "staging" / task_id
         controller["atomic_bytes"](staging / "compose.yaml", compose.encode())
         controller["write_json"](staging / "release.json", release)
-        config_error = compose_config(controller, staging / "compose.yaml", manifest_value["composeProject"])
+        config_error, config_diagnostic = compose_config(
+            controller, staging / "compose.yaml", manifest_value["composeProject"])
         if config_error:
             release_error = config_error
         else:
@@ -186,8 +191,11 @@ def main(task_path):
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         release_error = "CREATE_COMPOSE_PUBLISH_FAILED"
     if release_error is not None:
+        details = {"composeDiagnostic": config_diagnostic} if release_error == "CREATE_COMPOSE_CONFIG_FAILED" and config_diagnostic else None
         update_status(task_dir, "failed", "download", last_completed="prepareDirectories",
-                      error=task_error(task_id, target, release_error, "download", "release 元数据或 Compose 计划无效"),
+                      error=task_error(task_id, target, release_error, "download",
+                                       "Compose 配置校验失败" if release_error.startswith("CREATE_COMPOSE_CONFIG_") else "release 元数据或 Compose 计划无效",
+                                       details),
                       result=controller["recovery_result"](admission["hostId"], admission["instanceId"]))
         return 1
     update_status(task_dir, "running", "publish", last_completed="stagingVerify", cancel_allowed=False)
@@ -195,8 +203,9 @@ def main(task_path):
         network = docker_module["ensure_network"](manifest_value["composeProject"], admission["hostId"], admission["instanceId"])
         containers = docker_module["create_containers"](str(staging / "compose.yaml"), manifest_value["composeProject"], str(controller["ROOT"]))
     except docker_module["DockerRejected"] as error:
+        details = {"dockerDiagnostic": error.diagnostic} if getattr(error, "diagnostic", None) else None
         update_status(task_dir, "failed", "publish", last_completed="stagingVerify",
-                      error=task_error(task_id, target, str(error), "publish", "Docker 资源创建失败，现场已保留"),
+                      error=task_error(task_id, target, str(error), "publish", "Docker 资源创建失败，现场已保留", details),
                       result=controller["recovery_result"](admission["hostId"], admission["instanceId"]))
         return 1
     try:

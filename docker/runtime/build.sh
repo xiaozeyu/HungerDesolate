@@ -4,18 +4,33 @@ set -euo pipefail
 
 # 配置
 IMAGE_NAME="${IMAGE_NAME:-hungerdesolate/dst-runtime}"
-BUILD_TAG="${BUILD_TAG:-latest}"
+RELEASE_ID="${RELEASE_ID:-$(uuidgen | tr '[:upper:]' '[:lower:]')}"
+BUILD_TAG="${BUILD_TAG:-release-${RELEASE_ID}}"
 PLATFORM="${PLATFORM:-linux/amd64}"
+BUILDER_NAME="famine-release-${RELEASE_ID//-/}"
+BUILDER_CREATED=0
+
+cleanup_builder() {
+  if [ "$BUILDER_CREATED" -eq 1 ]; then
+    docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_builder EXIT
 
 echo "==> 构建 DST runtime 镜像"
 echo "    镜像名称: ${IMAGE_NAME}:${BUILD_TAG}"
 echo "    平台: ${PLATFORM}"
 
-# 构建镜像
-docker build \
+# 构建镜像。使用 Release 专属 builder，任务结束时连同 BuildKit 缓存一并移除。
+docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
+docker buildx create --name "$BUILDER_NAME" --driver docker-container >/dev/null
+BUILDER_CREATED=1
+docker buildx build \
+    --builder "$BUILDER_NAME" \
     --platform "${PLATFORM}" \
     --tag "${IMAGE_NAME}:${BUILD_TAG}" \
     --progress=plain \
+    --load \
     .
 
 # 获取镜像 digest
@@ -30,6 +45,7 @@ fi
 
 echo "==> 镜像构建完成"
 echo "    Digest: ${IMAGE_DIGEST}"
+docker buildx prune --builder "$BUILDER_NAME" --all --force >/dev/null
 
 # 提取 DST build 版本
 echo "==> 提取 DST build 版本"
@@ -39,7 +55,6 @@ DST_BUILD=$(docker run --rm "${IMAGE_NAME}:${BUILD_TAG}" \
 echo "    DST Build: ${DST_BUILD}"
 
 # 生成 release 元数据
-RELEASE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 SCRIPT_VERSION="V2-$(date +%Y%m%d)"
 
 cat > release-metadata.json <<EOF

@@ -10,6 +10,7 @@ mod instance_cleanup;
 mod instance_creation;
 mod instance_deletion;
 mod instance_dto;
+mod instance_runtime;
 mod instance_task;
 mod managed_files;
 mod persistence;
@@ -64,6 +65,7 @@ pub fn run() -> tauri::Result<()> {
             commands::get_host_initialization,
             commands::list_instances,
             commands::get_instance_overview,
+            commands::start_instance,
             commands::preview_instance_create,
             commands::create_instance,
             commands::get_instance_create_status,
@@ -73,6 +75,7 @@ pub fn run() -> tauri::Result<()> {
             commands::get_world_config,
             commands::save_world_config,
             commands::preview_world_apply,
+            commands::apply_world_config,
             commands::list_instance_releases,
             commands::preview_instance_release,
             commands::import_instance_release,

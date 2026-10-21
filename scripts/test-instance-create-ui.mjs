@@ -38,6 +38,11 @@ test('creation form exposes the preview action without world settings', async()=
   assert.match(source,/创建现场清理尚未接入，未删除或移动任何数据/);
   assert.match(source,/持久化阶段记录和错误详情/);
   assert.match(source,/task\.error\.details\.composeDiagnostic/);
+  assert.match(source,/v-if="task\?\.status==='failed' && task\.error"[^>]*role="alert"/);
+  assert.match(source,/creationTaskStageLabel\(task\.stage\)}} · {{task\.error\.code/);
+  assert.match(source,/<AppSelect v-model="selectedReleaseId"/);
+  assert.match(source,/releaseError\.message/);
+  assert.match(source,/selectedRelease\?\.imageDigest/);
 });
 before(async()=>{
   vite=await createServer({configFile:false,logLevel:'error',optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,watch:null},plugins:[{
@@ -98,5 +103,111 @@ test('create request accepts a base-verified release and pins its catalog digest
     await view.flow.create();
     assert.equal(createRequest.input.releaseId,candidate);
     assert.equal(createRequest.input.releaseCatalogDigest,'sha256:'+('a'.repeat(64)));
+  }finally{view.unmount();}
+});
+
+const otherRelease='66666666-6666-4666-8666-666666666666';
+function releaseItem(releaseId,verified=true){return {releaseId,platform:'linux/amd64',image:'hungerdesolate/dst-runtime',imageDigest:'sha256:'+((releaseId===candidate?'b':'d').repeat(64)),dstBuild:'756039',artifactDigest:'sha256:'+('c'.repeat(64)),scriptVersion:'V2-test',verified,runtimeVerified:false,commands:{master:[],caves:[]}};}
+function releaseCatalog(request,releases){return {schemaVersion:1,requestId:request.requestId,serverId:request.serverId,hostId,recordVersion:request.expectedRecordVersion,catalogDigest:'sha256:'+('a'.repeat(64)),releases,blockers:[]};}
+const settle=()=>new Promise(resolve=>setTimeout(resolve,0));
+
+test('multiple releases with the same DST build require selection and submit the chosen release',async()=>{
+  handlers.listReleases=async request=>releaseCatalog(request,[releaseItem(candidate),releaseItem(otherRelease)]);
+  handlers.preview=async request=>response(request);
+  let created;
+  handlers.create=async request=>{created=request;return {task:null};};
+  const view=mount();
+  try{
+    await settle();
+    assert.equal(view.flow.releaseLoading.value,false);
+    assert.equal(view.flow.selectedReleaseId.value,'');
+    assert.equal(view.flow.releaseReady(),false);
+    view.flow.selectedReleaseId.value=otherRelease;
+    assert.equal(view.flow.releaseReady(),true);
+    await view.flow.preview();
+    await view.flow.create();
+    assert.equal(created.input.releaseId,otherRelease);
+    assert.equal(created.input.releaseCatalogDigest,'sha256:'+('a'.repeat(64)));
+  }finally{view.unmount();}
+});
+
+test('changing the selected release discards the previous preview and its pending response',async()=>{
+  handlers.listReleases=async request=>releaseCatalog(request,[releaseItem(candidate),releaseItem(otherRelease)]);
+  const view=mount(),pending=deferred();let request;
+  handlers.preview=input=>{request=input;return pending.promise;};
+  try{
+    await settle();
+    view.flow.selectedReleaseId.value=candidate;
+    const query=view.flow.preview();
+    view.flow.selectedReleaseId.value=otherRelease;
+    pending.resolve(response(request));await query;
+    assert.equal(view.flow.result.value,null);
+    assert.equal(view.flow.loading.value,false);
+    assert.equal(view.flow.error.value,null);
+  }finally{view.unmount();}
+});
+
+test('refreshing the catalog preserves selection but invalidates the previous creation preview',async()=>{
+  handlers.listReleases=async request=>releaseCatalog(request,[releaseItem(candidate),releaseItem(otherRelease)]);
+  handlers.preview=async request=>response(request);
+  const view=mount();
+  try{
+    await settle();view.flow.selectedReleaseId.value=otherRelease;
+    await view.flow.preview();assert.ok(view.flow.result.value);
+    await view.flow.refreshReleaseCatalog();
+    assert.equal(view.flow.selectedReleaseId.value,otherRelease);
+    assert.equal(view.flow.result.value,null);
+    assert.equal(view.flow.releaseReady(),true);
+  }finally{view.unmount();}
+});
+
+test('unverified releases cannot be chosen automatically or used for creation',async()=>{
+  handlers.listReleases=async request=>releaseCatalog(request,[releaseItem(candidate,false)]);
+  const view=mount();let creates=0;
+  handlers.create=async()=>{creates++;return {task:null};};
+  try{
+    await settle();
+    assert.equal(view.flow.selectedReleaseId.value,'');
+    view.flow.selectedReleaseId.value=candidate;
+    assert.equal(view.flow.releaseReady(),false);
+    await view.flow.create();assert.equal(creates,0);
+  }finally{view.unmount();}
+});
+
+test('older release errors and finally cannot override the latest catalog request',async()=>{
+  const older=deferred(),latest=deferred();let count=0,latestRequest;
+  handlers.listReleases=request=>{count++;if(count===1)return older.promise;latestRequest=request;return latest.promise;};
+  const view=mount();
+  try{
+    const refresh=view.flow.refreshReleaseCatalog();
+    older.reject(new Error('old catalog failure'));await settle();
+    assert.equal(view.flow.releaseError.value,null);
+    assert.equal(view.flow.releaseLoading.value,true);
+    latest.resolve(releaseCatalog(latestRequest,[releaseItem(candidate)]));await refresh;
+    assert.equal(view.flow.releaseLoading.value,false);
+    assert.equal(view.flow.releaseReady(),true);
+  }finally{view.unmount();}
+});
+
+test('catalog errors are visible, invalidate readiness and clear after retry',async()=>{
+  handlers.listReleases=async()=>{throw new Error('catalog unavailable');};
+  const view=mount();
+  try{
+    await settle();assert.equal(view.flow.releaseError.value.message,'catalog unavailable');
+    assert.equal(view.flow.releaseReady(),false);
+    handlers.listReleases=async request=>releaseCatalog(request,[releaseItem(candidate)]);
+    await view.flow.refreshReleaseCatalog();
+    assert.equal(view.flow.releaseError.value,null);
+    assert.equal(view.flow.releaseReady(),true);
+  }finally{view.unmount();}
+});
+
+test('catalog responses must match request id and connection version',async()=>{
+  handlers.listReleases=async request=>({...releaseCatalog(request,[releaseItem(candidate)]),requestId:'different-request'});
+  const view=mount();
+  try{
+    await settle();assert.match(view.flow.releaseError.value.message,/身份或版本不匹配/);
+    assert.equal(view.flow.releaseReady(),false);
+    assert.equal(view.flow.releaseCatalog.value,null);
   }finally{view.unmount();}
 });

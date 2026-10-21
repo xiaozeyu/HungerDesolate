@@ -103,6 +103,60 @@ pub struct PreviewApplyRequest {
     pub expected_revision: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub expected_record_version: u64,
+    pub expected_revision: u64,
+    pub desired_digest: String,
+    pub active_release_id: String,
+    pub operation_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteApplyRequest<'a> {
+    schema_version: u32,
+    action: &'static str,
+    request_id: &'a str,
+    operation_id: &'a str,
+    server_id: &'a str,
+    host_id: &'a str,
+    instance_id: &'a str,
+    expected_revision: u64,
+    desired_digest: &'a str,
+    active_release_id: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteApplyResponse {
+    schema_version: u32,
+    request_id: String,
+    target: InstanceTarget,
+    revision: u64,
+    active_release_id: String,
+    desired_digest: String,
+    runtime_verified: bool,
+    running_shards: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldApplyResponse {
+    schema_version: u32,
+    request_id: String,
+    target: InstanceTarget,
+    revision: u64,
+    active_release_id: String,
+    desired_digest: String,
+    runtime_verified: bool,
+    running_shards: Vec<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteSaveRequest<'a> {
@@ -127,6 +181,7 @@ pub struct WorldConfig {
     pub deployed: Option<WorldSettings>,
     pub desired_digest: String,
     pub deployed_digest: Option<String>,
+    pub deployed_revision: Option<u64>,
     pub token_status: String,
     pub server_password_status: String,
     pub validation_warnings: Vec<String>,
@@ -192,6 +247,7 @@ struct RemoteApplyPreview {
     target: InstanceTarget,
     record_version: u64,
     revision: u64,
+    active_release_id: Option<String>,
     desired_digest: String,
     world_data_present: bool,
     world_data_file_count: u64,
@@ -212,6 +268,7 @@ pub struct WorldApplyPreview {
     target: InstanceTarget,
     record_version: u64,
     revision: u64,
+    active_release_id: Option<String>,
     desired_digest: String,
     world_data_present: bool,
     world_data_file_count: u64,
@@ -321,6 +378,14 @@ fn validate_settings(settings: &WorldSettings) -> CommandResult<()> {
 }
 
 fn execute<T: Serialize>(session: &Session, request: &T) -> CommandResult<Value> {
+    execute_timeout(session, request, 30)
+}
+
+fn execute_timeout<T: Serialize>(
+    session: &Session,
+    request: &T,
+    timeout_seconds: u64,
+) -> CommandResult<Value> {
     let request_bytes = Zeroizing::new(
         serde_json::to_vec(request)
             .map_err(|_| error("WORLD_CONFIG_PROTOCOL_INVALID", "世界配置请求编码失败"))?,
@@ -348,7 +413,7 @@ fn execute<T: Serialize>(session: &Session, request: &T) -> CommandResult<Value>
         .send_eof()
         .map_err(|_| error("WORLD_CONFIG_CHANNEL_FAILED", "无法结束世界配置请求"))?;
     session.set_blocking(false);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let mut output = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
@@ -439,6 +504,41 @@ fn remote_error(
             "远端世界配置状态无效，未覆盖现有数据",
         ),
         "OPERATION_ID_REUSED" => error("OPERATION_ID_REUSED", "操作编号已用于不同的世界配置"),
+        "WORLD_DEPLOYMENT_MISSING" => error("WORLD_DEPLOYMENT_MISSING", "专服尚未完成容器部署"),
+        "WORLD_RELEASE_INVALID" => error(
+            "WORLD_RELEASE_INVALID",
+            "当前 DST Release 无效或未通过基础验证",
+        ),
+        "WORLD_TOKEN_MISSING" => error("WORLD_TOKEN_MISSING", "应用配置前需要设置 Klei Token"),
+        "PROTECTION_BACKUP_REQUIRED" => error(
+            "PROTECTION_BACKUP_REQUIRED",
+            "发现现有世界数据；备份功能完成前不会覆盖这些数据",
+        ),
+        "WORLD_DOCKER_UNAVAILABLE" => error(
+            "WORLD_DOCKER_UNAVAILABLE",
+            "远端 Docker 不可用，世界配置未应用",
+        ),
+        "WORLD_DOCKER_TIMEOUT" => {
+            error("WORLD_DOCKER_TIMEOUT", "Docker 操作超时，应用结果需要核对")
+        }
+        "WORLD_DOCKER_OPERATION_FAILED" => {
+            error("WORLD_DOCKER_OPERATION_FAILED", "Docker 未能完成配置部署")
+        }
+        "WORLD_DOCKER_RESPONSE_INVALID" => error(
+            "WORLD_DOCKER_RESPONSE_INVALID",
+            "Docker 返回了无法识别的运行分片名称",
+        ),
+        "WORLD_APPLY_PLAN_STALE" => {
+            error("WORLD_APPLY_PLAN_STALE", "期望配置已变化，请重新预览应用")
+        }
+        "WORLD_APPLY_OUTCOME_UNKNOWN" => error(
+            "WORLD_APPLY_OUTCOME_UNKNOWN",
+            "发现未完成的应用现场，请核对后重试",
+        ),
+        "WORLD_APPLY_ROLLBACK_FAILED" => error(
+            "WORLD_APPLY_ROLLBACK_FAILED",
+            "应用失败且自动恢复未完成，请检查容器与配置",
+        ),
         _ => error(
             "WORLD_CONFIG_FAILED",
             "世界配置操作未能完成，请刷新核对后重试",
@@ -471,7 +571,7 @@ fn remote_error(
             && key.is_ascii()
             && key
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
     }) {
         result.details = serde_json::json!({
             "remoteCode":code,
@@ -659,6 +759,7 @@ pub fn preview_apply(
             target: request.target,
             record_version: remote.record_version,
             revision: remote.revision,
+            active_release_id: remote.active_release_id,
             desired_digest: remote.desired_digest,
             world_data_present: remote.world_data_present,
             world_data_file_count: remote.world_data_file_count,
@@ -669,6 +770,79 @@ pub fn preview_apply(
             warnings: remote.warnings,
             blockers: remote.blockers,
             allowed: remote.allowed,
+        })
+    })
+}
+
+pub fn apply(database: &Path, request: ApplyRequest) -> CommandResult<WorldApplyResponse> {
+    let connection = connection(
+        request.schema_version,
+        &request.request_id,
+        &request.target,
+        request.expected_record_version,
+    )?;
+    crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
+    if request.expected_revision > crate::server_input::MAX_REVISION
+        || request.desired_digest.len() != 71
+        || !request.desired_digest.starts_with("sha256:")
+        || !request.desired_digest[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || uuid::Uuid::try_parse(&request.active_release_id).is_err()
+    {
+        return Err(error("WORLD_CONFIG_INPUT_INVALID", "世界配置应用请求无效"));
+    }
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error(
+                "HOST_IDENTITY_MISMATCH",
+                "世界配置目标主机身份不一致",
+            ));
+        }
+        let remote_request = RemoteApplyRequest {
+            schema_version: 1,
+            action: "apply",
+            request_id: &request.request_id,
+            operation_id: &request.operation_id,
+            server_id: &request.target.server_id,
+            host_id: &request.target.host_id,
+            instance_id: &request.target.instance_id,
+            expected_revision: request.expected_revision,
+            desired_digest: &request.desired_digest,
+            active_release_id: &request.active_release_id,
+        };
+        let value = execute_timeout(session, &remote_request, 420)?;
+        let remote: RemoteApplyResponse = serde_json::from_value(value)
+            .map_err(|_| error("WORLD_CONFIG_PROTOCOL_INVALID", "世界配置应用响应格式无效"))?;
+        if remote.schema_version != 1
+            || remote.request_id != request.request_id
+            || remote.target.server_id != request.target.server_id
+            || remote.target.host_id != request.target.host_id
+            || remote.target.instance_id != request.target.instance_id
+            || remote.revision != request.expected_revision
+            || remote.desired_digest != request.desired_digest
+            || remote.active_release_id != request.active_release_id
+            || remote.runtime_verified
+            || remote.running_shards.len() > 2
+            || remote
+                .running_shards
+                .iter()
+                .any(|shard| !["master", "caves"].contains(&shard.as_str()))
+        {
+            return Err(error(
+                "WORLD_CONFIG_PROTOCOL_INVALID",
+                "世界配置应用响应身份或状态无效",
+            ));
+        }
+        Ok(WorldApplyResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            revision: remote.revision,
+            active_release_id: remote.active_release_id,
+            desired_digest: remote.desired_digest,
+            runtime_verified: false,
+            running_shards: remote.running_shards,
         })
     })
 }

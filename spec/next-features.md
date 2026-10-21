@@ -1,8 +1,12 @@
 # 后续功能清单
 
-- 更新时间：2026-10-19
+- 更新时间：2026-10-21
 - 依据：当前生产代码、[实施计划](implementation-roadmap.md)、[接口契约](api-contract.md)
 - 原则：按真实功能与完成条件核对进度，页面存在不等于功能已完成。
+
+## 0. 2026-10-21 实机进展
+
+用户已确认应用创建并启动的 DST 专服容器可以正常运行、进入游戏并游玩。概览实时运行状态、DST build、UDP 端口采集与重新进入刷新，以及 Release 基础验证放行和按 Release 隔离镜像已接入。该结果证明当前单实例主路径可用；三实例隔离、外网/LAN/Steam 全路径、断线/主机重启和恢复仍需阶段 0 验收。
 
 ## 1. 当前可用与本轮修复
 
@@ -45,7 +49,7 @@ A1 已得到用户人工验证的主路径证据，平台/异常矩阵仍需补�
 | B2 | 注册表、manifest、端口计划 | 已落地创建接纳内核：注册锁、不可变身份、完整端口预留、实际占用重查与 operation 幂等；尚未接入持久 controller，不能创建真实专服 |
 | B3 | 远端任务与对账 | 已完成创建任务持久接纳、request/status/journal、systemd controller 启动、sequence、interrupted 对账和恢复动作；真实部署 worker、维护锁租约、取消与主机重任务队列仍待完成 |
 | B4 | 创建专服与生命周期 | 已完成受控目录、Compose/Docker 创建、容器验证、终态注册表对账；新增持久任务阶段记录查看及受控删除预览/执行，数据归档到 retired；继续创建恢复和真实 DST/联网实验仍待完成 |
-| B5 | 启停/重启/开机策略 | 实例级操作、Master/Caves 绑定、实际 build/监听证据；手动停止及重启语义明确 |
+| B5 | 启停/重启/开机策略 | 启动及本机 DST 进程/UDP 监听核验已实机确认；停止/重启命令与概览 UI 已接入并通过隔离测试；停止/重启真实主机验收、开机策略和掉线/主机重启对账待做 |
 | B6 | 完整任务 UI | 单一底栏、详情/错误/恢复动作、应用级对账；A 完成不会覆盖 B 页或抢导航 |
 
 B3 必须先于安装/恢复等长任务成熟。现有 task reducer 和本地凭据操作记录并不等于远端任务系统已实现。
@@ -55,7 +59,7 @@ B3 必须先于安装/恢复等长任务成熟。现有 task reducer 和本地�
 | 顺序 | 功能 | 关键交付/验收 |
 | --- | --- | --- |
 | C1 | 世界配置 | 基础/联机字段、Master/Caves DST 选项、期望配置 CAS 保存与应用影响预览已实现；实际 apply 仍由备份与配置发布任务阻断，待实现保护备份、渲染、发布和运行验证。洞穴拓扑只读，拓扑变更需专门迁移并保留存档 |
-| C2 | 备份与恢复基础 | 停服一致备份、校验/归属、下载、恢复前保护点；拒绝跨实例恢复，失败保留原世界 |
+| C2 | 备份与恢复基础（下一项） | 停服一致备份、checksum/实例归属验证、下载、恢复前保护点；拒绝跨实例恢复，失败保留原世界。该项完成后才能对现存存档开放世界配置应用 |
 | C3 | MOD 管理 | Workshop 元数据、实例启用/配置、受限 Lua 解析、检查更新、staging 下载/应用、分片 UGC 一致性 |
 | C4 | DST/MOD 更新 | 固定目标版本、保护备份、发布切换、实际版本验证与完整恢复点回滚 |
 | C5 | 日志与诊断 | 有界分片日志/游标、脱敏、健康摘要、失败任务证据与恢复入口 |
@@ -105,13 +109,13 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 
 ## 12. 2026-10-19：Docker 资源创建内核
 
-新增 `remote-scripts/actions/instance-docker.py`，只有 release 的 `runtimeVerified=true` 时才允许执行资源创建：网络名称固定为 `<composeProject>_instance`，创建/复用必须匹配 hostId、instanceId 和 schema 标签；容器使用 `docker compose create` 创建但不启动，随后验证容器 labels、挂载源和端口发布。验证通过后 worker 发布活动 `compose.yaml`、`active-release.json`、`runtime.json` 并完成创建任务；不自动启动游戏。
+新增 `remote-scripts/actions/instance-docker.py`，只有 release 的基础验证 `verified=true` 时才允许执行资源创建：网络名称固定为 `<composeProject>_instance`，创建/复用必须匹配 hostId、instanceId 和 schema 标签；容器使用 `docker compose create` 创建但不启动，随后验证容器 labels、挂载源和端口发布。验证通过后 worker 发布活动 `compose.yaml`、`active-release.json`、`runtime.json` 并完成创建任务；不自动启动游戏。
 
-当前默认 release 未通过 runtime 验证，因此 worker 仍在 `publish` 返回 `CREATE_DOCKER_RUNTIME_REQUIRED`；runtimeVerified fixture 已覆盖创建、验证和发布路径。隔离测试入口为 `python3 scripts/test-instance-docker.py`；真实 network/container 创建与阶段 0 产物验证仍待完成。下一步是容器就绪后的世界配置与 Token 流程。
+运行时验证保留为可选证据，不再阻断创建；基础验证失败时仍阻断。隔离测试入口为 `python3 scripts/test-instance-docker.py`；真实 network/container 创建与阶段 0 产物验证仍待完成。下一步是容器就绪后的世界配置与 Token 流程。
 
 ## 13. 2026-10-19：DST release catalog 只读发现（✅ 已完成）
 
-新增 `list_instance_releases` command 和远端 catalog probe。它只读取 `/var/lib/famine-hub/releases/catalog.json`，验证 hostId、release 摘要、镜像 digest、产物 digest、启动命令和 runtimeVerified；catalog 缺失或没有合格 release 时返回 `CREATE_RELEASE_REQUIRED`。
+新增 `list_instance_releases` command 和远端 catalog probe。它只读取 `/var/lib/famine-hub/releases/catalog.json`，验证 hostId、release 摘要、镜像 digest、产物 digest、启动命令和基础验证状态；catalog 缺失或没有基础验证合格 release 时返回 `CREATE_RELEASE_REQUIRED`。
 
 - ✅ 后端：`list_instance_releases` 注册并实现
 - ✅ 远端：`probes/instance-release-catalog.py` 校验完成
@@ -128,7 +132,7 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 
 ## 15. 2026-10-19：release 导入任务（历史实现）
 
-新增 `preview_instance_release` / `import_instance_release`。导入任务验证 staged `release.json` 与 catalog 完全匹配，并要求 `runtime.json` 提供 `runtimeVerified=true`、`verification=passed`；验证成功后原子更新 catalog release 的 `runtimeVerified`。
+新增 `preview_instance_release` / `import_instance_release`。导入任务验证 staged `release.json` 与 catalog 完全匹配；隔离运行验证成功后原子更新 catalog release 的 `runtimeVerified`，但该字段不决定创建资格。
 
 - ✅ 后端：两个命令已注册并实现
 - ✅ 远端：`actions/instance-release-import.py` 验证完成

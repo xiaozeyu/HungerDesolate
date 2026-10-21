@@ -23,7 +23,7 @@ export interface SaveWorldConfigRequest {
 
 export interface WorldApplyPreview {
   schemaVersion:1;requestId:string;target:InstanceTarget;recordVersion:number;revision:number;
-  desiredDigest:string;worldDataPresent:boolean;worldDataFileCount:number;
+  activeReleaseId:string|null;desiredDigest:string;worldDataPresent:boolean;worldDataFileCount:number;
   newWorldOptions:{shard:"master"|"caves";key:string;label:string}[];
   tokenStatus:"configured"|"missing";serverPasswordStatus:"configured"|"missing";
   backupRequirement:"required"|"none";warnings:string[];blockers:string[];allowed:boolean;
@@ -35,6 +35,23 @@ export interface PreviewWorldApplyRequest {
   target: InstanceTarget;
   expectedRecordVersion: number;
   expectedRevision: number;
+}
+
+export interface ApplyWorldConfigRequest extends PreviewWorldApplyRequest {
+  operationId: string;
+  desiredDigest: string;
+  activeReleaseId: string;
+}
+
+export interface ApplyWorldConfigResponse {
+  schemaVersion: 1;
+  requestId: string;
+  target: InstanceTarget;
+  revision: number;
+  activeReleaseId: string;
+  desiredDigest: string;
+  runtimeVerified: false;
+  runningShards: Array<"master" | "caves">;
 }
 
 export type SaveWorldConfigResponse = MutationResult<WorldConfig>;
@@ -49,4 +66,8 @@ export function saveWorldConfig(request: SaveWorldConfigRequest): Promise<SaveWo
 
 export function previewWorldApply(request: PreviewWorldApplyRequest): Promise<WorldApplyPreview> {
   return call("preview_world_apply", request);
+}
+
+export function applyWorldConfig(request: ApplyWorldConfigRequest): Promise<ApplyWorldConfigResponse> {
+  return call("apply_world_config", request);
 }

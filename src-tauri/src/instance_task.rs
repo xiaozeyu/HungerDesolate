@@ -206,7 +206,7 @@ fn decode(output: &[u8]) -> CommandResult<Option<RemoteTask>> {
 }
 
 fn remote_error(code: &str) -> Box<CommandError> {
-    match code {
+    let mut result = match code {
         "CREATE_RELEASE_REQUIRED" => error("CREATE_RELEASE_REQUIRED", "没有已验证的 DST release"),
         "CREATE_DOCKER_RUNTIME_REQUIRED" => error(
             "CREATE_DOCKER_RUNTIME_REQUIRED",
@@ -219,11 +219,42 @@ fn remote_error(code: &str) -> Box<CommandError> {
         "OPERATION_ID_REUSED" => error("OPERATION_ID_REUSED", "操作编号已用于不同的创建请求"),
         "INSTANCE_CREATE_BUSY" => error("INSTANCE_CREATE_BUSY", "已有创建任务正在运行"),
         "REGISTRY_CHANGED" => error("REGISTRY_CHANGED", "注册表已变化，请重新预览"),
+        "RELEASE_CATALOG_CHANGED" => error(
+            "RELEASE_CATALOG_CHANGED",
+            "Release 列表已变化，请刷新 Release 后重新预览",
+        ),
+        "CREATE_PORT_STATE_INVALID" => error(
+            "CREATE_PORT_STATE_INVALID",
+            "端口预留记录无效，请核对实例注册表",
+        ),
+        "CREATE_INPUT_INVALID" | "CREATE_TASK_INPUT_INVALID" => error(
+            "CREATE_INPUT_INVALID",
+            "创建请求字段无效，请重新打开新建窗口后预览",
+        ),
+        "CREATE_PATH_UNSAFE" | "CREATE_TASK_PATH_UNSAFE" | "CREATE_FILE_INVALID" => error(
+            "CREATE_TASK_PATH_UNSAFE",
+            "创建任务目录或管理文件权限不符合要求，未继续创建",
+        ),
+        "REGISTRY_BUSY" => error("REGISTRY_BUSY", "其他实例操作占用注册锁，请稍后重试"),
+        "CREATE_REGISTRY_INVALID" => error("CREATE_REGISTRY_INVALID", "实例注册表状态无效"),
+        "CREATE_OPERATION_STATE_INVALID" => error(
+            "CREATE_OPERATION_STATE_INVALID",
+            "实例操作记录无效，请核对注册表",
+        ),
         "PLAN_STALE" => error("PLAN_STALE", "创建预览已失效，请重新预览"),
         "ROOT_REQUIRED" => error("ROOT_REQUIRED", "远端创建任务要求 root Docker 环境"),
         "CREATE_TASK_STATE_INVALID" => error("CREATE_TASK_STATE_INVALID", "创建任务状态文件无效"),
-        _ => error("CREATE_TASK_FAILED", "创建容器任务失败，现场已保留"),
+        _ => error("CREATE_TASK_FAILED", "创建容器请求失败，请查看远端错误码"),
+    };
+    if !code.is_empty()
+        && code.len() <= 96
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        result.details = json!({"remoteCode": code});
     }
+    result
 }
 
 fn task_snapshot(remote: RemoteTask, server_id: &str) -> CommandResult<TaskSnapshot> {
@@ -397,4 +428,33 @@ pub fn status(database: &Path, request: StatusRequest) -> CommandResult<TaskResp
             task,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creation_admission_does_not_hide_unknown_remote_codes() {
+        let failure = decode(br#"{"ok":false,"code":"CREATE_NEW_FAILURE"}"#)
+            .expect_err("unknown creation error must be preserved");
+        assert_eq!(failure.code, "CREATE_TASK_FAILED");
+        assert_eq!(failure.details["remoteCode"], "CREATE_NEW_FAILURE");
+        let unsafe_failure = remote_error("private token /path");
+        assert!(unsafe_failure.details.get("remoteCode").is_none());
+    }
+
+    #[test]
+    fn release_changes_have_a_specific_recovery_message() {
+        let failure = remote_error("RELEASE_CATALOG_CHANGED");
+        assert_eq!(failure.code, "RELEASE_CATALOG_CHANGED");
+        assert!(failure.message.contains("刷新 Release"));
+    }
+
+    #[test]
+    fn bundled_docker_script_uses_create_without_no_start() {
+        assert!(DOCKER.contains("\"-f\", compose_path, \"create\"]"));
+        assert!(!DOCKER.contains("--no-start"));
+        assert!(WORKER.contains("docker_module[\"create_containers\"]"));
+    }
 }

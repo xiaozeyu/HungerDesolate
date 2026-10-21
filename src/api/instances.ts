@@ -12,6 +12,17 @@ export function listInstances(request: ConnectionRequest): Promise<InstanceListR
 export function getInstanceOverview(target: InstanceTarget, requestId: string, expectedRecordVersion: number): Promise<InstanceOverviewResponse> {
   return call("get_instance_overview",{schemaVersion:1,requestId,target,expectedRecordVersion});
 }
+export interface InstanceStartResponse {
+  schemaVersion: 1; requestId: string; operationId: string; target: InstanceTarget;
+  recordVersion: number; revision: number; status: "running" | "stopped"; verificationLevel: "localVerified" | "unverified";
+  startedShards: Array<"master"|"caves">; runningShards: Array<"master"|"caves">;
+  listeners: Partial<Record<"master"|"caves", number[]>>; publicConnectivityVerified: false;
+}
+export function controlInstance(request: {
+  action: "start" | "stop" | "restart";
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
+  expectedRevision: number; operationId: string;
+}): Promise<InstanceStartResponse> { return call("start_instance", request); }
 
 export interface InstanceCreateInput {
   displayName: string;

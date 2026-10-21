@@ -58,7 +58,7 @@ def render_cluster(settings, token, password, cluster_key):
     parser["GAMEPLAY"]["whitelist_slots"] = str(settings["advanced"]["whitelistSlots"])
     output = io.StringIO()
     parser.write(output)
-    return output.getvalue().encode("utf-8"), token.rstrip(b"\r\n") + b"\n"
+    return output.getvalue().encode("utf-8"), token.rstrip(b"\r\n")
 
 
 def render_shard_ini(settings, shard, port_plan):

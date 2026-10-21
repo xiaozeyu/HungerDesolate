@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { Eye, RefreshCw, Save } from "@lucide/vue";
+import { Eye, RefreshCw, RotateCw, Save } from "@lucide/vue";
 import AppDialog from "../components/AppDialog.vue";
 import AppSelect from "../components/AppSelect.vue";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import { getWorldConfig, previewWorldApply, saveWorldConfig, type WorldApplyPreview } from "../api/world";
+import { applyWorldConfig, getWorldConfig, previewWorldApply, saveWorldConfig, type WorldApplyPreview } from "../api/world";
 import { useWorkspace } from "../composables/useWorkspace";
 import { usePageTarget } from "../composables/usePageTarget";
 import { describeError, type UserError } from "../lib/commandError";
@@ -19,6 +19,7 @@ const workspace = useWorkspace();
 const { server, instance, target, instanceName } = usePageTarget();
 const data = ref<WorldConfig | null>(null);
 const applyPreview = ref<WorldApplyPreview|null>(null), previewBusy = ref(false);
+const applyBusy = ref(false);
 const draft = reactive<WorldSettings>(defaultWorldSettings(false));
 const baseDesired = ref<WorldSettings | null>(null), baseRevision = ref(0);
 const loading = ref(false), saving = ref(false), stale = ref(false);
@@ -40,7 +41,8 @@ const hasChanges = computed(() => {
 });
 const status = computed(() => {
   if (!data.value) return "unknown";
-  return data.value.deployedDigest !== null && data.value.deployedDigest === data.value.desiredDigest
+  return data.value.deployedRevision === data.value.revision
+      && data.value.deployedDigest === data.value.desiredDigest
     ? "inSync" : "pending";
 });
 const selectedCategory = computed<DstWorldCategory | null>(() =>
@@ -104,7 +106,7 @@ async function refresh() {
       const settings = defaultWorldSettings(instance.value?.cavesEnabled ?? false);
       if (!current(ticket)) return;
       data.value = { revision: 0, desired: settings, deployed: null, desiredDigest: "preview",
-        deployedDigest: null, tokenStatus: "unknown", serverPasswordStatus: "unknown",
+        deployedDigest: null, deployedRevision: null, tokenStatus: "unknown", serverPasswordStatus: "unknown",
         validationWarnings: [] };
       assignSettings(settings);
       baseDesired.value = copySettings(settings);
@@ -266,6 +268,44 @@ async function previewApply() {
   finally{if(epoch===ticketEpoch)previewBusy.value=false;}
 }
 
+async function applyWorld() {
+  const instanceTarget = target.value, connection = server.value, preview = applyPreview.value;
+  if (!instanceTarget || !connection || !preview || !preview.allowed || applyBusy.value
+      || !preview.activeReleaseId || loading.value || saving.value || hasChanges.value || stale.value || workspace.preview.value) return;
+  const ticketEpoch = epoch, revision = preview.revision, desiredDigest = preview.desiredDigest;
+  const requestId = crypto.randomUUID();
+  applyBusy.value = true;
+  error.value = null;
+  saveMessage.value = "正在部署世界配置…";
+  try {
+    const result = await applyWorldConfig({
+      schemaVersion: 1, requestId, target: instanceTarget,
+      expectedRecordVersion: connection.recordVersion, expectedRevision: revision,
+      desiredDigest, activeReleaseId: preview.activeReleaseId, operationId: crypto.randomUUID(),
+    });
+    if (epoch !== ticketEpoch || target.value?.instanceId !== instanceTarget.instanceId
+        || server.value?.recordVersion !== connection.recordVersion) return;
+    if (result.requestId !== requestId || result.revision !== revision || result.desiredDigest !== desiredDigest
+        || result.activeReleaseId !== preview.activeReleaseId
+        || result.runtimeVerified !== false || result.target.serverId !== instanceTarget.serverId
+        || result.target.hostId !== instanceTarget.hostId || result.target.instanceId !== instanceTarget.instanceId) {
+      throw new Error("配置应用结果身份、版本或验证状态无效");
+    }
+    applyPreview.value = null;
+    saveMessage.value = result.runningShards.length
+      ? "世界配置已部署并重启原运行分片；隔离运行验证仍待完成。"
+      : "世界配置已部署，专服保持停止；隔离运行验证仍待完成。";
+    await refresh();
+  } catch (cause) {
+    if (epoch === ticketEpoch) {
+      error.value = describeError(cause);
+      saveMessage.value = "";
+    }
+  } finally {
+    if (epoch === ticketEpoch) applyBusy.value = false;
+  }
+}
+
 function changeWorldOption(itemKey: string, value: string) {
   const item = visibleOptions.value.find((option) => option.key === itemKey);
   if (!item) return;
@@ -331,32 +371,55 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
 
       <section v-if="activeView==='basic'" class="section-block world-form-panel">
         <div class="section-heading"><h2>基本设置</h2><span class="muted-text">配置版本 {{data?.revision ?? 0}}</span></div>
-        <div class="form-grid">
+        <div class="form-grid world-basic-grid">
           <label>世界名称<input v-model="draft.roomName" maxlength="64" autocomplete="off"/></label>
           <label>游戏模式<AppSelect v-model="draft.gameMode" :options="dstGameModeOptions" label="游戏模式"/></label>
           <label>最大玩家数<input v-model.number="draft.maxPlayers" type="number" min="1" max="128"/></label>
           <label>语言<AppSelect v-model="draft.language" :options="languageOptions" label="语言"/></label>
-          <label>服务器密码<input v-model="passwordValue" type="password" autocomplete="new-password" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'"/></label>
-          <label>Klei Token<input v-model="tokenValue" type="password" autocomplete="off" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'"/></label>
-          <label>世界描述<textarea v-model="draft.description" maxlength="256" rows="3"/></label>
-          <div class="form-field world-secret-status"><span>服务器密码状态</span><StatusLabel :tone="passwordStatus==='configured'?'success':passwordStatus==='missing'?'warning':'muted'" :label="passwordStatus==='configured'?'已配置':passwordStatus==='missing'?'未配置':'未采集'"/></div>
-          <div class="form-field world-secret-status"><span>Klei Token 状态</span><StatusLabel :tone="tokenStatus==='configured'?'success':tokenStatus==='missing'?'warning':'muted'" :label="tokenStatus==='configured'?'已配置':tokenStatus==='missing'?'未配置':'未采集'"/></div>
-          <label class="switch-field"><input v-model="draft.pvp" type="checkbox"/>允许 PVP</label>
-          <label class="switch-field"><input v-model="draft.pauseWhenEmpty" type="checkbox"/>无人时暂停</label>
-          <div class="form-field"><span>洞穴分片</span><StatusLabel :tone="draft.cavesEnabled?'success':'muted'" :label="draft.cavesEnabled?'已启用':'未启用'"/></div>
+          <label class="world-description-field">世界描述<textarea v-model="draft.description" maxlength="256" rows="3"/></label>
+        </div>
+
+        <div class="world-subsection">
+          <div class="section-heading"><h2>联机凭据</h2></div>
+          <div class="form-grid world-credential-grid">
+            <label>服务器密码<input v-model="passwordValue" type="password" autocomplete="new-password" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'"/></label>
+            <label>Klei Token<input v-model="tokenValue" type="password" autocomplete="off" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'"/></label>
+          </div>
+        </div>
+
+        <div class="world-subsection">
+          <div class="section-heading"><h2>世界选项</h2><span class="muted-text">普通开关不会重置世界</span></div>
+          <div class="world-switch-grid">
+            <label class="world-switch-row"><span><strong>允许 PVP</strong><small>玩家之间可以互相造成伤害</small></span><span class="world-switch"><input v-model="draft.pvp" type="checkbox"/><span class="world-switch-track" aria-hidden="true"><span class="world-switch-thumb"/></span></span></label>
+            <label class="world-switch-row"><span><strong>无人时暂停</strong><small>没有玩家在线时暂停世界时间</small></span><span class="world-switch"><input v-model="draft.pauseWhenEmpty" type="checkbox"/><span class="world-switch-track" aria-hidden="true"><span class="world-switch-thumb"/></span></span></label>
+          </div>
+        </div>
+
+        <div class="world-subsection">
+          <div class="section-heading"><h2>世界分片</h2><span class="muted-text">由实例创建时确定</span></div>
+          <div class="world-shard-summary"><div><strong>Master</strong><StatusLabel :tone="'success'" label="已启用"/></div><div><strong>Caves</strong><StatusLabel :tone="draft.cavesEnabled?'success':'muted'" :label="draft.cavesEnabled?'已启用':'未启用'"/></div></div>
         </div>
         <p v-if="data?.validationWarnings.length" class="muted-text">{{data.validationWarnings.join('；')}}</p>
       </section>
 
       <section v-else-if="activeView==='access'" class="section-block world-form-panel">
         <div class="section-heading"><h2>访问与联机</h2></div>
-        <div class="form-grid">
-          <label class="switch-field"><input v-model="draft.advanced.voteEnabled" type="checkbox"/>启用踢人投票</label>
-          <label>踢人投票比例<input v-model.number="draft.advanced.voteKickPercentage" type="number" min="0" max="100" :disabled="!draft.advanced.voteEnabled"/></label>
-          <label>白名单预留位<input v-model.number="draft.advanced.whitelistSlots" type="number" min="0" :max="draft.maxPlayers"/></label>
-          <label>管理员 Klei ID<textarea :value="draft.advanced.adminList.join('\n')" rows="5" @input="updateList('adminList',($event.target as HTMLTextAreaElement).value)"/></label>
-          <label>白名单 Klei ID<textarea :value="draft.advanced.whitelist.join('\n')" rows="5" @input="updateList('whitelist',($event.target as HTMLTextAreaElement).value)"/></label>
-          <label>封禁名单 Klei ID<textarea :value="draft.advanced.blocklist.join('\n')" rows="5" @input="updateList('blocklist',($event.target as HTMLTextAreaElement).value)"/></label>
+        <div class="access-settings-grid">
+          <div class="access-control-group">
+            <div class="section-heading"><h3>投票</h3></div>
+            <label class="world-switch-row"><span><strong>启用踢人投票</strong><small>允许玩家发起踢人投票</small></span><span class="world-switch"><input v-model="draft.advanced.voteEnabled" type="checkbox"/><span class="world-switch-track" aria-hidden="true"><span class="world-switch-thumb"/></span></span></label>
+            <label>踢人投票比例<input v-model.number="draft.advanced.voteKickPercentage" type="number" min="0" max="100" :disabled="!draft.advanced.voteEnabled"/></label>
+          </div>
+          <div class="access-control-group">
+            <div class="section-heading"><h3>白名单</h3></div>
+            <label>白名单预留位<input v-model.number="draft.advanced.whitelistSlots" type="number" min="0" :max="draft.maxPlayers"/></label>
+            <label>白名单 Klei ID<textarea :value="draft.advanced.whitelist.join('\n')" rows="6" @input="updateList('whitelist',($event.target as HTMLTextAreaElement).value)"/></label>
+          </div>
+          <div class="access-control-group access-list-group">
+            <div class="section-heading"><h3>名单</h3></div>
+            <label>管理员 Klei ID<textarea :value="draft.advanced.adminList.join('\n')" rows="5" @input="updateList('adminList',($event.target as HTMLTextAreaElement).value)"/></label>
+            <label>封禁名单 Klei ID<textarea :value="draft.advanced.blocklist.join('\n')" rows="5" @input="updateList('blocklist',($event.target as HTMLTextAreaElement).value)"/></label>
+          </div>
         </div>
       </section>
 
@@ -388,10 +451,10 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
         <dl class="creation-facts"><div><dt>配置版本</dt><dd>{{applyPreview.revision}}</dd></div><div><dt>世界存档</dt><dd>{{applyPreview.worldDataPresent?`${applyPreview.worldDataFileCount} 个文件`:"未发现现有存档文件"}}</dd></div><div><dt>Token</dt><dd>{{applyPreview.tokenStatus==='configured'?'已配置':'缺失'}}</dd></div><div><dt>世界生成选项</dt><dd>{{applyPreview.newWorldOptions.length}} 项会影响新世界生成</dd></div></dl>
         <p v-if="applyPreview.backupRequirement==='required'">应用前需要创建并验证保护备份。</p>
         <ul v-if="applyPreview.newWorldOptions.length"><li v-for="option in applyPreview.newWorldOptions.slice(0,12)" :key="`${option.shard}:${option.key}`">{{option.shard==='master'?'Master':'Caves'}} · {{option.label}}</li></ul>
-        <ul v-if="applyPreview.blockers.length" class="environment-error"><li v-for="blocker in applyPreview.blockers" :key="blocker">{{blocker==='WORLD_APPLY_NOT_IMPLEMENTED'?'配置发布与备份任务尚未接入':blocker==='PROTECTION_BACKUP_REQUIRED'?'需要保护备份':blocker==='WORLD_CONFIG_RENDER_UNSUPPORTED'?'当前期望配置无法安全转换为 DST 配置文件':'Klei Token 尚未配置'}}</li></ul>
+        <ul v-if="applyPreview.blockers.length" class="environment-error"><li v-for="blocker in applyPreview.blockers" :key="blocker">{{blocker==='PROTECTION_BACKUP_REQUIRED'?'发现现有世界数据；备份功能接入前不会覆盖这些数据':blocker==='WORLD_CONFIG_RENDER_UNSUPPORTED'?'当前期望配置无法安全转换为 DST 配置文件':blocker==='WORLD_TOKEN_MISSING'?'应用前需要设置 Klei Token':blocker==='WORLD_DEPLOYMENT_MISSING'?'专服尚未完成容器部署':blocker==='WORLD_RELEASE_MISSING'?'专服缺少活动 DST Release':'配置应用条件未满足'}}</li></ul>
         <ul v-if="applyPreview.warnings.length"><li v-for="warning in applyPreview.warnings" :key="warning">{{warning}}</li></ul>
       </div>
-      <template #footer><button class="button" @click="applyPreview=null">关闭</button><button class="button primary" disabled>应用</button></template>
+      <template #footer><button class="button" :disabled="applyBusy" @click="applyPreview=null">关闭</button><button class="button primary" :disabled="applyBusy || !applyPreview?.allowed" @click="applyWorld"><RotateCw :size="16"/>{{applyBusy?'部署中…':'应用配置'}}</button></template>
     </AppDialog>
   </div>
 </template>

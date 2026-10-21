@@ -4,7 +4,7 @@
 - 优先级：P0 核心
 - 依赖：容器创建框架已完成
 - 可并行：阶段 0 准备
-- 当前实现：基础/联机字段、Master/Caves 选项、期望配置 CAS 保存和应用影响预览已落地；应用仍被 `WORLD_APPLY_NOT_IMPLEMENTED` 阻断，需先完成保护备份、配置发布与运行验证。
+- 当前实现：基础/联机字段、Master/Caves 选项、期望配置 CAS 保存、应用预览和应用命令已落地；实例启动命令会等待 DST 进程及容器内 UDP 监听器就绪，状态标为本机运行验证。启动失败诊断与真实主机实测待验收；公网可达性仍未验证。
 
 ## 1. 功能范围
 
@@ -19,6 +19,7 @@ interface WorldConfig {
   deployed: WorldSettings | null;
   desiredDigest: string;
   deployedDigest: string | null;
+  deployedRevision: number | null;
   tokenStatus: "configured" | "missing" | "unknown";
   serverPasswordStatus: "configured" | "missing" | "unknown";
   validationWarnings: string[];
@@ -356,6 +357,8 @@ DST 选项 key、标签、分组、分片适用范围、默认值和可选值由
 
 ### 阶段 3：应用流程（2 天）
 
+第一版应用实现约束：配置应用只替换受保护的 `config/` 并按预览时已运行的分片集合重建和启动，不改写 `data/Master`、`data/Caves` 世界存档，因此已存在世界文件的实例仍可重复应用配置。世界生成选项在已有存档上只对新世界生效；未来重置或迁移世界数据仍必须先接入保护备份链路。运行时隔离验证作为 warning 保留，应用回执明确 `runtimeVerified=false`。此首版操作不宣称公网联通或玩家可加入。
+
 #### 预览与应用
 
 - [ ] **预览命令**（后端）
@@ -373,23 +376,19 @@ DST 选项 key、标签、分组、分片适用范围、默认值和可选值由
   }
   ```
 
-- [ ] **应用任务**（后端）
+- [x] **首版应用**（后端）
   ```rust
   #[tauri::command]
   async fn apply_world_config(
       target: InstanceTarget,
-      plan_id: String,
       expected_revision: i64,
+      desired_digest: String,
+      active_release_id: String,
       operation_id: String
-  ) -> Result<TaskAccepted, CommandError> {
-      // 1. 校验 planId 有效性
-      // 2. 创建持久任务
-      // 3. 停服（如需）
-      // 4. 备份（保护点）
-      // 5. 写入配置文件
-      // 6. 更新 manifest deployed
-      // 7. 启动（如需）
-      // 8. 验证
+  ) -> Result<WorldApplyResponse, CommandError> {
+      // 首版只应用无存档实例；已存在世界文件时保护备份未完成，保持阻断
+      // 以 revision、期望 digest、active release 和 operationId 绑定操作
+      // 按原运行状态停止、重建并启动；隔离运行验证延后并返回 runtimeVerified=false
   }
   ```
 
@@ -411,7 +410,7 @@ DST 选项 key、标签、分组、分片适用范围、默认值和可选值由
     <template #footer>
       <button @click="previewOpen = false">取消</button>
       <button @click="confirmApply" class="primary">
-        确认应用
+        应用配置
       </button>
     </template>
   </AppDialog>

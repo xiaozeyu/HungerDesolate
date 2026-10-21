@@ -123,7 +123,7 @@ interface MutationResult<T> {
 | InstanceOverview | identity、manifestSummary、runtime、blockers、desiredVsDeployed；不返回整个 MOD 或备份数组 |
 | InstanceRuntime | snapshotId、capturedAt、status、shards[]、players/null、build/null、verificationLevel、evidence[] |
 | ShardRuntime | shardKind、enabled、status、containerId/null、actualBuild/null、observedPorts、logAvailable、players/null |
-| WorldConfig | revision、desired、deployed/null、desiredDigest、deployedDigest/null、tokenStatus、serverPasswordStatus、validationWarnings |
+| WorldConfig | revision、desired、deployed/null、desiredDigest、deployedDigest/null、deployedRevision/null、tokenStatus、serverPasswordStatus、validationWarnings |
 | WorldSettings | roomName、description、gameMode、maxPlayers、pvp、language、pauseWhenEmpty、cavesEnabled、advanced、worldgen.master/caves；每分片包含固定 preset 与 worldgen/worldSettings overrides |
 
 `lifecycle`：creating/ready/createFailed/deleting/deleteFailed/retired。`runtimeStatus`：unknown/stopped/starting/running/degraded/stopping/failed。创建生命周期与运行状态分开。
@@ -277,6 +277,7 @@ planId 在远端记录，绑定目标、规范化输入、revision、环境证�
 | cleanup_failed_instance / cleanupFailedInstance | T/InstanceTarget | planId、expectedRevision、operationId | 进入受控删除清理；有世界数据时适用备份要求 |
 | preview_instance_recovery / previewInstanceRecovery | P/InstanceTarget | action(resumeCreate/cleanupCreate)、expectedRevision | 检查原创建 journal，生成绑定同一实例的恢复预览 |
 | get_instance_overview / getInstanceOverview | Q/InstanceTarget（已实现） | expectedRecordVersion | 身份概览响应，当前运行证据未采集；见 §7.1.5 |
+| start_instance / startInstance | T/InstanceTarget（已实现） | expectedRecordVersion、expectedRevision、operationId | 校验配置已应用与容器归属，启动分片并等待 DST 进程及容器内 UDP 监听；不代表公网可达 |
 | get_instance_runtime / getInstanceRuntime | Q/InstanceTarget | 无 | InstanceRuntime |
 | set_instance_running / setInstanceRunning | T/InstanceTarget | desiredRunning、expectedRevision、operationId | 启动或停止；已达期望仍校验身份，返回可验证结果 |
 | restart_instance / restartInstance | T/InstanceTarget | expectedRevision、operationId、停服确认 | stop/start，不隐式更新 |
@@ -286,6 +287,10 @@ planId 在远端记录，绑定目标、规范化输入、revision、环境证�
 | delete_instance / deleteInstance | T/InstanceTarget | planId、typedName、expectedRecordVersion、expectedRegistryRevision、operationId | 二次核对后移除已停止且身份匹配的容器/网络；有世界文件时阻断并要求保护备份；其余实例目录归档到 retired，再释放端口 |
 
 CreateInput：displayName、autostart、startAfterCreate、portPolicy(auto)、cavesEnabled。`cavesEnabled` 是容器拓扑字段，决定 Master/Caves 服务和完整端口计划；gameMode、maxPlayers、pvp、description 与 Token 属于容器环境完成后的世界配置，不进入创建容器预览 DTO。首期固定公网路线，创建请求不接收 networkMode。世界配置通过 `save_world_config`/`apply_world_config` 处理，人数范围以阶段 0 确认的 DST 支持范围固化。
+
+2026-10-21 启动修复：运行工作目录为 `/srv/dst/bin64`，存档/MOD 挂载目录根由 UID/GID 1000 持有；不递归改动已有存档文件。首次启动旧版受管 Compose 时，仅允许与确定性旧模板完全相符的工作目录修复，原文件保留为 `compose.before-runtime-fix.yaml`；自定义差异返回 `INSTANCE_START_COMPOSE_DRIFT`。容器退出或反复重启立即返回 `INSTANCE_START_CONTAINER_EXITED`，仅暴露分片、退出码、重启次数和 OOM 布尔值，不回传容器日志或 `.State.Error`。运行镜像新增 `ca-certificates`，旧镜像不会由启动操作隐式升级。
+
+运行就绪核验以容器内 `/proc/*/exe` 匹配真实 DST 可执行文件，不依赖宿主 `docker top`。Master/Caves 各要求配置中的游戏和 Steam 查询 UDP 端口；启用洞穴时 Master 还要求 `cluster.ini` 的 `SHARD.master_port`，所以 listeners 为 Master 3 项、Caves 2 项，单 Master 为 2 项。历史认证端口预留及发布保持不变，不把未监听固定认证端口单独视为本机启动失败。Release 隔离运行验证采用相同的进程/必需端口判定。超时只回传每分片进程状态、已观察端口和缺少端口；探测不可用时保持未知，不能当作“没有进程/没有端口”。该证据不代表公网可连接、Klei 认证或洞穴迁移已经验证。
 
 Docker 控制器经 SSH 返回单层包络：成功为 `{ok:true,data:...}`，失败为 `{ok:false,code:...}`。Rust 的执行入口只解包一次并直接反序列化为对应 DTO；启动和状态查询不得再次查找 `ok/data`。仅状态查询允许 `data:null`，表示当前无安装任务，转换为前端 `task:null`。缺少 `data` 与显式 `null` 必须区分；预检、启动任务的 `data` 必须是有效对象。预检 `aptRunning`、`dpkgClean` 为必需布尔字段，Python 输出、Rust DTO 和前端校验保持一致。
 
@@ -413,6 +418,8 @@ interface InstanceListResponse {
 
 registry v1 必填 schemaVersion、hostId、registryRevision、instances[]。entry 必填 instanceId、lifecycle；可选 relativePath、displayName、pendingTaskId。relativePath（如果存在）必须等于 `instances/<instanceId>`，retired 时为 `retired/<instanceId>`。ID 为规范 UUID v4，revision 为 JS 安全整数；重复实例拒绝。其他业务元数据（如 portReservations/heavyQueue）在此只读流程中不执行、不回传。创建接纳可追加有界 `operations[]` 回执项供远端幂等查询；该字段不进入 `InstanceListResponse`，且 payloadDigest 不含秘密。
 
+`operations[].payloadDigest` 新写入统一为 `sha256:<64 位小写十六进制>`。兼容历史删除操作写入的裸 64 位小写十六进制摘要；校验和幂等比较允许该历史格式，不因此清空或改写既有回执。创建和删除继续拒绝其他摘要格式，复用 operationId 时仍核对完整输入摘要。
+
 manifest v1 必填 schemaVersion、hostId、instanceId、displayName、configRevision、composeProject、cavesEnabled、autostart；容器创建阶段只写入实例/拓扑/端口摘要，不写 worldSettings 或 Token。容器环境验证完成后，世界配置通过独立领域配置流程写入 desired/deployed 摘要，其中 maxPlayers 为 1–128 的字段接收范围（不代表已经验证 DST 支持所有人数）。composeProject 必须为 `fh_<去连字符的instanceId>`。列表只解析身份与非敏感摘要字段，其余配置不原样返回。
 
 InstanceSummary 新增 manifestAvailable。maxPlayers 允许 null，未知不能用 0 代替。retired 不进当前列表；creating/createFailed 且无 manifest 时保留登记名称（无名称则显示 ID），manifestAvailable=false。ready 等记录缺 manifest 明确拒绝，不能悄悄漏掉。runtimeStatus=unknown、players=null、installedBuild=null、lastSyncedAt=null；不提升 registry/runtime.json 内的旧声明为真实运行证据。pendingTaskId 仅作为登记引用，不等价任务仍在执行。
@@ -438,6 +445,8 @@ InstanceSummary 新增 manifestAvailable。maxPlayers 允许 null，未知不能
 前端编辑参数、切换主机/连接版本、注册表变化和关窗使在途 success/error/finally 失效；响应必须匹配本次输入、完整目标与版本，并验证同号/用途唯一/范围，不信任远端返回的任意路径或文案。
 
 ### 7.1.7 创建任务完整契约（2026-10-19）
+
+创建请求拒绝时保留受限远端错误码，Release catalog 变化明确提示刷新并重新预览。已持久化任务保存自身的 worker/Docker 脚本快照；构建新镜像或更新桌面应用不会改写旧任务的脚本和失败记录。容器创建命令为 `docker compose ... create`，不传 `--no-start`。创建窗口收到失败任务后直接展示阶段、错误码、任务编号及受限 Docker/Compose 诊断。
 
 #### 创建请求 DTO
 
@@ -545,7 +554,7 @@ interface InstanceCreationResult {
 
 创建任务的 `journal` 只包含持久化阶段变更，不代表容器 stdout/stderr。Compose/Docker 校验诊断按错误详情单独返回并限长；不读取或保存完整游戏日志。
 
-Release 删除通过 `preview_instance_release_delete/delete_instance_release` 执行。删除重查 catalog digest、实例/manifest、未结束任务、容器引用及共享镜像；只有无引用 Release 可移除，用户须输入 DST build 确认。镜像只按该 Release 的固定 digest 删除，共用 digest 不删除。
+Release 删除通过 `preview_instance_release_delete/delete_instance_release` 执行。删除重查 catalog digest、活动实例登记及 manifest/active-release、未结束或待核实任务、容器引用及共享镜像。retired 登记只保留历史，不阻断 Release 删除；归档文件不修改，确认时说明恢复可能需重新导入原镜像。活动实例、未结束任务引用阻断删除；独占镜像被任意容器（含停止容器）引用时阻断。共用 digest 仅删除当前 Release 登记并保留镜像，其他 Release 的容器引用不阻断该登记删除。预览列出具体引用 ID，用户须输入 DST build 确认；执行时在锁内重查，镜像只按固定 digest 删除。
 | `CREATE_REGISTRY_CHANGED` | 注册表在执行期间变化 | 重新预览 |
 | `CREATE_ADMISSION_FAILED` | 接纳阶段失败（注册锁内检查） | 查看错误详情、重新预览 |
 
@@ -590,7 +599,7 @@ type GetInstanceCreationStatusResponse = {
 | get_world_config / getWorldConfig | Q | InstanceTarget | WorldConfig |
 | save_world_config / saveWorldConfig | M | target、settings、tokenChange、serverPasswordChange、expectedRevision、operationId | MutationResult<WorldConfig>，只保存期望，不宣称已部署 |
 | preview_world_apply / previewWorldApply | P/InstanceTarget | expectedRecordVersion、expectedRevision | 差异、新世界生成项、现有存档文件数和保护备份要求；绑定读到的期望配置摘要 |
-| apply_world_config / applyWorldConfig | T | target、planId、expectedRevision、operationId | 应用已保存的世界配置，不读前端隐式草稿 |
+| apply_world_config / applyWorldConfig | T | target、expectedRevision、desiredDigest、activeReleaseId、operationId | 发布已保存配置并按原运行状态重建分片；不读取前端隐式草稿；第一版仅对无现存世界文件开放，返回 `runtimeVerified=false`，隔离运行验证不作门槛 |
 | get_workshop_metadata / getWorkshopMetadata | Q/global | workshopIds[] | 元数据；上限 100，不需要实例，不含启用状态 |
 | search_workshop / searchWorkshop | Q/global | query、cursor、limit | 元数据搜索，外部来源能力待验证，失败允许手工输入 ID |
 | list_instance_mods / listInstanceMods | Q | target | InstanceMods |

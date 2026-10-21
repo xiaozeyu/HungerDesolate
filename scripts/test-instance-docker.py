@@ -47,6 +47,8 @@ class DockerTests(unittest.TestCase):
             result = MODULE.create_containers("/var/lib/famine-hub/instances/x/staging/t/compose.yaml", PROJECT_NAME)
         self.assertEqual(result, {"project": PROJECT_NAME, "created": True, "started": False})
         self.assertEqual(calls[0][-1], "create")
+        self.assertEqual(calls[0], ["docker", "compose", "-p", PROJECT_NAME, "-f",
+                                  "/var/lib/famine-hub/instances/x/staging/t/compose.yaml", "create"])
         self.assertNotIn("--no-start", calls[0])
         with self.assertRaises(MODULE.DockerRejected):
             MODULE.create_containers("/tmp/compose.yaml", PROJECT_NAME)

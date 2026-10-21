@@ -97,6 +97,7 @@ class WorldConfigTests(unittest.TestCase):
         self.assertEqual(result["data"]["revision"], 0)
         self.assertEqual(result["data"]["desired"]["roomName"], "生存一服")
         self.assertEqual(result["data"]["tokenStatus"], "missing")
+        self.assertIsNone(result["data"]["deployedRevision"])
         serialized = json.dumps(result).lower()
         self.assertNotIn("cluster_token", serialized)
         self.assertNotIn("server_password", serialized)
@@ -170,9 +171,11 @@ class WorldConfigTests(unittest.TestCase):
                 "expectedRecordVersion": 1, "expectedRevision": 1})
         self.assertFalse(preview["allowed"])
         self.assertTrue(preview["worldDataPresent"])
-        self.assertEqual(preview["backupRequirement"], "required")
-        self.assertIn("PROTECTION_BACKUP_REQUIRED", preview["blockers"])
-        self.assertIn("WORLD_APPLY_NOT_IMPLEMENTED", preview["blockers"])
+        self.assertEqual(preview["backupRequirement"], "none")
+        self.assertNotIn("PROTECTION_BACKUP_REQUIRED", preview["blockers"])
+        self.assertNotIn("WORLD_APPLY_NOT_IMPLEMENTED", preview["blockers"])
+        self.assertNotIn("WORLD_RUNTIME_NOT_VERIFIED", preview["blockers"])
+        self.assertTrue(any("隔离运行验证" in warning for warning in preview["warnings"]))
         self.assertNotIn("WORLD_CONFIG_RENDER_UNSUPPORTED", preview["blockers"])
         self.assertEqual(preview["newWorldOptions"][0]["key"], "grass")
 
@@ -183,6 +186,163 @@ class WorldConfigTests(unittest.TestCase):
                 "expectedRecordVersion": 1, "expectedRevision": 0})
         self.assertIn("WORLD_CONFIG_RENDER_UNSUPPORTED", preview["blockers"])
         self.assertFalse(preview["allowed"])
+
+    def test_apply_preview_warns_but_does_not_block_unverified_active_release(self):
+        active_release = {"schemaVersion": 1, "deploymentId": "deployment-1",
+                          "dstReleaseId": "66666666-6666-4666-8666-666666666666"}
+        (self.instance / "active-release.json").write_text(json.dumps(active_release))
+        (self.root / "releases").mkdir(mode=0o700)
+        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
+            "hostId": HOST, "releases": [{"releaseId": active_release["dstReleaseId"],
+                                           "runtimeVerified": False}]}))
+        (self.instance / "active-release.json").chmod(0o600)
+        (self.root / "releases/catalog.json").chmod(0o600)
+        preview = MODULE.preview_apply({"schemaVersion": 1, "requestId": REQUEST,
+            "serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE,
+            "expectedRecordVersion": 1, "expectedRevision": 0})
+        self.assertNotIn("WORLD_RUNTIME_NOT_VERIFIED", preview["blockers"])
+        self.assertTrue(any("隔离运行验证" in warning for warning in preview["warnings"]))
+
+        catalog = json.loads((self.root / "releases/catalog.json").read_text())
+        catalog["releases"][0]["runtimeVerified"] = True
+        (self.root / "releases/catalog.json").write_text(json.dumps(catalog))
+        preview = MODULE.preview_apply({"schemaVersion": 1, "requestId": REQUEST,
+            "serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE,
+            "expectedRecordVersion": 1, "expectedRevision": 0})
+        self.assertFalse(any("隔离运行验证" in warning for warning in preview["warnings"]))
+
+    def test_apply_publishes_first_world_config_and_keeps_runtime_unverified(self):
+        release_id = "77777777-7777-4777-8777-777777777777"
+        (self.root / "releases").mkdir(mode=0o700)
+        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
+            "hostId": HOST, "releases": [{"releaseId": release_id, "verified": True,
+                                           "runtimeVerified": False}]}))
+        (self.root / "releases/catalog.json").chmod(0o600)
+        (self.instance / "active-release.json").write_text(json.dumps({
+            "schemaVersion": 1, "deploymentId": "deployment-1", "dstReleaseId": release_id}))
+        (self.instance / "active-release.json").chmod(0o600)
+        (self.instance / "compose.yaml").write_text("services: {}\n")
+        (self.instance / "compose.yaml").chmod(0o600)
+        settings = self.settings()
+        MODULE.save_config(self.request("save", settings=settings,
+            tokenChange={"action": "replace", "value": "secret-token"}))
+        preview = MODULE.preview_apply({"schemaVersion": 1, "requestId": REQUEST,
+            "serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE,
+            "expectedRecordVersion": 1, "expectedRevision": 1})
+        self.assertTrue(preview["allowed"])
+        self.assertIn("隔离运行验证", preview["warnings"][0])
+        actions = []
+
+        def compose(_instance, _project, *arguments, capture=False, **_kwargs):
+            actions.append(arguments)
+            return "master\n" if capture else ""
+
+        with patch.object(MODULE, "compose_command", side_effect=compose), \
+             patch.object(MODULE.os, "chown", return_value=None):
+            result = MODULE.apply_config({"schemaVersion": 1, "action": "apply", "requestId": REQUEST,
+                "operationId": "88888888-8888-4888-8888-888888888888", "serverId": SERVER,
+                "hostId": HOST, "instanceId": INSTANCE, "expectedRevision": 1,
+                "desiredDigest": MODULE.digest(settings), "activeReleaseId": release_id})
+
+        self.assertFalse(result["runtimeVerified"])
+        self.assertEqual(result["activeReleaseId"], release_id)
+        self.assertEqual(result["runningShards"], ["master"])
+        self.assertEqual(actions, [
+            ("ps", "--services", "--status", "running"), ("stop",),
+            ("create", "--force-recreate"), ("start", "master"),
+        ])
+        deployed = json.loads((self.instance / "deployed-world.json").read_text())
+        self.assertEqual(deployed["digest"], MODULE.digest(settings))
+        refreshed = MODULE.get_config(self.request(expectedRevision=1))
+        self.assertEqual(refreshed["data"]["deployedRevision"], 1)
+        self.assertTrue((self.instance / "config/Cluster_1/cluster.ini").is_file())
+        self.assertNotIn("secret-token", (self.instance / "deployed-world.json").read_text())
+        replay = MODULE.apply_config({"schemaVersion": 1, "action": "apply", "requestId": "99999999-9999-4999-8999-999999999999",
+            "operationId": "88888888-8888-4888-8888-888888888888", "serverId": SERVER,
+            "hostId": HOST, "instanceId": INSTANCE, "expectedRevision": 1,
+            "desiredDigest": MODULE.digest(settings), "activeReleaseId": release_id})
+        self.assertEqual(replay["requestId"], "99999999-9999-4999-8999-999999999999")
+        secret_only_update = MODULE.save_config(self.request("save", expectedRevision=1,
+            operationId="99999999-9999-4999-8999-999999999999",
+            settings=settings, tokenChange={"action": "replace", "value": "replacement-token"}))
+        self.assertEqual(secret_only_update["data"]["revision"], 2)
+        self.assertEqual(secret_only_update["data"]["deployedRevision"], 1)
+
+    def test_running_service_response_normalizes_case_and_whitespace(self):
+        self.assertEqual(MODULE.parse_running_services("\n Master \r\nCaves\n\n"), {"master", "caves"})
+        with self.assertRaises(MODULE.Rejected) as failure:
+            MODULE.parse_running_services("master\nunknown-service\n")
+        self.assertEqual(str(failure.exception), "WORLD_DOCKER_RESPONSE_INVALID")
+        self.assertEqual(failure.exception.details, {"failureKey": "unknown-service"})
+
+    def test_apply_rolls_back_config_when_compose_recreation_fails(self):
+        release_id = "77777777-7777-4777-8777-777777777777"
+        (self.root / "releases").mkdir(mode=0o700)
+        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
+            "hostId": HOST, "releases": [{"releaseId": release_id, "verified": True,
+                                           "runtimeVerified": False}]}))
+        (self.root / "releases/catalog.json").chmod(0o600)
+        (self.instance / "active-release.json").write_text(json.dumps({
+            "schemaVersion": 1, "deploymentId": "deployment-1", "dstReleaseId": release_id}))
+        (self.instance / "active-release.json").chmod(0o600)
+        (self.instance / "compose.yaml").write_text("services: {}\n")
+        (self.instance / "compose.yaml").chmod(0o600)
+        old_file = self.instance / "config/Cluster_1/previous.txt"
+        old_file.parent.mkdir(parents=True, mode=0o700)
+        old_file.write_text("old-config")
+        old_file.chmod(0o600)
+        settings = self.settings()
+        MODULE.save_config(self.request("save", settings=settings,
+            tokenChange={"action": "replace", "value": "secret-token"}))
+        calls = []
+
+        def compose(_instance, _project, *arguments, capture=False, **_kwargs):
+            calls.append(arguments)
+            if capture:
+                return "master\n"
+            if arguments[:2] == ("create", "--force-recreate") and calls.count(arguments) == 1:
+                raise MODULE.Rejected("WORLD_DOCKER_OPERATION_FAILED")
+            return ""
+
+        with patch.object(MODULE, "compose_command", side_effect=compose), \
+             patch.object(MODULE.os, "chown", return_value=None):
+            with self.assertRaises(MODULE.Rejected) as failure:
+                MODULE.apply_config({"schemaVersion": 1, "action": "apply", "requestId": REQUEST,
+                    "operationId": "88888888-8888-4888-8888-888888888888", "serverId": SERVER,
+                    "hostId": HOST, "instanceId": INSTANCE, "expectedRevision": 1,
+                    "desiredDigest": MODULE.digest(settings), "activeReleaseId": release_id})
+        self.assertEqual(str(failure.exception), "WORLD_DOCKER_OPERATION_FAILED")
+        self.assertEqual(old_file.read_text(), "old-config")
+        self.assertFalse((self.instance / "deployed-world.json").exists())
+        self.assertEqual(calls[-2:], [("create", "--force-recreate"), ("start", "master")])
+
+    def test_apply_allows_existing_world_files_when_only_config_is_replaced(self):
+        release_id = "77777777-7777-4777-8777-777777777777"
+        (self.root / "releases").mkdir(mode=0o700)
+        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
+            "hostId": HOST, "releases": [{"releaseId": release_id, "verified": True,
+                                           "runtimeVerified": False}]}))
+        (self.root / "releases/catalog.json").chmod(0o600)
+        (self.instance / "active-release.json").write_text(json.dumps({
+            "schemaVersion": 1, "deploymentId": "deployment-1", "dstReleaseId": release_id}))
+        (self.instance / "active-release.json").chmod(0o600)
+        (self.instance / "compose.yaml").write_text("services: {}\n")
+        (self.instance / "compose.yaml").chmod(0o600)
+        world = self.instance / "data/Master/leveldataoverride.lua"
+        world.parent.mkdir(parents=True, mode=0o700)
+        world.write_text("existing-world")
+        world.chmod(0o600)
+        settings = self.settings()
+        MODULE.save_config(self.request("save", settings=settings,
+            tokenChange={"action": "replace", "value": "secret-token"}))
+        with patch.object(MODULE, "compose_command", return_value="master\n"), \
+             patch.object(MODULE.os, "chown", return_value=None):
+            result = MODULE.apply_config({"schemaVersion": 1, "action": "apply", "requestId": REQUEST,
+                "operationId": "88888888-8888-4888-8888-888888888888", "serverId": SERVER,
+                "hostId": HOST, "instanceId": INSTANCE, "expectedRevision": 1,
+                "desiredDigest": MODULE.digest(settings), "activeReleaseId": release_id})
+        self.assertFalse(result["runtimeVerified"])
+        self.assertEqual(world.read_text(), "existing-world")
 
     def test_apply_preview_classifies_inaccessible_world_data(self):
         (self.instance / "data" / "Master").mkdir(parents=True, mode=0o755)

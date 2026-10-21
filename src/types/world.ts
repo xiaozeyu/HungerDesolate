@@ -4,6 +4,7 @@ export interface WorldConfig {
   deployed: WorldSettings | null;
   desiredDigest: string;
   deployedDigest: string | null;
+  deployedRevision: number | null;
   tokenStatus: "configured" | "missing" | "unknown";
   serverPasswordStatus: "configured" | "missing" | "unknown";
   validationWarnings: string[];

@@ -1,7 +1,9 @@
 """Validation and deterministic Compose rendering for a verified DST release."""
+import os
 import re
+import stat
 import uuid
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 
 class ReleaseRejected(Exception):
@@ -61,6 +63,35 @@ def quote(value):
     return "'" + value + "'"
 
 
+def prepare_runtime_paths(instance_root, release_id, caves_enabled):
+    """Grant UID 1000 access to bind mount roots, without traversing or changing saves."""
+    if not valid_uuid(release_id) or type(caves_enabled) is not bool:
+        reject("CREATE_PATH_INVALID")
+    instance = Path(instance_root)
+    if not instance.is_absolute() or not valid_uuid(instance.name) or instance.parent.name != "instances":
+        reject("CREATE_PATH_INVALID")
+    relative_roots = ["data", "mods", "mods/releases", "mods/releases/" + release_id]
+    for shard in ("Master", "Caves") if caves_enabled else ("Master",):
+        relative_roots.extend(["data/" + shard, "mods/releases/" + release_id + "/" + shard])
+    for relative in [".", *relative_roots]:
+        path = instance / relative
+        if relative != ".":
+            try:
+                path.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, 1000)
+                    or info.st_mode & 0o022):
+                reject("CREATE_PATH_INVALID")
+            if relative.startswith("data/") or relative.endswith(("/Master", "/Caves")):
+                os.fchown(fd, 1000, 1000)
+        finally:
+            os.close(fd)
+
+
 def port_lines(manifest, shard):
     rows = []
     for item in manifest["ports"]:
@@ -94,9 +125,9 @@ def render_compose(manifest, release, instance_root):
                       "    init: true", "    restart: " + quote("unless-stopped" if manifest.get("autostart") else "no"),
                       "    command:"])
         lines.extend("      - " + quote(item) for item in command_value)
-        lines.extend(["    working_dir: '/srv'", "    volumes:",
-                      "      - " + quote(instance_root + "/config:/srv/config:rw"),
+        lines.extend(["    working_dir: '/srv/dst/bin64'", "    volumes:",
                       "      - " + quote(instance_root + "/data/" + ("Caves" if shard == "caves" else "Master") + ":/srv/data:rw"),
+                      "      - " + quote(instance_root + "/config:/srv/data/config:rw"),
                       "      - " + quote(instance_root + "/mods/releases/" + release["releaseId"] + "/" + ("Caves" if shard == "caves" else "Master") + ":/srv/ugc:rw")])
         ports = port_lines(manifest, shard)
         if ports:

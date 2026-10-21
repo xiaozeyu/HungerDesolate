@@ -81,6 +81,7 @@ class TaskTests(unittest.TestCase):
             patch.object(CONTROL.os, "geteuid", return_value=0),
             patch.object(Path, "lstat", lambda path: root_owned(original_lstat(path))),
             patch.object(CONTROL.os, "fstat", lambda fd: root_owned(original_fstat(fd))),
+            patch.object(CONTROL.os, "fchown"),
         ]
         for item in self.patches:
             item.start()
@@ -127,6 +128,7 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(manifest["instanceId"], state["target"]["instanceId"])
         self.assertNotIn("token", json.dumps(manifest))
         self.assertTrue((self.root / "instances" / state["target"]["instanceId"] / "data" / "Master").is_dir())
+        self.assertTrue((self.root / "instances" / state["target"]["instanceId"] / "data" / "Master" / "config").is_dir())
         self.assertGreaterEqual(status["sequence"], 3)
 
     def test_same_operation_replays_and_changed_payload_is_rejected(self):

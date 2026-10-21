@@ -12,10 +12,16 @@ pub enum Lifecycle {
     Retired,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeStatus {
     Unknown,
+    Stopped,
+    Starting,
+    Running,
+    Degraded,
+    Stopping,
+    Failed,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,9 +93,10 @@ pub struct ManifestSummary {
 pub struct InstanceOverview {
     pub identity: InstanceSummary,
     pub manifest_summary: ManifestSummary,
-    pub verification_level: &'static str,
-    pub blockers: Vec<&'static str>,
-    pub desired_vs_deployed: &'static str,
+    pub verification_level: String,
+    pub blockers: Vec<String>,
+    pub desired_vs_deployed: String,
+    pub runtime: crate::instance_runtime::RuntimeSnapshot,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

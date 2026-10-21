@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, toRef, watch } from "vue";
 import AppDialog from "./AppDialog.vue";
+import AppSelect from "./AppSelect.vue";
 import StatusLabel from "./StatusLabel.vue";
 import { useInstanceCreation } from "../composables/useInstanceCreation";
 import { creationBlockerLabel } from "../lib/instanceCreation";
@@ -26,7 +27,11 @@ function handleRecoveryAction(action:string){
   };
   recoveryFeedback.value=feedback[action]??"此恢复操作暂不可用，远端现场未更改。";
 }
-const {fields,result,task,releaseReady,selectedReleaseId,releaseOptions,error,loading,creating,preview,create,refreshReleaseCatalog,edit:editPreview}=useInstanceCreation(computed(()=>props.server),computed(()=>props.registryRevision),toRef(props,"open"),(event,target)=>{if(event==="creationSucceeded"){emit("update:open",false);emit("creationSucceeded",target);}});
+const {fields,result,task,releaseReady,selectedReleaseId,releaseOptions,releaseLoading,releaseError,error,loading,creating,preview,create,refreshReleaseCatalog,edit:editPreview}=useInstanceCreation(computed(()=>props.server),computed(()=>props.registryRevision),toRef(props,"open"),(event,target)=>{if(event==="creationSucceeded"){emit("update:open",false);emit("creationSucceeded",target);}});
+const availableReleases=computed(()=>releaseOptions().filter(item=>item.verified).map(item=>({
+  value:item.releaseId,label:`DST ${item.dstBuild} · ${item.releaseId.slice(0,8)}`,
+})));
+const selectedRelease=computed(()=>releaseOptions().find(item=>item.releaseId===selectedReleaseId.value));
 
 watch(()=>props.open,(open)=>{
   if(open){recoveryFeedback.value="";editPreview();return;}
@@ -34,11 +39,17 @@ watch(()=>props.open,(open)=>{
 </script>
 <template>
   <AppDialog :open="open" :title="result ? '创建预览' : '新建专服'" @update:open="emit('update:open',$event)">
-    <div v-if="!result && releaseReady()" class="creation-release-state"><StatusLabel tone="success" label="基础验证通过"/><span class="mono">DST {{releaseOptions().find(item=>item.releaseId===selectedReleaseId)?.dstBuild}}</span><button class="text-button" type="button" @click="refreshReleaseCatalog">重新检查</button></div>
     <form v-if="!result" id="instance-create-form" class="creation-form" @submit.prevent="nextStep">
       <div class="creation-form-heading"><span class="eyebrow">专服设置</span><h3>配置基础运行方式</h3></div>
       <div class="creation-settings-grid">
         <label class="creation-field creation-field-wide">专服名称<input v-model="fields.displayName" autocomplete="off" placeholder="生存一服" required maxlength="128"/></label>
+        <div class="creation-field creation-field-wide">
+          <div class="creation-release-heading"><span>DST Release</span><button class="text-button" type="button" :disabled="releaseLoading || creating" @click="refreshReleaseCatalog">{{releaseLoading?'读取中…':'刷新 Release'}}</button></div>
+          <AppSelect v-model="selectedReleaseId" :options="availableReleases" label="DST Release" :placeholder="releaseLoading?'读取 Release…':'选择 Release'" :disabled="releaseLoading || creating || !availableReleases.length"/>
+          <div v-if="selectedRelease && releaseReady()" class="creation-release-meta"><StatusLabel tone="success" label="基础验证通过"/><span class="mono" aria-label="Release ID">{{selectedRelease.releaseId}}</span></div>
+          <p v-if="releaseError" class="creation-release-error" role="alert">{{releaseError.message}}</p>
+          <p v-else-if="!releaseLoading && !availableReleases.length" class="muted-text" role="status">暂无通过基础验证的 Release，请先在 Release 管理中构建并验证。</p>
+        </div>
         <fieldset class="creation-option-group"><legend>启动策略</legend><label class="creation-switch"><input v-model="fields.autostart" type="checkbox"/>主机启动时启动</label><label class="creation-switch"><input v-model="fields.startAfterCreate" type="checkbox" :disabled="!fields.autostart"/>创建后启动</label></fieldset>
         <fieldset class="creation-option-group"><legend>是否启用洞穴</legend><label class="creation-switch"><input v-model="fields.cavesEnabled" type="checkbox"/>启用 Caves 分片</label></fieldset>
       </div>
@@ -47,18 +58,22 @@ watch(()=>props.open,(open)=>{
       <div class="creation-preview-heading"><div><span class="eyebrow">创建预览</span><h3>{{result.input.displayName}}</h3></div><div class="creation-preview-badges"><StatusLabel tone="warning" label="端口未预留"/><span class="muted-text">{{new Date(result.capturedAtUnixSeconds*1000).toLocaleString()}}</span></div></div>
       <div v-if="result.blockers.length" class="environment-error" role="alert"><ul><li v-for="code in result.blockers" :key="code">{{creationBlockerLabel(code)}}</li></ul></div>
       <div class="creation-preview-grid">
-        <section class="creation-panel creation-panel-wide"><h4>目标摘要</h4><dl class="creation-facts"><div><dt>主机</dt><dd>{{server?.displayName ?? '—'}}</dd></div><div><dt>DST Release</dt><dd class="mono">{{releaseOptions().find(item=>item.releaseId===selectedReleaseId)?.dstBuild ?? '—'}}</dd></div><div><dt>启动策略</dt><dd>{{result.input.autostart?'主机启动时启动':'手动启动'}} · {{result.input.startAfterCreate?'创建后启动':'创建后停止'}}</dd></div><div><dt>洞穴分片</dt><dd>{{result.input.cavesEnabled?'启用':'关闭'}}</dd></div></dl></section>
+        <section class="creation-panel creation-panel-wide"><h4>目标摘要</h4><dl class="creation-facts"><div><dt>主机</dt><dd>{{server?.displayName ?? '—'}}</dd></div><div><dt>DST 版本</dt><dd class="mono">{{selectedRelease?.dstBuild ?? '—'}}</dd></div><div><dt>Release ID</dt><dd class="mono">{{selectedRelease?.releaseId ?? '—'}}</dd></div><div><dt>镜像摘要</dt><dd class="mono">{{selectedRelease?.imageDigest ?? '—'}}</dd></div><div><dt>启动策略</dt><dd>{{result.input.autostart?'主机启动时启动':'手动启动'}} · {{result.input.startAfterCreate?'创建后启动':'创建后停止'}}</dd></div><div><dt>洞穴分片</dt><dd>{{result.input.cavesEnabled?'启用':'关闭'}}</dd></div></dl></section>
         <section class="creation-panel"><h4>资源计划</h4><dl class="creation-facts"><div><dt>可用磁盘</dt><dd>{{formatBytes(result.availableBytes)}}</dd></div><div><dt>Docker / Compose</dt><dd>{{result.dockerVersion ?? '未知'}} / {{result.composeVersion ?? '未知'}}</dd></div><div><dt>存储目录</dt><dd class="mono">{{result.storagePath}}</dd></div><div><dt>Compose 项目</dt><dd class="mono">{{result.composeProject}}</dd></div></dl></section>
         <section v-if="result.ports.length" class="creation-panel creation-panel-wide"><div class="creation-panel-heading"><h4>端口计划</h4><span class="muted-text">自动分配 · 同号发布</span></div><div class="table-wrap creation-ports"><table><thead><tr><th>分片</th><th>用途</th><th>UDP 端口</th></tr></thead><tbody><tr v-for="port in result.ports" :key="`${port.shard}:${port.purpose}`"><td>{{port.shard==='master'?'主世界':'洞穴'}}</td><td>{{purposes[port.purpose]}}</td><td class="mono">{{port.hostPort}}</td></tr></tbody></table></div></section>
       </div>
       <div v-if="task" class="creation-task-state" :class="task.status"><StatusLabel :tone="task.status==='failed'?'danger':task.status==='succeeded'?'success':'warning'" :label="task.status==='failed'?'创建失败':task.status==='succeeded'?'容器已验证':'创建容器中'"/><span>{{task.status==='failed'?creationTaskErrorLabel(task.error?.code):task.status==='succeeded'?'容器环境已完成验证，可进入世界配置':creationTaskStageLabel(task.stage)}}</span></div>
+      <div v-if="task?.status==='failed' && task.error" class="environment-error" role="alert">
+        <strong>{{creationTaskStageLabel(task.stage)}} · {{task.error.code}}</strong>
+        <p>{{task.error.message}}</p>
+        <pre v-if="typeof task.error.details.composeDiagnostic==='string'">{{task.error.details.composeDiagnostic}}</pre>
+        <pre v-if="typeof task.error.details.dockerDiagnostic==='string'">{{task.error.details.dockerDiagnostic}}</pre>
+        <small class="mono">任务 {{task.taskId}}</small>
+      </div>
       <div v-if="task && task.status==='failed' && recoveryActions.length" class="creation-recovery-actions"><strong>恢复选项：</strong><button v-for="action in recoveryActions" :key="action.action" class="text-button" @click="handleRecoveryAction(action.action)">{{action.label}}</button></div>
       <div v-if="recoveryFeedback" class="environment-error" role="status" aria-live="polite">
         <p>{{recoveryFeedback}}</p>
         <template v-if="task?.error">
-          <p v-if="task.error.message">{{task.error.message}}</p>
-          <pre v-if="typeof task.error.details.composeDiagnostic==='string'">{{task.error.details.composeDiagnostic}}</pre>
-          <pre v-if="typeof task.error.details.dockerDiagnostic==='string'">{{task.error.details.dockerDiagnostic}}</pre>
           <ul v-if="task.error.recoverySteps?.length"><li v-for="step in task.error.recoverySteps" :key="step">{{step}}</li></ul>
           <ol v-if="task.journal?.length" class="task-journal"><li v-for="entry in task.journal" :key="entry.sequence"><time>{{new Date(entry.at).toLocaleString()}}</time><span>{{entry.stage}}</span><StatusLabel :tone="entry.status==='failed'?'danger':entry.status==='succeeded'?'success':'muted'" :label="entry.status"/></li></ol>
         </template>
@@ -70,7 +85,7 @@ watch(()=>props.open,(open)=>{
       <button v-if="result" class="button" @click="edit">返回编辑</button>
       <button v-if="result && !task" class="button primary" :disabled="loading || creating" @click="preview">重新检查</button>
       <button v-if="result && !task" class="button primary" :disabled="loading || creating || !releaseReady()" @click="create">{{creating?'提交中…':releaseReady()?'创建容器':'等待 release'}}</button>
-      <button v-if="!result" class="button primary" type="submit" form="instance-create-form" :disabled="loading" :aria-busy="loading">{{loading?'检查中…':'预览'}}</button>
+      <button v-if="!result" class="button primary" type="submit" form="instance-create-form" :disabled="loading || !releaseReady()" :aria-busy="loading">{{loading?'检查中…':'预览'}}</button>
     </template>
   </AppDialog>
 </template>

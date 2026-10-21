@@ -12,6 +12,7 @@ import signal
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -26,14 +27,17 @@ MAX_EXPANDED_BYTES = 512 * 1024
 MAX_ZIP_ENTRIES = 96
 SERVER_BINARY = "/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64"
 ROLES = ("master", "caves")
+CURRENT_STAGE = "validateRequest"
 
 
 class Rejected(Exception):
-    pass
+    def __init__(self, code, details=None):
+        super().__init__(code)
+        self.details = details if isinstance(details, dict) else {}
 
 
-def reject(code):
-    raise Rejected(code)
+def reject(code, details=None):
+    raise Rejected(code, details)
 
 
 def valid_uuid(value):
@@ -180,7 +184,9 @@ def prepare_bundle(encoded, destination):
     cluster.set("NETWORK", "lan_only_cluster", "true")
     if not cluster.has_section("SHARD"):
         cluster.add_section("SHARD")
+    cluster.set("SHARD", "bind_ip", "0.0.0.0")
     cluster.set("SHARD", "master_ip", "master")
+    cluster.set("SHARD", "shard_enabled", "true")
     if not cluster.has_option("SHARD", "master_port"):
         cluster.set("SHARD", "master_port", "10888")
     if not cluster.has_option("SHARD", "cluster_key"):
@@ -197,9 +203,10 @@ def prepare_bundle(encoded, destination):
             settings.read(destination / role.title() / "server.ini", encoding="utf-8")
             values = {
                 "game": settings.getint("NETWORK", "server_port"),
-                "auth": settings.getint("STEAM", "authentication_port"),
                 "query": settings.getint("STEAM", "master_server_port"),
             }
+            if role == "master":
+                values["shard"] = cluster.getint("SHARD", "master_port")
         except (OSError, configparser.Error, UnicodeError, ValueError):
             reject("RELEASE_RUNTIME_CONFIG_INVALID")
         if any(value < 1 or value > 65535 for value in values.values()):
@@ -209,7 +216,8 @@ def prepare_bundle(encoded, destination):
 
 
 def udp_ports(container):
-    result = docker(["docker", "exec", container, "/bin/sh", "-c", "cat /proc/net/udp /proc/net/udp6"])
+    result = docker(["docker", "exec", container, "/bin/sh", "-c",
+                     "cat /proc/net/udp && { if [ -r /proc/net/udp6 ]; then cat /proc/net/udp6; fi; }"])
     if result.returncode != 0:
         reject("RELEASE_RUNTIME_PROCESS_NOT_READY")
     ports = set()
@@ -227,8 +235,11 @@ def process_running(container):
     state = docker(["docker", "inspect", "--format", "{{.State.Running}}", container])
     if state.returncode != 0 or state.stdout.strip() != "true":
         return False
-    processes = docker(["docker", "top", container, "-eo", "args"])
-    return processes.returncode == 0 and SERVER_BINARY in processes.stdout
+    probe = ("for p in /proc/[0-9]*/exe; do x=$(readlink \"$p\" 2>/dev/null) || continue; "
+             "if [ \"$x\" = " + SERVER_BINARY + " ]; then printf DST_RUNNING; exit 0; fi; "
+             "done; printf DST_NOT_FOUND")
+    processes = docker(["docker", "exec", container, "/bin/sh", "-c", probe])
+    return processes.returncode == 0 and processes.stdout.strip() == "DST_RUNNING"
 
 
 def atomic_evidence(path, value):
@@ -254,6 +265,8 @@ def atomic_evidence(path, value):
 
 
 def verify(request):
+    global CURRENT_STAGE
+    CURRENT_STAGE = "validateRequest"
     host_id = request.get("hostId")
     release_id = request.get("releaseId")
     expected_digest = request.get("catalogDigest")
@@ -268,9 +281,11 @@ def verify(request):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGHUP, interrupted)
     signal.signal(signal.SIGINT, interrupted)
+    CURRENT_STAGE = "readHostState"
     host = read_json(ROOT / "host.json", 65536)
     if host.get("schemaVersion") != 1 or host.get("hostId") != host_id:
         reject("HOST_IDENTITY_MISMATCH")
+    CURRENT_STAGE = "readReleaseCatalog"
     catalog = read_json(CATALOG, 1024 * 1024)
     observed = catalog_digest(catalog)
     if observed != expected_digest:
@@ -281,6 +296,7 @@ def verify(request):
     release = next((item for item in releases if isinstance(item, dict) and item.get("releaseId") == release_id), None)
     if release is None or release.get("verified") is not True or release.get("runtimeVerified") is True:
         reject("CREATE_RELEASE_NOT_VERIFIED")
+    CURRENT_STAGE = "readReleaseMetadata"
     metadata = read_json(STAGING / release_id / "release-metadata.json", 65536)
     metadata_entry = dict(metadata)
     metadata_entry.pop("schemaVersion", None)
@@ -299,6 +315,7 @@ def verify(request):
         os.close(lock_fd)
         reject("RELEASE_RUNTIME_BUSY")
 
+    CURRENT_STAGE = "prepareConfiguration"
     bundle = request.get("settingsBundleBase64")
     temporary_root = TEMPORARY_ROOT
     execution_id = uuid.uuid4().hex
@@ -315,34 +332,46 @@ def verify(request):
         config_root = workspace / "config" / "Cluster_1"
         ports = prepare_bundle(bundle, config_root)
         for role in ROLES:
-            for suffix in ("data-" + role, "ugc-" + role):
-                path = workspace / suffix
-                path.mkdir(mode=0o700)
-                os.chown(path, 1000, 1000)
+            data_path = workspace / ("data-" + role)
+            data_path.mkdir(mode=0o700)
+            os.chown(data_path, 1000, 1000)
+            config_mountpoint = data_path / "config"
+            config_mountpoint.mkdir(mode=0o700)
+            os.chown(config_mountpoint, 1000, 1000)
+            ugc_path = workspace / ("ugc-" + role)
+            ugc_path.mkdir(mode=0o700)
+            os.chown(ugc_path, 1000, 1000)
 
+        CURRENT_STAGE = "verifyImage"
         image_id = release["imageDigest"]
         image_check = docker(["docker", "image", "inspect", release["imageDigest"], "--format", "{{.Id}}"])
         if image_check.returncode != 0 or image_check.stdout.strip() != image_id:
             reject("CREATE_RELEASE_IMAGE_DIGEST_MISMATCH")
+        CURRENT_STAGE = "createNetwork"
         created = docker(["docker", "network", "create", "--driver", "bridge",
                           "--label", "com.hungerdesolate.releaseVerification=" + verification_id, network])
         if created.returncode != 0:
             reject("RELEASE_RUNTIME_NETWORK_FAILED")
         for role in ROLES:
+            CURRENT_STAGE = "startMaster" if role == "master" else "startCaves"
             name = container_names[role]
-            command = ["docker", "run", "--detach", "--init", "--network", network,
+            command = ["docker", "run", "--detach", "--init", "--workdir", "/srv/dst/bin64", "--network", network,
                        "--network-alias", role,
                        "--label", "com.hungerdesolate.releaseVerification=" + verification_id,
-                       "--mount", "type=bind,src=" + str(workspace / "config") + ",dst=/srv/config,readonly",
                        "--mount", "type=bind,src=" + str(workspace / ("data-" + role)) + ",dst=/srv/data",
+                       # The config bind must follow the parent data bind; otherwise the parent
+                       # mount hides this nested target and DST cannot read Cluster_1/server.ini.
+                       "--mount", "type=bind,src=" + str(workspace / "config") + ",dst=/srv/data/config,readonly",
                        "--mount", "type=bind,src=" + str(workspace / ("ugc-" + role)) + ",dst=/srv/ugc",
                        "--name", name, "--entrypoint", SERVER_BINARY, image_id]
             command.extend(release["commands"][role][1:])
             started = docker(command, timeout=60)
             if started.returncode != 0:
                 reject("RELEASE_RUNTIME_CONTAINER_START_FAILED")
+        CURRENT_STAGE = "waitForListeners"
         deadline = time.monotonic() + 120
         ready = {role: set() for role in ROLES}
+        process_ready = {role: False for role in ROLES}
         while time.monotonic() < deadline:
             all_ready = True
             for role in ROLES:
@@ -350,6 +379,7 @@ def verify(request):
                 if not process_running(name):
                     all_ready = False
                     continue
+                process_ready[role] = True
                 ready[role] = udp_ports(name)
                 if not set(ports[role].values()).issubset(ready[role]):
                     all_ready = False
@@ -368,8 +398,21 @@ def verify(request):
                 break
             time.sleep(2)
         if evidence is None:
-            reject("RELEASE_RUNTIME_LISTENERS_NOT_READY")
+            missing = {
+                role: sorted(set(ports[role].values()) - ready[role])
+                for role in ROLES
+            }
+            observed = {role: sorted(ready[role])[:64] for role in ROLES}
+            reject("RELEASE_RUNTIME_LISTENERS_NOT_READY", {
+                "masterMissingPorts": missing["master"],
+                "cavesMissingPorts": missing["caves"],
+                "masterObservedPorts": observed["master"],
+                "cavesObservedPorts": observed["caves"],
+                "masterProcessRunning": process_ready["master"],
+                "cavesProcessRunning": process_ready["caves"],
+            })
     finally:
+        CURRENT_STAGE = "cleanup"
         cleanup_failed = False
         label_filter = "label=com.hungerdesolate.releaseVerification=" + verification_id
         containers = docker(["docker", "container", "ls", "--all", "--quiet", "--no-trunc",
@@ -403,6 +446,7 @@ def verify(request):
         reject("RELEASE_RUNTIME_CLEANUP_FAILED")
     if evidence is None:
         reject("RELEASE_RUNTIME_CHECK_FAILED")
+    CURRENT_STAGE = "publishEvidence"
     artifact = STAGING / release_id
     atomic_evidence(artifact / "runtime.json", evidence)
     return {"releaseId": release_id, "runtimeVerified": True,
@@ -410,14 +454,37 @@ def verify(request):
 
 
 def main(request):
+    global CURRENT_STAGE
+    CURRENT_STAGE = "initialize"
     try:
         data = verify(request)
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)
     except Rejected as error:
-        print(json.dumps({"ok": False, "code": str(error)}, separators=(",", ":")), flush=True)
+        details = dict(error.details)
+        details.setdefault("failureStage", CURRENT_STAGE)
+        print(json.dumps({"ok": False, "code": str(error), "details": details}, separators=(",", ":")), flush=True)
         raise SystemExit(1)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, configparser.Error):
-        print(json.dumps({"ok": False, "code": "RELEASE_RUNTIME_VERIFY_FAILED"}, separators=(",", ":")), flush=True)
+    except Exception as error:
+        known_types = {"OSError", "PermissionError", "FileNotFoundError", "NotADirectoryError",
+                       "ValueError", "TypeError", "KeyError", "AttributeError", "RuntimeError",
+                       "UnicodeError", "BadZipFile", "Error"}
+        failure_type = type(error).__name__
+        details = {"failureType": failure_type if failure_type in known_types else "Exception",
+                   "failureStage": CURRENT_STAGE}
+        traceback_node = error.__traceback__
+        last_script_frame = None
+        while traceback_node is not None:
+            frame = traceback_node.tb_frame
+            if frame.f_code.co_filename == __file__:
+                last_script_frame = (frame.f_code.co_name, traceback_node.tb_lineno)
+            traceback_node = traceback_node.tb_next
+        if last_script_frame is not None:
+            function_name, line_number = last_script_frame
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,47}", function_name) and 1 <= line_number <= 1000:
+                details["failureFunction"] = function_name
+                details["failureLine"] = line_number
+        print(json.dumps({"ok": False, "code": "RELEASE_RUNTIME_VERIFY_FAILED", "details": details},
+                         separators=(",", ":")), flush=True)
         raise SystemExit(1)
 
 

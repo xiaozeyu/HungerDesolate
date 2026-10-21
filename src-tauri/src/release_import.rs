@@ -380,14 +380,146 @@ fn execute(
     channel
         .wait_close()
         .map_err(|_| error("CREATE_RELEASE_CHANNEL_FAILED", "release 通道未正常结束"))?;
-    let envelope: Value = serde_json::from_slice(&output)
-        .map_err(|_| error("CREATE_RELEASE_PROTOCOL_INVALID", "release 响应无效"))?;
+    let exit_status = channel.exit_status().map_err(|_| {
+        error(
+            "CREATE_RELEASE_CHANNEL_FAILED",
+            "无法读取 release 脚本退出状态",
+        )
+    })?;
+    let envelope: Value = match serde_json::from_slice(&output) {
+        Ok(value) => value,
+        Err(_) => {
+            let mut result = error(
+                "CREATE_RELEASE_PROTOCOL_INVALID",
+                "远端 Release 脚本未返回有效响应；请检查主机 Python 运行环境后重试",
+            );
+            result.details = json!({"responseBytes": output.len(), "exitStatus": exit_status});
+            return Err(result);
+        }
+    };
     if envelope.get("ok") != Some(&Value::Bool(true)) {
         let code = envelope
             .get("code")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        return Err(remote_error(code));
+        let mut failure = remote_error(code);
+        if code == "RELEASE_RUNTIME_LISTENERS_NOT_READY" {
+            let mut diagnostics = serde_json::Map::new();
+            if let Some(remote_details) = envelope.get("details").and_then(Value::as_object) {
+                for key in [
+                    "masterMissingPorts",
+                    "cavesMissingPorts",
+                    "masterObservedPorts",
+                    "cavesObservedPorts",
+                ] {
+                    let Some(values) = remote_details.get(key).and_then(Value::as_array) else {
+                        continue;
+                    };
+                    if values.len() > 64
+                        || values.iter().any(|value| {
+                            !value
+                                .as_u64()
+                                .is_some_and(|port| (1..=65535).contains(&port))
+                        })
+                    {
+                        continue;
+                    }
+                    diagnostics.insert(key.to_string(), Value::Array(values.clone()));
+                }
+                for key in ["masterProcessRunning", "cavesProcessRunning"] {
+                    if let Some(value) = remote_details.get(key).and_then(Value::as_bool) {
+                        diagnostics.insert(key.to_string(), Value::Bool(value));
+                    }
+                }
+            }
+            failure.details = Value::Object(diagnostics);
+        } else if code == "RELEASE_RUNTIME_VERIFY_FAILED" {
+            if let Some(remote_details) = envelope.get("details").and_then(Value::as_object) {
+                let mut diagnostics = failure.details.as_object().cloned().unwrap_or_default();
+                if let Some(failure_type) = remote_details
+                    .get("failureType")
+                    .and_then(Value::as_str)
+                    .filter(|value| {
+                        [
+                            "OSError",
+                            "PermissionError",
+                            "FileNotFoundError",
+                            "NotADirectoryError",
+                            "ValueError",
+                            "TypeError",
+                            "KeyError",
+                            "AttributeError",
+                            "RuntimeError",
+                            "UnicodeError",
+                            "BadZipFile",
+                            "Error",
+                            "Exception",
+                        ]
+                        .contains(value)
+                    })
+                {
+                    diagnostics.insert("failureType".into(), Value::String(failure_type.into()));
+                }
+                if let Some(failure_stage) = remote_details
+                    .get("failureStage")
+                    .and_then(Value::as_str)
+                    .filter(|value| {
+                        [
+                            "initialize",
+                            "validateRequest",
+                            "readHostState",
+                            "readReleaseCatalog",
+                            "readReleaseMetadata",
+                            "prepareConfiguration",
+                            "verifyImage",
+                            "createNetwork",
+                            "startMaster",
+                            "startCaves",
+                            "waitForListeners",
+                            "cleanup",
+                            "publishEvidence",
+                        ]
+                        .contains(value)
+                    })
+                {
+                    diagnostics.insert("failureStage".into(), Value::String(failure_stage.into()));
+                }
+                if let Some(function_name) = remote_details
+                    .get("failureFunction")
+                    .and_then(Value::as_str)
+                    .filter(|value| {
+                        [
+                            "main",
+                            "verify",
+                            "docker",
+                            "process_running",
+                            "udp_ports",
+                            "read_json",
+                            "prepare_bundle",
+                            "atomic_evidence",
+                            "catalog_digest",
+                            "valid_uuid",
+                            "reject",
+                        ]
+                        .contains(value)
+                    })
+                {
+                    if let Some(line_number) = remote_details
+                        .get("failureLine")
+                        .and_then(Value::as_u64)
+                        .filter(|line| (1..=1000).contains(line))
+                    {
+                        diagnostics.insert(
+                            "failureFunction".into(),
+                            Value::String(function_name.into()),
+                        );
+                        diagnostics.insert("failureLine".into(), json!(line_number));
+                    }
+                }
+                failure.details = Value::Object(diagnostics);
+            }
+        }
+        return Err(failure);
     }
     envelope
         .get("data")
@@ -748,6 +880,18 @@ pub fn delete_release(
 #[cfg(test)]
 mod tests {
     use super::remote_error;
+    use serde_json::{json, Value};
+
+    fn safe_ports(value: &Value, key: &str) -> Option<Vec<u64>> {
+        let values = value.get(key)?.as_array()?;
+        if values.len() > 64 {
+            return None;
+        }
+        values
+            .iter()
+            .map(|value| value.as_u64().filter(|port| (1..=65535).contains(port)))
+            .collect()
+    }
 
     #[test]
     fn runtime_rejection_codes_have_actionable_errors() {
@@ -789,5 +933,18 @@ mod tests {
             assert_eq!(error.code, expected_code);
             assert!(error.message.contains(message_fragment));
         }
+    }
+
+    #[test]
+    fn listener_diagnostics_accept_only_port_numbers() {
+        let details =
+            json!({"masterMissingPorts":[11000,8768],"cavesMissingPorts":[27019],"log":"secret"});
+        assert_eq!(
+            safe_ports(&details, "masterMissingPorts"),
+            Some(vec![11000, 8768])
+        );
+        assert_eq!(safe_ports(&details, "cavesMissingPorts"), Some(vec![27019]));
+        assert_eq!(safe_ports(&details, "log"), None);
+        assert_eq!(safe_ports(&json!({"ports":[0]}), "ports"), None);
     }
 }

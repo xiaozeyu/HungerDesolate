@@ -71,13 +71,32 @@ Release 登记会自动执行基础验证，通过后即可用于创建实例：
 
 创建只要求基础验证通过。运行时验证提供额外的双分片启动证据，不会把未运行验证的 Release 标成运行时验证通过。实例创建只生成并验证容器资源，不代表游戏已经启动或玩家可以连接。
 
-若要进行隔离运行验证，在 Release 管理页上传包含 `cluster.ini`、`cluster_token.txt`、`Master/server.ini` 和 `Caves/server.ini` 的 Klei 配置 ZIP。验证会在主机 `/run` 临时目录中创建 LAN-only 集群，启动两个分片并检查配置端口；不发布宿主端口、不挂载实例存档。配置包只在验证期间传输和使用，容器、网络与临时文件随后清理，catalog 只保存脱敏验证结果。
+若要进行隔离运行验证，在 DST 游戏主菜单打开“账户”并生成服务器令牌。这个令牌文件通常不会预先存在；生成后将令牌内容保存为 `cluster_token.txt`，再与下面的配置文件一起放入 ZIP。令牌是凭据，不要提交到代码仓库或发给他人。
+
+ZIP 根目录必须直接包含以下文件和目录（不要再套一层 `Cluster_1/` 文件夹）：
+
+```text
+cluster.ini
+cluster_token.txt
+Master/server.ini
+Caves/server.ini
+```
+
+`cluster.ini`、`Master/server.ini` 和 `Caves/server.ini` 可从本机已生成的 DST 世界配置目录取得；如果还没有这些配置，可在游戏内创建一个本地世界后复制对应文件。当前验证器要求 Master 和 Caves 两个分片配置都存在。完成后在 Release 管理页选择 ZIP 并运行验证。
+
+验证会在主机 `/run` 临时目录中创建 LAN-only 集群，启动两个分片并检查配置端口；不发布宿主端口、不挂载实例存档。配置包只在验证期间传输和使用，容器、网络与临时文件随后清理，catalog 只保存脱敏验证结果。
 
 ## 故障排查
 
 ### 问题：构建镜像时 SteamCMD 下载失败
 
-**原因**: 网络连接问题或 Steam 服务暂时不可用
+日志中的 SteamCMD 自更新、Steam 匿名登录和 DST 内容下载是不同阶段。仅凭末尾 `CWorkThreadPool` 清理信息或退出码 8，不能断定具体网络、权限或空间问题。
+
+当前本地和软件内构建共用 `docker/runtime/install-dst.sh`：先独立执行 SteamCMD bootstrap，再匿名下载并验证 App 343050。对退出码 8、42 和超时 124 最多尝试 3 次；其他错误立即失败。失败输出 `STEAMCMD_BOOTSTRAP_FAILED` 或 `STEAMCMD_DOWNLOAD_FAILED`、原始退出码、隔离构建目录下 SteamCMD 内部日志末尾及磁盘/ inode 信息。重试耗尽不登记 Release。
+
+软件内构建状态使用宿主脚本的最终结果标记；SteamCMD 重试期间的 `error:` 日志不会让页面提前停止观察。只有镜像构建和 Release 登记均完成后才标记成功。
+
+下载步骤必须同时满足退出码 0、App 343050 完整安装标记、可执行的 DST binary、有效版本文件及非空 `data/databundles/scripts.zip`；缺少任一项返回 `DST_ARTIFACT_INVALID`，不会生成成功镜像。真实 Steam/CDN 联网下载仍须在构建主机实测。
 
 **解决**:
 ```bash

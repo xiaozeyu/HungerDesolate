@@ -80,6 +80,35 @@ export interface InstanceOverview {
     verificationLevel: "unverified" | "processOnly" | "localVerified" | "networkVerified";
     blockers: string[];
     desiredVsDeployed: "inSync" | "pending" | "drifted" | "unknown";
+    runtime?: InstanceRuntimeSnapshot;
+}
+export interface InstanceRuntimePort {
+    shard: ShardKind;
+    purpose: "game" | "steamMaster" | "steamAuth" | "shard";
+    protocol: "udp";
+    containerPort: number;
+    hostPort: number | null;
+    bindAddress: string | null;
+    published: boolean | null;
+    listening: boolean | null;
+    required: boolean;
+}
+export interface InstanceRuntimeShard {
+    shard: ShardKind;
+    containerStatus: "created" | "running" | "paused" | "restarting" | "removing" | "exited" | "dead";
+    processRunning: boolean | null;
+    ready: boolean;
+    installedBuild: string | null;
+    missingPorts: number[];
+}
+export interface InstanceRuntimeSnapshot {
+    hostId: HostId; instanceId: InstanceId; capturedAtUnixSeconds: number; capturedAt: string; configRevision: number;
+    status: RuntimeStatus; verificationLevel: "unverified" | "processOnly" | "localVerified";
+    installedBuild: string | null; buildSource: "containerFile" | "releaseMetadata" | "unknown";
+    releaseId: string | null; maxPlayers: number | null; gameMode: string | null; pvp: boolean | null;
+    desiredVsDeployed: "inSync" | "pending" | "unknown";
+    shards: InstanceRuntimeShard[]; ports: InstanceRuntimePort[]; warnings: string[];
+    publicConnectivityVerified: false;
 }
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
 export interface TaskSnapshot {

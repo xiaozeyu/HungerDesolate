@@ -45,7 +45,7 @@ services:
   master:
     image: hungerdesolate/dst-runtime@sha256:...
     volumes:
-      - /var/lib/famine-hub/instances/<instanceId>/config:/srv/config:rw
+      - /var/lib/famine-hub/instances/<instanceId>/config:/srv/data/config:rw
       - /var/lib/famine-hub/instances/<instanceId>/data/Master:/srv/data:rw
       - /var/lib/famine-hub/instances/<instanceId>/mods/releases/<releaseId>/Master:/srv/ugc:rw
     ports:

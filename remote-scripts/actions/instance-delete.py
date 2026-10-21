@@ -19,6 +19,7 @@ INSTANCES = ROOT / "instances"
 TASKS = ROOT / "tasks"
 MAX_BYTES = 1024 * 1024
 MAX_REVISION = 9007199254740991
+DST_RUNTIME_UID = 1000
 
 
 class Rejected(Exception):
@@ -148,7 +149,7 @@ def inspect_containers(ids, host_id, instance_id):
                 or labels.get("com.hungerdesolate.instanceId") != instance_id
                 or labels.get("com.hungerdesolate.schemaVersion") != "1"
                 or role not in ("master", "caves") or role in roles
-                or status not in ("created", "exited", "dead", "running", "paused", "restarting")):
+                or status not in ("created", "exited", "dead", "running", "paused", "restarting", "removing")):
             reject("INSTANCE_DELETE_RESOURCE_IDENTITY_INVALID")
         roles.add(role)
         resources.append({"id": container_id, "role": role, "status": status})
@@ -237,9 +238,10 @@ def inspect_instance(request, registry):
     containers = inspect_containers(container_ids, host_id, instance_id)
     network_ids = docker_ids("network", instance_id)
     networks = inspect_networks(network_ids, host_id, instance_id, set(container_ids))
-    if any(item["status"] != "created" and item["status"] != "exited" and item["status"] != "dead"
-           for item in containers):
+    if any(item["status"] in ("running", "paused") for item in containers):
         blockers.append("CONTAINER_RUNNING")
+    if any(item["status"] == "removing" for item in containers):
+        blockers.append("CONTAINER_REMOVING")
     instance_path = None
     data_snapshot = None
     has_files = False
@@ -254,7 +256,7 @@ def inspect_instance(request, registry):
                 if len(entries_snapshot) >= 20000:
                     reject("INSTANCE_DELETE_DATA_LIMIT")
                 info = child.lstat()
-                if (stat.S_ISLNK(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                if (stat.S_ISLNK(info.st_mode) or info.st_uid not in (0, os.geteuid(), DST_RUNTIME_UID)
                         or info.st_mode & 0o022
                         or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))):
                     reject("INSTANCE_DELETE_DATA_UNSAFE")
@@ -302,7 +304,7 @@ def operation_digest(request):
         reject("INSTANCE_DELETE_INPUT_INVALID")
     payload = {key: request.get(key) for key in
                ("hostId", "instanceId", "expectedRegistryRevision", "planId", "typedName")}
-    return operation_id, hashlib.sha256(canonical(payload)).hexdigest()
+    return operation_id, "sha256:" + hashlib.sha256(canonical(payload)).hexdigest()
 
 
 def locked_operation(request, commit=False):
@@ -340,7 +342,11 @@ def locked_operation(request, commit=False):
                 reject("INSTANCE_DELETE_STATE_INVALID")
             for operation in operations:
                 if isinstance(operation, dict) and operation.get("operationId") == operation_id:
-                    if operation.get("payloadDigest") != payload_digest:
+                    saved_digest = operation.get("payloadDigest")
+                    if (not isinstance(saved_digest, str)
+                            or re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", saved_digest) is None):
+                        reject("INSTANCE_DELETE_STATE_INVALID")
+                    if saved_digest.removeprefix("sha256:") != payload_digest.removeprefix("sha256:"):
                         reject("OPERATION_ID_REUSED")
                     if not isinstance(operation.get("result"), dict):
                         reject("INSTANCE_DELETE_STATE_INVALID")
@@ -360,7 +366,11 @@ def locked_operation(request, commit=False):
             reject(view["blockers"][0])
 
         for container in view["containers"]:
-            docker_run(["docker", "container", "rm", container["id"]])
+            command = ["docker", "container", "rm"]
+            if container["status"] == "restarting":
+                command.append("--force")
+            command.append(container["id"])
+            docker_run(command)
         for network in view["networks"]:
             docker_run(["docker", "network", "rm", network["id"]])
         if docker_ids("container", instance_id) or docker_ids("network", instance_id):

@@ -1,7 +1,6 @@
 """Test reference-checked Release deletion and exact Docker image removal."""
 import importlib.util
 import json
-import json
 import os
 from pathlib import Path
 import shutil
@@ -101,6 +100,76 @@ class ReleaseDeleteTests(unittest.TestCase):
         self.assertEqual(str(failure.exception), "RELEASE_IN_USE")
         self.assertEqual(len(json.loads(MODULE.CATALOG.read_text())["releases"]), 1)
 
+    def test_retired_instance_history_does_not_block_or_modify_archived_data(self):
+        instance_id = "33333333-3333-4333-8333-333333333333"
+        archive = self.root / "retired" / instance_id
+        archive.mkdir(parents=True)
+        save = archive / "save.dat"
+        save.write_bytes(b"archived world")
+        registry = {"schemaVersion": 1, "hostId": HOST, "instances": [
+            {"instanceId": instance_id, "dstReleaseId": RELEASE, "lifecycle": "retired",
+             "relativePath": "retired/" + instance_id}]}
+        MODULE.REGISTRY.write_text(json.dumps(registry))
+        before = MODULE.REGISTRY.read_bytes()
+        with patch.object(MODULE, "docker", side_effect=self.docker_stub):
+            preview = MODULE.inspect_release(self.request())
+            self.assertEqual(preview["instanceReferences"], [])
+            self.assertTrue(preview["allowed"])
+            MODULE.remove(self.request("delete"))
+        self.assertEqual(MODULE.REGISTRY.read_bytes(), before)
+        self.assertEqual(save.read_bytes(), b"archived world")
+
+    def test_active_release_pointer_blocks_even_without_registry_release_field(self):
+        instance_id = "33333333-3333-4333-8333-333333333333"
+        instance = self.root / "instances" / instance_id
+        instance.mkdir(parents=True)
+        active = instance / "active-release.json"
+        active.write_text(json.dumps({"dstReleaseId": RELEASE}))
+        active.chmod(0o600)
+        with patch.object(MODULE, "docker", side_effect=self.docker_stub):
+            preview = MODULE.inspect_release(self.request())
+        self.assertFalse(preview["allowed"])
+        self.assertEqual(preview["instanceReferences"], [instance_id])
+
+    def test_completed_task_history_does_not_block_but_unknown_tasks_do(self):
+        task_id = "33333333-3333-4333-8333-333333333333"
+        task_dir = self.root / "tasks" / task_id
+        task_dir.mkdir(parents=True)
+        release = task_dir / "release.json"
+        release.write_text(json.dumps({"releaseId": RELEASE}))
+        release.chmod(0o600)
+        status = task_dir / "status.json"
+        for state in ("succeeded", "failed", "cancelled", "interrupted", "running", "queued"):
+            with self.subTest(status=state):
+                status.write_text(json.dumps({"status": state}))
+                status.chmod(0o600)
+                with patch.object(MODULE, "docker", side_effect=self.docker_stub):
+                    preview = MODULE.inspect_release(self.request())
+                terminal = state in ("succeeded", "failed", "cancelled")
+                self.assertEqual(preview["allowed"], terminal)
+                self.assertEqual(preview["taskReferences"], [] if terminal else [task_id])
+
+    def test_reference_appearing_after_preview_is_rechecked_before_removal(self):
+        scans = 0
+
+        def docker(command, **kwargs):
+            nonlocal scans
+            if command[:3] == ["docker", "container", "ls"]:
+                scans += 1
+                if scans == 1:
+                    registry = {"schemaVersion": 1, "hostId": HOST, "instances": [
+                        {"instanceId": "33333333-3333-4333-8333-333333333333",
+                         "lifecycle": "ready", "dstReleaseId": RELEASE}]}
+                    MODULE.REGISTRY.write_text(json.dumps(registry))
+            return self.docker_stub(command, **kwargs)
+
+        with patch.object(MODULE, "docker", side_effect=docker) as run:
+            with self.assertRaises(MODULE.Rejected) as failure:
+                MODULE.remove(self.request("delete"))
+        self.assertEqual(str(failure.exception), "RELEASE_IN_USE")
+        self.assertFalse(any(call.args[0][:3] == ["docker", "image", "rm"] for call in run.call_args_list))
+        self.assertEqual(len(json.loads(MODULE.CATALOG.read_text())["releases"]), 1)
+
     def test_task_and_container_references_block_deletion(self):
         task_id = "33333333-3333-4333-8333-333333333333"
         task_dir = self.root / "tasks" / task_id
@@ -168,6 +237,26 @@ class ReleaseDeleteTests(unittest.TestCase):
         self.assertTrue(result["imageShared"])
         self.assertFalse(result["imageRemoved"])
         self.assertFalse(any(call.args[0][:3] == ["docker", "image", "rm"] for call in docker.call_args_list))
+
+    def test_shared_image_container_is_preserved_when_deleting_unused_registration(self):
+        self.catalog["releases"].append(dict(ENTRY, releaseId="44444444-4444-4444-8444-444444444444"))
+        MODULE.CATALOG.write_text(json.dumps(self.catalog))
+
+        def docker(command, **_kwargs):
+            if command[:3] == ["docker", "container", "ls"]:
+                return SimpleNamespace(returncode=0, stdout="a" * 64 + "\n")
+            if command[:3] == ["docker", "container", "inspect"]:
+                return SimpleNamespace(returncode=0, stdout=DIGEST + "\n")
+            raise AssertionError("Shared image and its container must not be removed")
+
+        with patch.object(MODULE, "docker", side_effect=docker):
+            preview = MODULE.inspect_release(self.request())
+            self.assertTrue(preview["allowed"])
+            self.assertEqual(preview["containerReferences"], ["a" * 64])
+            result = MODULE.remove(self.request("delete"))
+        self.assertTrue(result["imageShared"])
+        remaining = json.loads(MODULE.CATALOG.read_text())["releases"]
+        self.assertEqual([item["releaseId"] for item in remaining], ["44444444-4444-4444-8444-444444444444"])
 
 
 if __name__ == "__main__":

@@ -156,6 +156,40 @@ class AdmissionTests(unittest.TestCase):
         if isinstance(failure.exception, CONTROL.Rejected):
             self.assertEqual(str(failure.exception), "CREATE_FILE_INVALID")
 
+    def test_creation_accepts_legacy_delete_receipt_without_losing_history_or_idempotency(self):
+        spec = importlib.util.spec_from_file_location("instance_delete", PROJECT / "remote-scripts/actions/instance-delete.py")
+        delete_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(delete_module)
+        delete_request = {"operationId": "66666666-6666-4666-8666-666666666666", "hostId": HOST,
+                          "instanceId": "55555555-5555-4555-8555-555555555555", "expectedRegistryRevision": 2,
+                          "planId": "a" * 64, "typedName": "已删除专服"}
+        delete_id, delete_digest = delete_module.operation_digest(delete_request)
+        prior = {"operationId": delete_id, "payloadDigest": delete_digest.removeprefix("sha256:"),
+                 "result": {"hostId": HOST, "instanceId": delete_request["instanceId"], "removed": True}}
+        self.registry["operations"] = [prior]
+        (self.root / "registry.json").write_text(json.dumps(self.registry))
+        first = CONTROL.admit(self.request)
+        second = CONTROL.admit(self.request)
+        self.assertEqual(first, second)
+        saved = json.loads((self.root / "registry.json").read_text())
+        self.assertEqual(saved["operations"][0], prior)
+        self.assertEqual(len(saved["operations"]), 2)
+        self.assertEqual(len(saved["instances"]), 1)
+        self.assertEqual(len(saved["portReservations"]), 3)
+        self.assertEqual(saved["registryRevision"], 4)
+
+    def test_malformed_operation_digest_is_still_rejected_without_writes(self):
+        for invalid_digest in ["", "sha256:bad", "a" * 63, "a" * 65, "A" * 64, None]:
+            with self.subTest(digest=invalid_digest):
+                self.registry["operations"] = [{"operationId": OPERATION, "payloadDigest": invalid_digest, "result": {}}]
+                path = self.root / "registry.json"
+                path.write_text(json.dumps(self.registry))
+                before = path.read_bytes()
+                with self.assertRaises(CONTROL.Rejected) as failure:
+                    CONTROL.admit(self.request)
+                self.assertEqual(str(failure.exception), "CREATE_OPERATION_STATE_INVALID")
+                self.assertEqual(path.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

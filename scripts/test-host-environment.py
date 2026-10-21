@@ -21,7 +21,7 @@ def main():
         root = Path(directory)
         reports = root / "reports"
         reports.mkdir()
-        cases = ["available", "missing", "permissionDenied", "unavailable", "badServer", "composeMissing", "timeoutMissing", "invalidRoot"]
+        cases = ["available", "missing", "pythonMissing", "permissionDenied", "unavailable", "badServer", "composeMissing", "timeoutMissing", "invalidRoot"]
         for name in cases:
             case = root / name
             binary = case / "bin"
@@ -34,6 +34,8 @@ def main():
             else:
                 manager.mkdir()
             for tool in ["bash", "base64", "tr", "head", "python3"]:
+                if tool == "python3" and name == "pythonMissing":
+                    continue
                 source = shutil.which(tool)
                 if not source:
                     raise RuntimeError(f"Missing local test tool: {tool}")
@@ -64,7 +66,9 @@ esac
                 probe = original.replace(
                     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                     f"PATH={binary}", 1,
-                ).replace("DOCKER_SOCKET=/var/run/docker.sock", f"DOCKER_SOCKET={socket_path}", 1).replace(
+                ).replace("PYTHON3=/usr/bin/python3", f"PYTHON3={binary / 'python3'}", 1).replace(
+                    "DOCKER_SOCKET=/var/run/docker.sock", f"DOCKER_SOCKET={socket_path}", 1,
+                ).replace(
                     "MANAGEMENT_ROOT=/var/lib/famine-hub", f"MANAGEMENT_ROOT={manager}", 1,
                 )
                 result = subprocess.run(["/bin/bash", "-s"], input=probe, capture_output=True, text=True, timeout=10,
@@ -81,6 +85,8 @@ esac
             assert len(fields) == 28, name
             if name == "missing":
                 assert fields["dockerClient"][0] == "missing"
+            elif name == "pythonMissing":
+                assert fields["tool.python3"][0] == "missing"
             elif name == "permissionDenied":
                 assert fields["dockerServer"][0] == "permissionDenied"
             elif name == "timeoutMissing":

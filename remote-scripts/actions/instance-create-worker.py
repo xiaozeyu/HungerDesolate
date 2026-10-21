@@ -67,7 +67,7 @@ def reject(code):
     raise RuntimeError(code)
 
 
-def safe_directory(path, controller, create=False):
+def safe_directory(path, controller, create=False, allow_runtime=False):
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -75,7 +75,8 @@ def safe_directory(path, controller, create=False):
             raise
         path.mkdir(mode=0o700)
         info = path.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+    owners = (0, os.geteuid(), 1000) if allow_runtime else (0, os.geteuid())
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
             or info.st_mode & 0o077):
         reject("CREATE_INSTANCE_PATH_UNSAFE")
     return info
@@ -105,15 +106,15 @@ def prepare_instance(task_dir, admission, request_record, controller):
     caves = settings["cavesEnabled"]
     directories = [
         "config", "desired", "desired-secrets",
-        "mods", "mods/releases", "data", "data/Master", "logs", "staging",
+        "mods", "mods/releases", "data", "data/Master", "data/Master/config", "logs", "staging",
         "staging/" + task_dir.name, "tasks", "tasks/" + task_dir.name, "locks",
     ]
     if caves:
-        directories.extend(["data/Caves", "mods/releases/Master", "mods/releases/Caves"])
+        directories.extend(["data/Caves", "data/Caves/config", "mods/releases/Master", "mods/releases/Caves"])
     else:
         directories.append("mods/releases/Master")
     for relative in directories:
-        safe_directory(instance / relative, controller, create=True)
+        safe_directory(instance / relative, controller, create=True, allow_runtime=relative.startswith("data/"))
     expected = manifest(admission, request_record)
     manifest_path = instance / "manifest.json"
     if manifest_path.exists():
@@ -176,6 +177,7 @@ def main(task_path):
         release = release_module["validate_release"](release)
         instance = controller["ROOT"] / "instances" / admission["instanceId"]
         manifest_value = read_json(instance / "manifest.json", 65536)
+        release_module["prepare_runtime_paths"](str(instance), release["releaseId"], manifest_value["cavesEnabled"])
         compose = release_module["render_compose"](manifest_value, release, str(instance))
         staging = instance / "staging" / task_id
         controller["atomic_bytes"](staging / "compose.yaml", compose.encode())

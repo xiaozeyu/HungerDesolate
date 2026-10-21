@@ -146,7 +146,8 @@ def validate_registry(registry, host_id):
     for operation in registry["operations"]:
         if (not isinstance(operation, dict) or not valid_uuid(operation.get("operationId"))
                 or not isinstance(operation.get("payloadDigest"), str)
-                or not re.fullmatch(r"sha256:[0-9a-f]{64}", operation["payloadDigest"])
+                # Legacy deletion receipts used a bare SHA-256 digest.
+                or not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", operation["payloadDigest"])
                 or not isinstance(operation.get("result"), dict)):
             reject("CREATE_OPERATION_STATE_INVALID")
     instance_ids = set()
@@ -360,7 +361,7 @@ def admit(request):
         payload_digest = digest(payload)
         for operation in registry["operations"]:
             if operation.get("operationId") == request["operationId"]:
-                if operation.get("payloadDigest") != payload_digest:
+                if operation["payloadDigest"].removeprefix("sha256:") != payload_digest.removeprefix("sha256:"):
                     reject("OPERATION_ID_REUSED")
                 return operation["result"]
         if registry["registryRevision"] != request["expectedRegistryRevision"]:

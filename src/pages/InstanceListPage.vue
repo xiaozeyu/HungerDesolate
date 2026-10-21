@@ -82,7 +82,7 @@ async function deleteSelectedInstance(){
   }catch(cause){deleteDiagnostics.value=describeError(cause);deleteError.value=deleteDiagnostics.value.message;}
   finally{deleteBusy.value=false;}
 }
-function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACTIVE_TASK:"实例仍有未结束任务",TASK_STATUS_MISSING:"任务状态缺失，结果待核实",CONTAINER_RUNNING:"实例仍有运行中的容器",BACKUP_REQUIRED:"发现世界数据，需先完成保护备份",TASK_STATUS_UNKNOWN:"无法核对任务状态",RESOURCE_IDENTITY_INVALID:"Docker 资源归属不匹配",DATA_UNSAFE:"实例目录权限或文件类型不安全",DATA_CONFLICT:"归档目标已存在"};return labels[code]??"删除条件未满足";}
+function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACTIVE_TASK:"实例仍有未结束任务",TASK_STATUS_MISSING:"任务状态缺失，结果待核实",CONTAINER_RUNNING:"实例仍有运行中的容器",CONTAINER_REMOVING:"实例容器正在删除，请等待 Docker 状态稳定",BACKUP_REQUIRED:"发现世界数据，需先完成保护备份",TASK_STATUS_UNKNOWN:"无法核对任务状态",RESOURCE_IDENTITY_INVALID:"Docker 资源归属不匹配",DATA_UNSAFE:"实例目录权限或文件类型不安全",DATA_CONFLICT:"归档目标已存在"};return labels[code]??"删除条件未满足";}
 </script>
 <template>
   <div class="page">
@@ -98,7 +98,7 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
       <div v-else class="table-wrap"><table><thead><tr><th>名称</th><th>模式</th><th>洞穴</th><th>状态</th><th>玩家</th><th>版本</th><th>最近运行采集</th><th/></tr></thead><tbody><tr v-for="item in instances" :key="item.instanceId"><td><div class="table-primary"><ServerCog :size="17"/><strong>{{item.displayName}}</strong></div><small v-if="!item.manifestAvailable" class="table-sub">配置未完成</small></td><td>{{item.gameMode ?? '未知'}}</td><td>{{item.cavesEnabled === null ? '未知' : item.cavesEnabled ? '启用' : '关闭'}}</td><td><StatusLabel :tone="instanceState(item).tone" :label="instanceState(item).label"/><small v-if="taskFor(item)" class="table-sub">{{taskFor(item)!.status==='failed' ? creationTaskErrorLabel(taskFor(item)!.error?.code) : creationTaskStageLabel(taskFor(item)!.stage)}}</small><button v-if="taskFor(item)" class="text-button" type="button" @click="selectedTask=taskFor(item)??null"><FileText :size="14"/>任务记录</button></td><td>{{item.runtimeStatus==='stopped'?'—':item.players===null?(item.maxPlayers===null?'未知':`未知 / ${item.maxPlayers}`):`${item.players} / ${item.maxPlayers ?? '未知'}`}}</td><td class="mono">{{item.installedBuild ?? '未知'}}</td><td class="muted-text">{{item.lastSyncedAt ?? '未采集'}}</td><td class="table-action"><button v-if="canDeleteInstance(item)" class="icon-button" type="button" :aria-label="`预览删除专服 ${item.displayName}`" title="预览删除专服" @click="openDelete(item)" ><Trash2 :size="15"/></button><button class="text-button" :disabled="stale || !canInspectInstance(item)" @click="enter(item)">进入 <ArrowRight :size="15"/></button></td></tr></tbody></table></div>
     </template>
     <div v-else-if="!error" class="empty-state"><ServerCog :size="28"/><h2>尚未读取专服</h2></div>
-    <AppDialog :open="!!deleteTarget" title="删除专服" description="只移除已核实归属且停止的 Docker 容器与网络。实例目录会完整移入 retired 归档；不删除 DST 镜像和其他实例资源。" @update:open="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
+    <AppDialog :open="!!deleteTarget" title="删除专服" description="只移除已核实归属且未运行的 Docker 容器与网络；启动失败且反复重启的受管容器会先强制停止。实例目录会完整移入 retired 归档；不删除 DST 镜像和其他实例资源。" @update:open="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
       <div v-if="deleteTarget" class="form-stack">
         <p>专服：<strong>{{deleteTarget.displayName}}</strong></p>
         <p v-if="deletePreviewBusy" role="status">正在检查任务、容器、网络和归档目录…</p>

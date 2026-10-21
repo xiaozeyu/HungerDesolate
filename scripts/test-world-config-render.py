@@ -38,7 +38,7 @@ class WorldConfigRenderTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertIn("Cluster_1/Caves/server.ini", first)
         self.assertIn(b"grass = \"often\"", first["Cluster_1/Master/worldgenoverride.lua"])
-        self.assertEqual(first["Cluster_1/cluster_token.txt"], b"token-value\n")
+        self.assertEqual(first["Cluster_1/cluster_token.txt"], b"token-value")
         self.assertIn(b"cluster_password = server-password", first["Cluster_1/cluster.ini"])
         self.assertEqual(first["Cluster_1/adminlist.txt"], b"")
 

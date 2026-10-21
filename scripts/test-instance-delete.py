@@ -110,6 +110,22 @@ class DeleteTests(unittest.TestCase):
         self.assertIn("CONTAINER_RUNNING", plan["blockers"])
         self.assertEqual(json.loads((self.root / "registry.json").read_text())["registryRevision"], 7)
 
+    def test_restarting_failed_container_is_force_removed(self):
+        containers, networks = self.resources(("restarting",))
+        self.mock_inventory([CONTAINER], [NETWORK], containers, networks)
+        plan = MODULE.locked_operation(self.request())
+        self.assertTrue(plan["allowed"])
+        scans = iter(([CONTAINER], [], []))
+        network_scans = iter(([NETWORK], [], []))
+        with patch.object(MODULE, "docker_ids", side_effect=lambda kind, _id: next(scans if kind == "container" else network_scans)), \
+             patch.object(MODULE, "inspect_containers", side_effect=lambda ids, *_args: containers if ids else []), \
+             patch.object(MODULE, "inspect_networks", side_effect=lambda ids, *_args: networks if ids else []), \
+             patch.object(MODULE, "docker_run", return_value="") as docker_run:
+            request = self.request("delete")
+            request.update({"planId": plan["planId"], "operationId": OPERATION, "typedName": "测试专服"})
+            MODULE.locked_operation(request, commit=True)
+        self.assertEqual(docker_run.call_args_list[0].args[0], ["docker", "container", "rm", "--force", CONTAINER])
+
     def test_world_data_requires_a_protection_backup_before_deletion(self):
         world = self.root / "instances" / INSTANCE / "data" / "Master"
         world.mkdir(parents=True)
@@ -121,6 +137,28 @@ class DeleteTests(unittest.TestCase):
         self.assertFalse(plan["allowed"])
         self.assertTrue(plan["worldData"])
         self.assertIn("BACKUP_REQUIRED", plan["blockers"])
+
+    def test_runtime_owned_private_files_are_safe_to_archive(self):
+        data = self.root / "instances" / INSTANCE / "data" / "Master"
+        data.mkdir(parents=True)
+        save = data / "save.dat"
+        save.write_bytes(b"world")
+        save.chmod(0o600)
+        original_lstat = Path.lstat
+
+        def runtime_owned(path):
+            values = list(original_lstat(path))
+            if path == save:
+                values[4] = 1000
+            return os.stat_result(values)
+
+        with patch.object(Path, "lstat", runtime_owned):
+            containers, networks = self.resources()
+            self.mock_inventory([CONTAINER], [NETWORK], containers, networks)
+            plan = MODULE.locked_operation(self.request())
+        self.assertFalse(plan["allowed"])
+        self.assertIn("BACKUP_REQUIRED", plan["blockers"])
+        self.assertNotIn("INSTANCE_DELETE_DATA_UNSAFE", plan["blockers"])
 
     def test_changed_plan_is_rejected_before_docker_mutation(self):
         containers, networks = self.resources()
@@ -164,6 +202,21 @@ class DeleteTests(unittest.TestCase):
         self.assertEqual(registry["instances"][0]["lifecycle"], "retired")
         self.assertEqual(registry["portReservations"], [])
         self.assertTrue((self.root / "retired" / INSTANCE / "world.dat").exists())
+        self.assertRegex(registry["operations"][-1]["payloadDigest"], r"^sha256:[0-9a-f]{64}$")
+
+        # Updating the client must still replay a legacy receipt without deleting anything again.
+        registry["operations"][-1]["payloadDigest"] = registry["operations"][-1]["payloadDigest"].removeprefix("sha256:")
+        registry_path = self.root / "registry.json"
+        registry_path.write_text(json.dumps(registry))
+        before = registry_path.read_bytes()
+        with patch.object(MODULE, "docker_run") as docker_run:
+            legacy_replay = MODULE.locked_operation(request, commit=True)
+            self.assertEqual(legacy_replay, result)
+            with self.assertRaises(MODULE.Rejected) as reused:
+                MODULE.locked_operation(changed, commit=True)
+            self.assertEqual(str(reused.exception), "OPERATION_ID_REUSED")
+        docker_run.assert_not_called()
+        self.assertEqual(registry_path.read_bytes(), before)
 
     def test_registry_revision_and_name_are_revalidated(self):
         with self.assertRaises(MODULE.Rejected) as stale:

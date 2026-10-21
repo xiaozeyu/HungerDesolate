@@ -11,6 +11,7 @@ use std::{
 };
 
 const BUILD_SCRIPT: &str = include_str!("../../remote-scripts/actions/build-dst-image.sh");
+const INSTALL_SCRIPT: &str = include_str!("../../docker/runtime/install-dst.sh");
 const REGISTER_RELEASE_SCRIPT: &str =
     include_str!("../../remote-scripts/actions/register-built-release.py");
 const OP: &str = "buildDstImage";
@@ -241,7 +242,37 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
         })?;
     drop(remote_file);
 
-    // 执行构建（后台运行）
+    // 上传与本地构建共用的 SteamCMD 安装脚本。
+    let mut installer = session
+        .scp_send(
+            Path::new("/opt/famine-hub/scripts/actions/install-dst.sh"),
+            0o644,
+            INSTALL_SCRIPT.len() as u64,
+            None,
+        )
+        .map_err(|_| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "无法上传 SteamCMD 安装脚本",
+                json!({}),
+            )
+        })?;
+    installer
+        .write_all(INSTALL_SCRIPT.as_bytes())
+        .and_then(|_| installer.send_eof().map_err(std::io::Error::other))
+        .and_then(|_| installer.wait_eof().map_err(std::io::Error::other))
+        .and_then(|_| installer.close().map_err(std::io::Error::other))
+        .and_then(|_| installer.wait_close().map_err(std::io::Error::other))
+        .map_err(|_| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "SteamCMD 安装脚本传输异常",
+                json!({}),
+            )
+        })?;
+    drop(installer);
+
+    // 执行构建（后台运行）。
     let build_command = format!(
         "nohup bash {} {} > /var/lib/famine-hub/build-{}.log 2>&1 &",
         script_path, release_id, release_id
@@ -297,8 +328,22 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
     let lines: Vec<String> = log_content.lines().map(|s| s.to_string()).collect();
     let tail: Vec<String> = lines.iter().rev().take(20).rev().cloned().collect();
 
-    // 检查是否完成
-    if log_content.contains("==> 镜像构建完成") {
+    let structured = lines.iter().any(|line| line == "FAMINE_BUILD_STARTED");
+    // Intermediate SteamCMD errors may be retried; only the host script marks a terminal result.
+    let terminal = lines.iter().rev().find_map(|line| {
+        if line == "FAMINE_BUILD_COMPLETED" {
+            Some(true)
+        } else if line
+            .strip_prefix("FAMINE_BUILD_FAILED:")
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some_and(|code| code != 0)
+        {
+            Some(false)
+        } else {
+            None
+        }
+    });
+    if terminal == Some(true) || (!structured && log_content.contains("==> 镜像构建完成")) {
         return (
             BuildStatus::Completed,
             Some(BuildProgress {
@@ -310,7 +355,9 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
     }
 
     // 检查是否失败
-    if log_content.contains("错误：") || log_content.contains("error:") {
+    if terminal == Some(false)
+        || (!structured && (log_content.contains("错误：") || log_content.contains("error:")))
+    {
         return (
             BuildStatus::Failed,
             Some(BuildProgress {
@@ -322,16 +369,20 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
     }
 
     // 解析当前步骤
-    let current_step = if log_content.contains("==> 开始构建 Docker 镜像") {
+    let current_step = if log_content.contains("==> 生成 release 元数据") {
+        Some(("生成元数据".to_string(), 90))
+    } else if log_content.contains("==> 提取 DST build 版本") {
+        Some(("提取版本信息".to_string(), 80))
+    } else if log_content.contains("SteamCMD phase=download") {
+        Some(("下载并校验 DST 服务端".to_string(), 60))
+    } else if log_content.contains("SteamCMD phase=bootstrap") {
+        Some(("初始化 SteamCMD".to_string(), 30))
+    } else if log_content.contains("==> 开始构建 Docker 镜像") {
         Some(("正在构建镜像".to_string(), 50))
     } else if log_content.contains("==> 创建 Dockerfile") {
         Some(("准备 Dockerfile".to_string(), 20))
     } else if log_content.contains("==> 准备构建目录") {
         Some(("准备构建环境".to_string(), 10))
-    } else if log_content.contains("==> 提取 DST build 版本") {
-        Some(("提取版本信息".to_string(), 80))
-    } else if log_content.contains("==> 生成 release 元数据") {
-        Some(("生成元数据".to_string(), 90))
     } else {
         None
     };
@@ -509,4 +560,32 @@ pub fn get_build_status(
             log_tail,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_build_progress, BuildStatus};
+
+    #[test]
+    fn retry_diagnostics_do_not_terminate_the_build() {
+        let (status, progress, _) = parse_build_progress(
+            "FAMINE_BUILD_STARTED\nerror: mock SteamCMD failure\n==> SteamCMD phase=download attempt=2/3\n",
+        );
+        assert!(matches!(status, BuildStatus::Building));
+        assert_eq!(
+            progress.map(|item| item.current_step),
+            Some("下载并校验 DST 服务端".into())
+        );
+    }
+
+    #[test]
+    fn only_terminal_markers_complete_a_structured_build() {
+        let (status, _, _) = parse_build_progress("FAMINE_BUILD_STARTED\n==> 镜像构建完成\n");
+        assert!(matches!(status, BuildStatus::Building));
+        let (status, _, _) =
+            parse_build_progress("FAMINE_BUILD_STARTED\nerror: retry\nFAMINE_BUILD_COMPLETED\n");
+        assert!(matches!(status, BuildStatus::Completed));
+        let (status, _, _) = parse_build_progress("FAMINE_BUILD_STARTED\nFAMINE_BUILD_FAILED:1\n");
+        assert!(matches!(status, BuildStatus::Failed));
+    }
 }

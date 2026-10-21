@@ -69,8 +69,7 @@ function statusTone(release: InstanceReleaseSummary): "success" | "warning" | "d
 }
 
 function statusLabel(release: InstanceReleaseSummary) {
-  if (release.verified && release.runtimeVerified) return "运行验证通过，可创建";
-  if (release.verified) return "基础验证通过，可创建";
+  if (release.verified) return release.runtimeVerified ? "构建验证通过 · 已有运行证据" : "构建验证通过，可创建";
   return "待镜像验证";
 }
 
@@ -461,7 +460,7 @@ onUnmounted(() => {
             <StatusLabel :tone="statusTone(release)" :label="statusLabel(release)" />
             <div class="verification-steps">
               <span :class="{ passed: release.verified }"><CheckCircle :size="14" />镜像</span>
-              <span :class="{ passed: release.runtimeVerified }"><CheckCircle :size="14" />运行时</span>
+              <span :class="{ passed: release.runtimeVerified }"><CheckCircle :size="14" />可选运行验证</span>
             </div>
           </div>
           <div class="release-actions">
@@ -474,6 +473,7 @@ onUnmounted(() => {
             <template v-else-if="!release.runtimeVerified">
               <label class="runtime-bundle-picker">
                 <span>{{ bundleReleaseId === release.releaseId ? bundleName : "选择 Klei 配置 ZIP" }}</span>
+                <small>可选：在 DST 主菜单「账户」中生成令牌并打包配置，用于隔离运行验证</small>
                 <input :ref="element => rememberInput(release.releaseId, element)" type="file" accept=".zip,application/zip" :disabled="!!pendingReleaseId || building" @change="readBundle(release, $event)" />
               </label>
               <button class="button button-compact" :disabled="!!pendingReleaseId || building || bundleReleaseId !== release.releaseId || !bundleBase64" @click="verifyRuntime(release)"><CheckCircle :size="15" />运行验证</button>
@@ -488,7 +488,7 @@ onUnmounted(() => {
       </div>
     </template>
     <div v-else-if="!error" class="empty-state">尚未读取 Release</div>
-    <AppDialog :open="!!deletePreview" title="删除 DST Release" description="先核对实例、任务和容器引用；引用存在时禁止删除。" @update:open="closeDeleteDialog">
+    <AppDialog :open="!!deletePreview" title="删除 DST Release" description="删除 Release 登记及独占镜像；共用镜像保留。已归档专服的数据保留，但恢复时可能需要重新导入原镜像。" @update:open="closeDeleteDialog">
       <div v-if="deletePreview" class="form-stack">
         <dl class="environment-facts">
           <div><dt>DST 版本</dt><dd>{{ deletePreview.dstBuild }}</dd></div>
@@ -498,7 +498,16 @@ onUnmounted(() => {
           <div><dt>容器引用</dt><dd>{{ deletePreview.containerReferences.length }}</dd></div>
           <div><dt>镜像状态</dt><dd>{{ deletePreview.sharedImage ? "其他 Release 共用" : "仅此 Release 引用" }}</dd></div>
         </dl>
-        <p v-if="!deletePreview.allowed" class="environment-error" role="status">该 Release 仍被实例、任务或容器引用，不能删除。</p>
+        <div v-if="!deletePreview.allowed" class="environment-error" role="status">
+          <strong>该 Release 仍有以下引用，不能删除：</strong>
+          <ul>
+            <li v-for="id in deletePreview.instanceReferences" :key="`instance:${id}`">活动实例：<span class="mono">{{ id }}</span></li>
+            <li v-for="id in deletePreview.taskReferences" :key="`task:${id}`">未结束或待核实任务：<span class="mono">{{ id }}</span></li>
+            <template v-if="!deletePreview.sharedImage">
+              <li v-for="id in deletePreview.containerReferences" :key="`container:${id}`">镜像关联容器：<span class="mono">{{ id }}</span>（含已停止容器）</li>
+            </template>
+          </ul>
+        </div>
         <label v-else>输入 DST 版本确认<input v-model="deleteTypedName" autocomplete="off" :disabled="deleteBusy"/></label>
         <div v-if="deleteError" class="environment-error" role="alert">{{ deleteError }}</div>
       </div>
@@ -550,6 +559,7 @@ onUnmounted(() => {
 .button-compact { min-height: 30px; padding: 0 var(--space-2); font-size: 12px; }
 .runtime-bundle-picker { display: block; position: relative; max-width: 100%; color: var(--text-secondary); font-size: 11px; }
 .runtime-bundle-picker span { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-bundle-picker small { display: block; max-width: 220px; margin: 3px 0 5px; color: var(--text-tertiary); line-height: 1.4; overflow-wrap: anywhere; }
 .runtime-bundle-picker input { display: block; width: 220px; max-width: 100%; min-height: 26px; font-size: 11px; }
 .release-action-progress, .release-ready { display: inline-flex; align-items: center; gap: var(--space-2); font-size: 12px; }
 .release-ready { color: var(--success); }

@@ -3,12 +3,21 @@
 # 此脚本通过 SSH 执行，不需要本地 Docker
 set -euo pipefail
 umask 077
-trap 'status=$?; printf "错误：命令执行失败（退出码 %s）：%s\n" "$status" "$BASH_COMMAND" >&2; exit "$status"' ERR
+trap 'status=$?; printf "\nFAMINE_BUILD_FAILED:%s\n错误：命令执行失败（退出码 %s）：%s\n" "$status" "$status" "$BASH_COMMAND" >&2; exit "$status"' ERR
 
 SCRIPT_DIR="/opt/famine-hub/scripts"
 BUILD_DIR="/var/lib/famine-hub/image-build"
 STAGING_DIR="/var/lib/famine-hub/staging"
 RELEASE_ID="${1:-}"
+BUILDER_NAME="famine-release-${RELEASE_ID//-/}"
+BUILDER_CREATED=0
+
+cleanup_builder() {
+    if [ "$BUILDER_CREATED" -eq 1 ]; then
+        docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup_builder EXIT
 
 if [ -z "$RELEASE_ID" ]; then
     echo "错误：缺少 RELEASE_ID 参数" >&2
@@ -21,6 +30,7 @@ if ! echo "$RELEASE_ID" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab]
     exit 1
 fi
 
+echo 'FAMINE_BUILD_STARTED'
 echo "==> 配置 Docker 镜像加速（优化国内网络）"
 DAEMON_JSON="/etc/docker/daemon.json"
 if [ ! -f "$DAEMON_JSON" ] || ! grep -q "registry-mirrors" "$DAEMON_JSON"; then
@@ -49,6 +59,7 @@ cd "$BUILD_DIR"
 rm -rf dst-runtime-build
 mkdir dst-runtime-build
 cd dst-runtime-build
+cp "${SCRIPT_DIR}/actions/install-dst.sh" ./install-dst.sh
 
 echo "==> 创建 Dockerfile"
 cat > Dockerfile <<'DOCKERFILE_END'
@@ -74,17 +85,17 @@ RUN useradd -m -s /bin/bash steam
 
 # 下载并安装 SteamCMD
 WORKDIR /home/steam
-RUN curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar zxvf - && \
+RUN curl --fail --show-error --location --retry 3 --connect-timeout 30 --max-time 180 \
+        "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" -o /tmp/steamcmd.tar.gz && \
+    tar -xzf /tmp/steamcmd.tar.gz && rm /tmp/steamcmd.tar.gz && \
     chmod +x steamcmd.sh linux32/steamcmd
 RUN chown -R steam:steam /home/steam
+COPY --chown=steam:steam install-dst.sh /home/steam/install-dst.sh
 
 # 下载 DST Dedicated Server (App ID: 343050)
 USER steam
-RUN ./steamcmd.sh \
-    +force_install_dir /home/steam/dst \
-    +login anonymous \
-    +app_update 343050 validate \
-    +quit
+RUN bash ./install-dst.sh bootstrap
+RUN bash ./install-dst.sh download
 
 # Runtime stage
 FROM debian:12-slim
@@ -97,6 +108,7 @@ RUN sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debi
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
+        ca-certificates \
         lib32gcc-s1 \
         lib32stdc++6 \
         libcurl3-gnutls \
@@ -111,7 +123,7 @@ RUN groupadd -g 1000 famine && \
 COPY --from=builder --chown=famine:famine /home/steam/dst /srv/dst
 
 # 设置工作目录
-WORKDIR /srv
+WORKDIR /srv/dst/bin64
 
 # 创建必要的目录
 RUN mkdir -p /srv/config /srv/data /srv/ugc && \
@@ -125,12 +137,17 @@ DOCKERFILE_END
 
 echo "==> 开始构建 Docker 镜像（这可能需要 10-20 分钟）"
 IMAGE_NAME="hungerdesolate/dst-runtime"
-BUILD_TAG="latest"
+BUILD_TAG="release-${RELEASE_ID}"
+docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
+docker buildx create --name "$BUILDER_NAME" --driver docker-container >/dev/null
+BUILDER_CREATED=1
 
-docker build \
+docker buildx build \
+    --builder "$BUILDER_NAME" \
     --platform linux/amd64 \
     --tag "${IMAGE_NAME}:${BUILD_TAG}" \
     --progress=plain \
+    --load \
     .
 
 echo "==> 获取镜像 digest"
@@ -196,3 +213,6 @@ echo "DST Build: ${DST_BUILD}"
 echo "Metadata: ${STAGING_DIR}/${RELEASE_ID}/release-metadata.json"
 echo ""
 echo "镜像已保存到 Docker，可以直接使用"
+echo "==> Release 专属 BuildKit 缓存将在任务结束时清理"
+docker buildx prune --builder "$BUILDER_NAME" --all --force >/dev/null
+echo 'FAMINE_BUILD_COMPLETED'

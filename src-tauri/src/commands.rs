@@ -246,6 +246,20 @@ pub async fn get_instance_overview(
 }
 
 #[tauri::command]
+pub async fn start_instance(
+    state: State<'_, AppState>,
+    request: crate::instance_runtime::StartRequest,
+) -> CommandResult<crate::instance_runtime::StartResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "startInstance",
+        safe_request_id(&request.request_id),
+        move || crate::instance_runtime::start(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn get_ssh_connection_state(
     state: State<'_, AppState>,
     request: crate::ssh_dto::ConnectionRequest,
@@ -452,6 +466,20 @@ pub async fn preview_world_apply(
         "previewWorldApply",
         safe_request_id(&request.request_id),
         move || crate::world_config::preview_apply(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn apply_world_config(
+    state: State<'_, AppState>,
+    request: crate::world_config::ApplyRequest,
+) -> CommandResult<crate::world_config::WorldApplyResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "applyWorldConfig",
+        safe_request_id(&request.request_id),
+        move || crate::world_config::apply(&path, request),
     )
     .await
 }

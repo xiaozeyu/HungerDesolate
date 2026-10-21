@@ -1,39 +1,133 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Play, Square, RotateCw, LockKeyhole } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import { useInstanceOverview } from "../composables/useInstanceOverview";
-const { data, error, loading } = useInstanceOverview();
+import { usePageTarget } from "../composables/usePageTarget";
+import { useWorkspace } from "../composables/useWorkspace";
+import { controlInstance } from "../api/instances";
+import { describeError, type UserError } from "../lib/commandError";
+import { firewallUdpPorts, hasReadyShardListeners } from "../lib/instanceRuntime";
+import { activeContext } from "../context/activeContext";
+const { data, error, loading, stale, refresh, pausePolling, resumePolling } = useInstanceOverview();
+const { server, target } = usePageTarget();
+const workspace = useWorkspace();
+const runtimeAction = ref<"start"|"stop"|"restart"|null>(null), startError = ref<UserError|null>(null);
+let startSequence = 0;
+watch([() => activeContext.value.epoch, () => server.value?.recordVersion,
+  () => target.value?.serverId, () => target.value?.hostId, () => target.value?.instanceId], () => {
+  startSequence++;
+  runtimeAction.value = null;
+  startError.value = null;
+}, { flush: "sync" });
+onBeforeUnmount(() => { startSequence++; });
 const name = computed(() => data.value?.identity.displayName ?? "专服");
-const status = computed(() => data.value?.identity.runtimeStatus === 'running' ? '运行中' : data.value?.identity.runtimeStatus === 'stopped' ? '已停止' : '未知');
+const runtimeStatus = computed(() => data.value?.runtime?.status ?? data.value?.identity.runtimeStatus ?? "unknown");
+const runtime = computed(() => data.value?.runtime);
+const installedBuild = computed(() => runtime.value?.installedBuild ?? data.value?.identity.installedBuild ?? null);
+const shards = computed(() => runtime.value?.shards ?? []);
+const ports = computed(() => runtime.value?.ports.filter(port => port.hostPort !== null) ?? []);
+const firewallPorts = computed(() => firewallUdpPorts(runtime.value));
+const shardName = (shard: "master" | "caves") => shard === "master" ? "主世界 · Master" : "洞穴 · Caves";
+const purposeName = (purpose: "game" | "steamMaster" | "steamAuth" | "shard") => ({
+  game: "游戏", steamMaster: "Steam 查询", steamAuth: "Steam 认证", shard: "分片通信",
+}[purpose]);
+const status = computed(() => runtimeStatus.value === "running" ? "运行中"
+  : runtimeStatus.value === "stopped" ? "已停止" : runtimeStatus.value === "degraded" ? "部分异常"
+  : runtimeStatus.value === "starting" ? "启动中" : "未知");
+const blockers = computed(() => data.value?.blockers ?? []);
+const canStart = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
+  && !workspace.preview.value && !loading.value && !runtimeAction.value && runtimeStatus.value !== "running");
+const canStop = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
+  && !workspace.preview.value && !loading.value && !runtimeAction.value && shards.value.length > 0
+  && runtimeStatus.value !== "stopped" && runtimeStatus.value !== "unknown");
+const canRestart = computed(() => canStop.value && runtimeStatus.value === "running");
+
+async function operateRuntime(action: "start"|"stop"|"restart") {
+  const selectedTarget = target.value, connection = server.value, overview = data.value;
+  const allowed = action === "start" ? canStart.value : action === "stop" ? canStop.value : canRestart.value;
+  if (!selectedTarget || !connection || !overview?.manifestSummary || !allowed) return;
+  const sequence = ++startSequence, contextEpoch = activeContext.value.epoch;
+  const current = () => sequence === startSequence && contextEpoch === activeContext.value.epoch
+    && target.value?.serverId === selectedTarget.serverId && target.value?.hostId === selectedTarget.hostId
+    && target.value?.instanceId === selectedTarget.instanceId && server.value?.recordVersion === connection.recordVersion;
+  runtimeAction.value = action;
+  startError.value = null;
+  pausePolling();
+  try {
+    const requestId = crypto.randomUUID(), operationId = crypto.randomUUID();
+    const response = await controlInstance({
+      action,
+      schemaVersion: 1, requestId, operationId, target: selectedTarget,
+      expectedRecordVersion: connection.recordVersion,
+      expectedRevision: overview.manifestSummary.configRevision,
+    });
+    if (!current()) return;
+    if (response.schemaVersion !== 1 || response.requestId !== requestId || response.operationId !== operationId
+      || response.recordVersion !== connection.recordVersion || response.revision !== overview.manifestSummary.configRevision
+      || response.target.serverId !== selectedTarget.serverId || response.target.hostId !== selectedTarget.hostId
+      || response.target.instanceId !== selectedTarget.instanceId || response.publicConnectivityVerified !== false) {
+      throw new Error("专服运行操作结果身份无效");
+    }
+    if (action === "stop") {
+      if (response.status !== "stopped" || response.runningShards.length || Object.keys(response.listeners).length) {
+        throw new Error("专服停止结果仍报告运行中的分片");
+      }
+    } else if (response.status !== "running" || response.verificationLevel !== "localVerified"
+      || !hasReadyShardListeners(response, overview.manifestSummary.cavesEnabled)) {
+      throw new Error("专服进程或 UDP 监听未就绪");
+    }
+    await refresh();
+  } catch (cause) {
+    if (current()) startError.value = describeError(cause);
+  } finally {
+    if (current()) runtimeAction.value = null;
+    resumePolling();
+  }
+}
 </script>
 
 <template>
   <div class="page">
     <PageHeader :eyebrow="name" title="专服概览">
       <template #actions>
-        <button class="button" disabled>
+        <button class="button" :disabled="loading || !!runtimeAction" @click="refresh">
           <RotateCw :size="16"/>
-          重启
+          刷新
         </button>
-        <button class="button primary" disabled>
+        <button v-if="runtimeStatus==='running'" class="button" :disabled="!canRestart" :aria-busy="runtimeAction==='restart'" @click="operateRuntime('restart')">
+          <RotateCw :size="16"/>
+          {{runtimeAction==='restart'?'重启并验证中…':'重启'}}
+        </button>
+        <button v-if="canStop || runtimeAction==='stop'" class="button" :disabled="!canStop" :aria-busy="runtimeAction==='stop'" @click="operateRuntime('stop')">
+          <Square :size="16"/>
+          {{runtimeAction==='stop'?'停止中…':'停止'}}
+        </button>
+        <button class="button primary" :disabled="!canStart" :aria-busy="runtimeAction==='start'" @click="operateRuntime('start')">
           <Play :size="16"/>
-          启动专服
+          {{runtimeAction==='start' ? '启动并验证中…' : '启动专服'}}
         </button>
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <div v-if="loading" class="empty-state" aria-live="polite">
+    <div v-if="startError" class="environment-error" role="alert">
+      <strong>{{startError.message}}</strong>
+      <ul v-if="startError.recoverySteps.length"><li v-for="step in startError.recoverySteps" :key="step">{{step}}</li></ul>
+    </div>
+    <div v-if="loading && !data" class="empty-state" aria-live="polite">
       <p>
         读取当前专服…
       </p>
     </div>
-    <div v-else-if="error" class="error-strip" role="alert">
+    <div v-else-if="error && !data" class="error-strip" role="alert">
       {{error}}
     </div>
-    <template v-else-if="data">
+    <template v-if="data">
+      <div v-if="error && stale" class="error-strip" role="status">
+        运行状态刷新失败，当前显示上次采集结果：{{error}}
+      </div>
       <section class="identity-strip">
         <div>
           <span class="label">
@@ -48,10 +142,11 @@ const status = computed(() => data.value?.identity.runtimeStatus === 'running' ?
             实际版本
           </span>
           <strong class="mono">
-            {{data.identity.installedBuild ?? '未知'}}
+            {{installedBuild ?? '未知'}}
           </strong>
         </div>
-        <StatusLabel :tone="data.identity.runtimeStatus==='running'?'success':'muted'" :label="status"/>
+        <StatusLabel :tone="stale?'warning':runtimeStatus==='running'?'success':runtimeStatus==='degraded'?'danger':'muted'"
+          :label="stale?'状态可能已过期':status"/>
       </section>
       <div class="overview-grid">
         <section class="section-block">
@@ -63,25 +158,15 @@ const status = computed(() => data.value?.identity.runtimeStatus === 'running' ?
             </div>
           </div>
           <div class="shard-list">
-            <div class="shard-row">
+            <div v-for="shard in shards" :key="shard.shard" class="shard-row">
               <div>
-                <strong>
-                  主世界 · Master
-                </strong>
-                <small class="mono">
-                  游戏 UDP · 未采集
-                </small>
+                <strong>{{shardName(shard.shard)}}</strong>
+                <small class="mono">DST {{shard.installedBuild ?? '版本未采集'}}</small>
               </div>
-              <StatusLabel tone="muted" label="未核实"/>
+              <StatusLabel :tone="shard.ready?'success':shard.processRunning?'warning':'muted'"
+                :label="shard.ready?'进程与端口就绪':shard.processRunning?'进程运行中，端口未就绪':shard.containerStatus"/>
             </div>
-            <div v-if="data.manifestSummary?.cavesEnabled !== false" class="shard-row">
-              <div>
-                <strong>
-                  洞穴 · Caves
-                </strong>
-              </div>
-              <StatusLabel tone="muted" label="未核实"/>
-            </div>
+            <p v-if="!shards.length" class="muted-text">尚未采集分片运行状态</p>
           </div>
         </section>
         <section class="section-block">
@@ -98,8 +183,12 @@ const status = computed(() => data.value?.identity.runtimeStatus === 'running' ?
                 DST 版本
               </span>
               <strong class="mono">
-                {{data.identity.installedBuild ?? '未知'}}
+                {{installedBuild ?? '未知'}}
               </strong>
+            </div>
+            <div>
+              <span>版本来源</span>
+              <strong>{{runtime?.buildSource==='containerFile'?'容器实际版本':runtime?.buildSource==='releaseMetadata'?'Release 元数据':'未采集'}}</strong>
             </div>
             <div>
               <span>
@@ -123,9 +212,34 @@ const status = computed(() => data.value?.identity.runtimeStatus === 'running' ?
                 {{data.manifestSummary?.configRevision ?? '未采集'}}
               </strong>
             </div>
+            <div>
+              <span>防火墙 UDP</span>
+              <strong class="mono">{{firewallPorts.length ? firewallPorts.join('、') : '未采集'}}</strong>
+            </div>
           </div>
         </section>
       </div>
+      <section class="section-block">
+        <div class="section-heading">
+          <div><h2>UDP 端口</h2></div>
+        </div>
+        <div v-if="ports.length" class="table-wrap">
+          <table>
+            <thead><tr><th>分片</th><th>用途</th><th>宿主机端口</th><th>容器监听</th><th>Docker 发布</th></tr></thead>
+            <tbody>
+              <tr v-for="port in ports" :key="`${port.shard}:${port.purpose}`">
+                <td>{{shardName(port.shard)}}</td>
+                <td>{{purposeName(port.purpose)}}</td>
+                <td class="mono">UDP {{port.hostPort}}</td>
+                <td>{{port.listening===true?'已监听':port.listening===false?'未监听':'未知'}}</td>
+                <td>{{port.published===true?'已发布':port.published===false?'未发布':'未知'}}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="muted-text">端口信息尚未采集</p>
+        <p class="muted-text">开放防火墙时使用表中的宿主机 UDP 端口。分片内部通信端口不对公网开放；端口发布不代表公网已连通。</p>
+      </section>
       <section class="section-block blockers">
         <div class="section-heading">
           <div>
@@ -137,14 +251,13 @@ const status = computed(() => data.value?.identity.runtimeStatus === 'running' ?
         <div class="empty-inline">
           <LockKeyhole :size="18"/>
           <span>
-            {{data.blockers.join('；')}}
+            {{blockers.join('；') || (runtime?.status==='running' ? 'DST 分片进程和容器内 UDP 监听已核实' : '暂无已采集的阻断信息')}}
           </span>
-          <button class="button subtle" disabled>
-            <Square :size="15"/>
-            停止专服
-          </button>
         </div>
       </section>
+      <p v-if="runtime?.status==='running'" class="muted-text" role="status">
+        Master/Caves 进程和容器内 UDP 监听已就绪；公网可达性尚未验证。
+      </p>
     </template>
   </div>
 </template>

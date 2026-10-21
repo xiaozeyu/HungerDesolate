@@ -18,16 +18,17 @@ RUN useradd -m -s /bin/bash steam
 
 # 下载并安装 SteamCMD
 WORKDIR /home/steam
-RUN curl -sqL "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" | tar zxvf -
+RUN curl --fail --show-error --location --retry 3 --connect-timeout 30 --max-time 180 \
+        "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz" -o /tmp/steamcmd.tar.gz && \
+    tar -xzf /tmp/steamcmd.tar.gz && rm /tmp/steamcmd.tar.gz && \
+    chmod +x steamcmd.sh linux32/steamcmd
 RUN chown -R steam:steam /home/steam
+COPY --chown=steam:steam install-dst.sh /home/steam/install-dst.sh
 
 # 下载 DST Dedicated Server (App ID: 343050)
 USER steam
-RUN ./steamcmd.sh \
-    +force_install_dir /home/steam/dst \
-    +login anonymous \
-    +app_update 343050 validate \
-    +quit
+RUN bash ./install-dst.sh bootstrap
+RUN bash ./install-dst.sh download
 
 # Runtime stage
 FROM debian:12-slim
@@ -36,6 +37,7 @@ FROM debian:12-slim
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
+        ca-certificates \
         lib32gcc-s1 \
         lib32stdc++6 \
         libcurl3-gnutls \
@@ -50,7 +52,7 @@ RUN groupadd -g 1000 famine && \
 COPY --from=builder --chown=famine:famine /home/steam/dst /srv/dst
 
 # 设置工作目录
-WORKDIR /srv
+WORKDIR /srv/dst/bin64
 
 # 创建必要的目录
 RUN mkdir -p /srv/config /srv/data /srv/ugc && \

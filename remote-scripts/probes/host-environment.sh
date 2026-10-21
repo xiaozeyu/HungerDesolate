@@ -4,6 +4,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH LC_ALL=C
 DOCKER_SOCKET=/var/run/docker.sock
 MANAGEMENT_ROOT=/var/lib/famine-hub
+PYTHON3=/usr/bin/python3
 unset DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH
 
 # A fixed, read-only probe. No frontend values are interpolated into this script.
@@ -40,9 +41,10 @@ if [[ -d "$MANAGEMENT_ROOT" ]]; then emit managementRoot present ''
 elif [[ -e "$MANAGEMENT_ROOT" ]]; then emit managementRoot invalid ''
 else emit managementRoot missing ''; fi
 
-for tool in bash base64 tr head uname id df timeout tar gzip sha256sum flock jq python3; do
+for tool in bash base64 tr head uname id df timeout tar gzip sha256sum flock jq; do
   if command -v "$tool" >/dev/null; then emit "tool.$tool" ok ''; else emit "tool.$tool" missing ''; fi
 done
+if [[ -x "$PYTHON3" ]]; then emit tool.python3 ok ''; else emit tool.python3 missing ''; fi
 if ! command -v docker >/dev/null; then
   emit dockerClient missing ''; emit compose missing ''; emit dockerServer missing ''; emit dockerRoot missing ''; emit dockerDisk missing ''
 elif ! command -v timeout >/dev/null; then

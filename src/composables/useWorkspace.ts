@@ -76,6 +76,14 @@ export function useWorkspace() {
     }
     grant.value=null;
   }
+  function commitInstanceOverview(serverId: string, recordVersion: number, identity: InstanceSummary) {
+    const server = servers.value.find(item => item.serverId === serverId);
+    const cached = instanceCache.value[identity.hostId];
+    if (!server || server.hostId !== identity.hostId || server.recordVersion !== recordVersion
+      || !cached || cached.serverId !== serverId || cached.recordVersion !== recordVersion) return;
+    instanceCache.value = {...instanceCache.value, [identity.hostId]: {...cached,
+      items: cached.items.map(item => item.instanceId === identity.instanceId ? {...identity} : item)}};
+  }
   function bindHost(serverId: string, recordVersion: number, hostId: string) {
     servers.value = servers.value.map(server => server.serverId === serverId && server.recordVersion === recordVersion
       ? { ...server, hostId }
@@ -90,5 +98,5 @@ export function useWorkspace() {
     return cached && servers.value.some(server=>server.serverId===cached.serverId && server.hostId===hostId && server.recordVersion===cached.recordVersion)?cached.items:[];
   }
   return { servers: visibleServers, preview: readonly(preview), loading: readonly(loading), error: readonly(error),
-    refresh, ensureLoaded, save, remove, setPreview, select, clearSelection, invalidateSelection, commitInstances, bindHost, canEnter, instances };
+    refresh, ensureLoaded, save, remove, setPreview, select, clearSelection, invalidateSelection, commitInstances, commitInstanceOverview, bindHost, canEnter, instances };
 }

@@ -176,7 +176,8 @@ def inspect_release(request):
     if registry.get("schemaVersion") != 1 or registry.get("hostId") != host_id or not isinstance(registry.get("instances"), list):
         reject("RELEASE_DELETE_STATE_INVALID")
     instance_refs = {item.get("instanceId") for item in registry["instances"]
-                     if isinstance(item, dict) and item.get("dstReleaseId") == release_id}
+                     if isinstance(item, dict) and item.get("lifecycle") != "retired"
+                     and item.get("dstReleaseId") == release_id}
     instances_root = ROOT / "instances"
     if instances_root.exists():
         info = instances_root.lstat()
@@ -185,9 +186,10 @@ def inspect_release(request):
         for instance_dir in instances_root.iterdir():
             if instance_dir.is_symlink() or not instance_dir.is_dir() or not valid_uuid(instance_dir.name):
                 continue
-            manifest_path = instance_dir / "manifest.json"
-            if manifest_path.exists() and safe_json(manifest_path, 65536).get("dstReleaseId") == release_id:
-                instance_refs.add(instance_dir.name)
+            for filename in ("manifest.json", "active-release.json"):
+                pointer = instance_dir / filename
+                if pointer.exists() and safe_json(pointer, 65536).get("dstReleaseId") == release_id:
+                    instance_refs.add(instance_dir.name)
     if any(not valid_uuid(value) for value in instance_refs):
         reject("RELEASE_DELETE_STATE_INVALID")
     task_refs = []
@@ -205,11 +207,13 @@ def inspect_release(request):
     same_image = [item.get("releaseId") for item in catalog["releases"]
                   if isinstance(item, dict) and item.get("imageDigest") == entry.get("imageDigest")]
     containers = image_containers(entry.get("imageDigest"))
+    shared_image = len(same_image) > 1
     return {"hostId": host_id, "releaseId": release_id, "dstBuild": entry.get("dstBuild"),
             "image": entry.get("image"), "imageDigest": entry.get("imageDigest"),
             "catalogDigest": digest(catalog), "instanceReferences": sorted(instance_refs),
             "taskReferences": task_refs, "containerReferences": containers,
-            "sharedImage": len(same_image) > 1, "allowed": not (instance_refs or task_refs or containers)}
+            "sharedImage": shared_image,
+            "allowed": not (instance_refs or task_refs or (containers and not shared_image))}
 
 
 def remove(request):

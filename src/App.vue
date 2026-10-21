@@ -118,7 +118,7 @@ onUnmounted(() => { disposed = true; unlisten?.(); });
             版本
           </span>
           <span>
-            0.1.0
+            0.2.0
           </span>
         </div>
       </div>

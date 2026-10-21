@@ -3,9 +3,11 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -19,11 +21,13 @@ GAME_MODES = {"relaxed", "survival", "endless", "wilderness", "lightsout"}
 
 
 class Rejected(Exception):
-    pass
+    def __init__(self, code, details=None):
+        super().__init__(code)
+        self.details = details if isinstance(details, dict) else {}
 
 
-def reject(code):
-    raise Rejected(code)
+def reject(code, details=None):
+    raise Rejected(code, details)
 
 
 def valid_uuid(value):
@@ -305,6 +309,30 @@ def secret_exists(path):
     return True
 
 
+def secret_value(secrets_dir, reference, extension):
+    if not valid_uuid(reference):
+        reject("WORLD_SECRET_FILE_INVALID")
+    value = read_bytes(secrets_dir / (reference + "." + extension), 8192)
+    if not value.endswith(b"\n"):
+        reject("WORLD_SECRET_FILE_INVALID")
+    return value[:-1]
+
+
+def deployed_world(instance_id, manifest, schema):
+    path = ROOT / "instances" / instance_id / "deployed-world.json"
+    if not path.exists():
+        return None
+    value = read_json(path, 262144)
+    if (not isinstance(value, dict) or value.get("schemaVersion") != 1
+            or value.get("instanceId") != instance_id
+            or type(value.get("revision")) is not int
+            or not isinstance(value.get("settings"), dict)
+            or value.get("digest") != digest(value["settings"])):
+        reject("WORLD_CONFIG_STATE_INVALID")
+    validate_settings(value["settings"], manifest, schema)
+    return value
+
+
 def load_desired(instance_id, manifest, schema):
     _, desired_path, secrets_dir, _ = transaction_paths(instance_id)
     if desired_path.exists():
@@ -335,7 +363,7 @@ def load_desired(instance_id, manifest, schema):
     return desired, token_present, password_present
 
 
-def config_response(request, manifest, desired, token_present, password_present):
+def config_response(request, manifest, desired, token_present, password_present, deployed=None):
     settings = desired["settings"]
     return {"schemaVersion": 1, "requestId": request["requestId"],
             "target": {"serverId": request["serverId"], "hostId": request["hostId"],
@@ -343,7 +371,9 @@ def config_response(request, manifest, desired, token_present, password_present)
             "snapshotId": str(uuid.uuid4()), "capturedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "source": "remote", "freshness": "fresh", "configRevision": manifest["configRevision"],
             "data": {"revision": manifest["configRevision"], "desired": settings,
-                     "deployed": None, "desiredDigest": digest(settings), "deployedDigest": None,
+                     "deployed": deployed["settings"] if deployed else None,
+                     "desiredDigest": digest(settings), "deployedDigest": deployed["digest"] if deployed else None,
+                     "deployedRevision": deployed["revision"] if deployed else None,
                      "tokenStatus": "configured" if token_present else "missing",
                      "serverPasswordStatus": "configured" if password_present else "missing",
                      "validationWarnings": []}}
@@ -357,8 +387,10 @@ def get_config(request):
         manifest = read_json(ROOT / "instances" / instance_id / "manifest.json", 65536)
         if manifest.get("hostId") != host_id or manifest.get("instanceId") != instance_id:
             reject("INSTANCE_IDENTITY_MISMATCH")
-        desired, token_present, password_present = load_desired(instance_id, manifest, option_index())
-        return config_response(request, manifest, desired, token_present, password_present)
+        schema = option_index()
+        desired, token_present, password_present = load_desired(instance_id, manifest, schema)
+        deployed = deployed_world(instance_id, manifest, schema)
+        return config_response(request, manifest, desired, token_present, password_present, deployed)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
@@ -443,10 +475,15 @@ def save_config(request):
         token_present = refs.get("tokenRef") is not None
         password_present = refs.get("serverPasswordRef") is not None
         data = {"revision": new_revision, "desired": settings, "deployed": None,
-                "desiredDigest": digest(settings), "deployedDigest": None,
+                "desiredDigest": digest(settings), "deployedDigest": None, "deployedRevision": None,
                 "tokenStatus": "configured" if token_present else "missing",
                 "serverPasswordStatus": "configured" if password_present else "missing",
                 "validationWarnings": []}
+        applied = deployed_world(instance_id, manifest, schema)
+        if applied is not None:
+            data["deployed"] = applied["settings"]
+            data["deployedDigest"] = applied["digest"]
+            data["deployedRevision"] = applied["revision"]
         result = {"schemaVersion": 1, "requestId": request_id,
                   "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
                   "operationId": operation_id, "verifiedRevision": new_revision, "data": data,
@@ -475,6 +512,21 @@ def preview_apply(request):
         if manifest["configRevision"] != expected_revision:
             reject("REVISION_CONFLICT")
         desired, token_present, password_present = load_desired(instance_id, manifest, schema)
+        runtime_verified = False
+        active_release_id = None
+        active_release_path = ROOT / "instances" / instance_id / "active-release.json"
+        if active_release_path.exists():
+            active_release = read_json(active_release_path, 65536)
+            release_id = active_release.get("dstReleaseId") if isinstance(active_release, dict) else None
+            active_release_id = release_id if valid_uuid(release_id) else None
+            catalog_path = ROOT / "releases" / "catalog.json"
+            if catalog_path.exists():
+                catalog = read_json(catalog_path, MAX_BYTES)
+                entries = catalog.get("releases") if isinstance(catalog, dict) else None
+                if isinstance(entries, list):
+                    matched = [item for item in entries if isinstance(item, dict)
+                               and item.get("releaseId") == release_id]
+                    runtime_verified = len(matched) == 1 and matched[0].get("runtimeVerified") is True
         renderer = globals().get("render_config")
         if not callable(renderer):
             reject("WORLD_CONFIG_RENDERER_UNAVAILABLE")
@@ -521,22 +573,275 @@ def preview_apply(request):
                 option = schema.get(("worldgen", option_key))
                 if option is not None:
                     new_world_options.append({"shard": shard_name, "key": option_key, "label": option["label"]})
-        blockers = ["WORLD_APPLY_NOT_IMPLEMENTED"]
+        blockers = []
+        warnings = []
+        if not runtime_verified:
+            warnings.append("当前 DST Release 未通过隔离运行验证；基础验证不代表游戏已成功启动。")
         if rendered is None:
             blockers.append("WORLD_CONFIG_RENDER_UNSUPPORTED")
-        if world_files:
-            blockers.append("PROTECTION_BACKUP_REQUIRED")
+        if world_files and new_world_options:
+            warnings.append("实例已有世界存档；本次世界生成选项只对新世界生效。")
         if not token_present:
             blockers.append("WORLD_TOKEN_MISSING")
+        instance_root = ROOT / "instances" / instance_id
+        if not (instance_root / "compose.yaml").is_file():
+            blockers.append("WORLD_DEPLOYMENT_MISSING")
+        if not (instance_root / "active-release.json").is_file():
+            blockers.append("WORLD_RELEASE_MISSING")
         return {"schemaVersion":1,"requestId":request["requestId"],
                 "target":{"serverId":request["serverId"],"hostId":host_id,"instanceId":instance_id},
                 "recordVersion":request["expectedRecordVersion"],"revision":manifest["configRevision"],
+                "activeReleaseId":active_release_id,
                 "desiredDigest":digest(desired["settings"]),"worldDataPresent":bool(world_files),
                 "worldDataFileCount":len(world_files),"newWorldOptions":new_world_options,
                 "tokenStatus":"configured" if token_present else "missing",
                 "serverPasswordStatus":"configured" if password_present else "missing",
-                "backupRequirement":"required" if world_files else "none",
-                "warnings":[],"blockers":blockers,"allowed":False}
+                "backupRequirement":"none",
+                "warnings":warnings,"blockers":blockers,"allowed":not blockers}
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def compose_command(instance, project, *arguments, timeout=120, capture=False):
+    environment = dict(os.environ)
+    for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "DOCKER_CONFIG"):
+        environment.pop(name, None)
+    environment.update({"LC_ALL": "C", "DOCKER_HOST": "unix:///var/run/docker.sock"})
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "-p", project, "-f", str(instance / "compose.yaml"), *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=environment,
+        )
+    except FileNotFoundError:
+        reject("WORLD_DOCKER_UNAVAILABLE")
+    except subprocess.TimeoutExpired:
+        reject("WORLD_DOCKER_TIMEOUT")
+    if result.returncode != 0 or (capture and len(result.stdout) > 4096):
+        reject("WORLD_DOCKER_OPERATION_FAILED")
+    return result.stdout if capture else ""
+
+
+def parse_running_services(output):
+    if not isinstance(output, str) or len(output) > 4096:
+        reject("WORLD_DOCKER_RESPONSE_INVALID")
+    services = {line.strip().lower() for line in output.splitlines() if line.strip()}
+    unknown = sorted(service for service in services if service not in ("master", "caves"))
+    if unknown:
+        safe_name = unknown[0] if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", unknown[0]) else "invalid"
+        reject("WORLD_DOCKER_RESPONSE_INVALID", {"failureKey": safe_name})
+    return services
+
+
+def apply_config(request):
+    host_id, instance_id, _ = verify_identity(request)
+    expected_revision = request.get("expectedRevision")
+    expected_digest = request.get("desiredDigest")
+    expected_release_id = request.get("activeReleaseId")
+    operation_id = request.get("operationId")
+    request_id = request.get("requestId")
+    if (type(expected_revision) is not int or not 0 <= expected_revision <= MAX_REVISION
+            or not isinstance(expected_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest)
+            or not valid_uuid(expected_release_id)
+            or not valid_uuid(operation_id) or not valid_uuid(request_id)):
+        reject("WORLD_CONFIG_INPUT_INVALID")
+
+    instance = ROOT / "instances" / instance_id
+    lock_fd = lock_instance(instance_id)
+    try:
+        finish_pending_transaction(instance_id)
+        manifest = read_json(instance / "manifest.json", 65536)
+        if manifest.get("hostId") != host_id or manifest.get("instanceId") != instance_id:
+            reject("INSTANCE_IDENTITY_MISMATCH")
+        if manifest.get("configRevision") != expected_revision:
+            reject("REVISION_CONFLICT")
+        schema = option_index()
+        desired, token_present, password_present = load_desired(instance_id, manifest, schema)
+        settings = desired["settings"]
+        settings_digest = digest(settings)
+        if settings_digest != expected_digest:
+            reject("WORLD_APPLY_PLAN_STALE")
+        receipt_path = instance / "operations" / ("world-apply-" + operation_id + ".json")
+        if receipt_path.exists():
+            receipt = read_json(receipt_path, 65536)
+            if receipt.get("revision") != expected_revision or receipt.get("desiredDigest") != settings_digest:
+                reject("OPERATION_ID_REUSED")
+            result = dict(receipt.get("result", {}))
+            if not result:
+                reject("WORLD_CONFIG_STATE_INVALID")
+            result["requestId"] = request_id
+            return result
+        previous_deployed = deployed_world(instance_id, manifest, schema)
+        if (previous_deployed is not None and previous_deployed.get("revision") == expected_revision
+                and previous_deployed.get("digest") == settings_digest):
+            result = {"schemaVersion": 1, "requestId": request_id,
+                      "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
+                      "revision": expected_revision, "activeReleaseId": expected_release_id,
+                      "desiredDigest": settings_digest,
+                      "runtimeVerified": False, "runningShards": []}
+            atomic_json(receipt_path, {"schemaVersion": 1, "operationId": operation_id,
+                                      "revision": expected_revision, "desiredDigest": settings_digest,
+                                      "result": result})
+            stale_work = instance / "staging" / "world-apply" / operation_id
+            if stale_work.exists():
+                shutil.rmtree(stale_work, ignore_errors=True)
+            return result
+        if not token_present:
+            reject("WORLD_TOKEN_MISSING")
+        if not (instance / "compose.yaml").is_file():
+            reject("WORLD_DEPLOYMENT_MISSING")
+        active_release = read_json(instance / "active-release.json", 65536)
+        release_id = active_release.get("dstReleaseId") if isinstance(active_release, dict) else None
+        if release_id != expected_release_id:
+            reject("WORLD_APPLY_PLAN_STALE")
+        catalog = read_json(ROOT / "releases" / "catalog.json", MAX_BYTES)
+        releases = catalog.get("releases") if isinstance(catalog, dict) else None
+        matched = [item for item in releases or [] if isinstance(item, dict)
+                   and item.get("releaseId") == release_id and item.get("verified") is True]
+        if len(matched) != 1:
+            reject("WORLD_RELEASE_INVALID")
+
+        data_root = instance / "data"
+        scanned = 0
+        if data_root.exists():
+            root_info = data_root.lstat()
+            if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
+                    or root_info.st_uid not in (0, DST_RUNTIME_UID) or root_info.st_mode & 0o022):
+                reject("WORLD_CONFIG_PATH_UNSAFE")
+        for shard in ("Master", "Caves") if manifest.get("cavesEnabled") else ("Master",):
+            shard_root = data_root / shard
+            if not shard_root.exists():
+                continue
+            shard_info = shard_root.lstat()
+            if (not stat.S_ISDIR(shard_info.st_mode) or stat.S_ISLNK(shard_info.st_mode)
+                    or shard_info.st_uid not in (0, DST_RUNTIME_UID) or shard_info.st_mode & 0o022):
+                reject("WORLD_CONFIG_PATH_UNSAFE")
+            for child in shard_root.rglob("*"):
+                scanned += 1
+                if scanned > 20_000:
+                    reject("WORLD_CONFIG_DATA_LIMIT")
+                info = child.lstat()
+                if (stat.S_ISLNK(info.st_mode) or info.st_uid not in (0, DST_RUNTIME_UID)
+                        or info.st_mode & 0o022
+                        or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))):
+                    reject("WORLD_CONFIG_PATH_UNSAFE")
+
+        _, _, secrets_dir, _ = transaction_paths(instance_id)
+        token = secret_value(secrets_dir, desired["secrets"].get("tokenRef"), "token")
+        password_ref = desired["secrets"].get("serverPasswordRef")
+        password = secret_value(secrets_dir, password_ref, "password") if password_present else b""
+        cluster_key = None
+        current_cluster = instance / "config" / "Cluster_1" / "cluster.ini"
+        if current_cluster.is_file() and not current_cluster.is_symlink():
+            parser = configparser.ConfigParser(interpolation=None)
+            try:
+                parser.read(current_cluster, encoding="utf-8")
+                candidate = parser.get("SHARD", "cluster_key", fallback="")
+                if re.fullmatch(r"[0-9a-f]{32}", candidate):
+                    cluster_key = candidate
+            except (OSError, configparser.Error, UnicodeError):
+                reject("WORLD_CONFIG_FILE_INVALID")
+        renderer = globals().get("render_config")
+        if not callable(renderer):
+            reject("WORLD_CONFIG_RENDERER_UNAVAILABLE")
+        try:
+            rendered = renderer(settings, token, password, cluster_key or uuid.uuid4().hex,
+                                manifest.get("ports", []))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            reject("WORLD_CONFIG_RENDER_UNSUPPORTED")
+
+        operations = instance / "operations"
+        safe_directory(operations, create=True)
+        staging_root = instance / "staging"
+        safe_directory(staging_root, create=True)
+        work_root = staging_root / "world-apply"
+        safe_directory(work_root, create=True)
+        work = work_root / operation_id
+        if work.exists():
+            reject("WORLD_APPLY_OUTCOME_UNKNOWN")
+        safe_directory(work, create=True)
+        staged_config = work / "new-config"
+        safe_directory(staged_config, create=True)
+        for relative, content in rendered.items():
+            relative_path = PurePosixPath(relative) if isinstance(relative, str) else None
+            if (relative_path is None or relative_path.is_absolute() or ".." in relative_path.parts
+                    or not isinstance(content, bytes)):
+                reject("WORLD_CONFIG_RENDER_UNSUPPORTED")
+            path = staged_config.joinpath(*relative_path.parts)
+            safe_directory(path.parent, create=True)
+            atomic_bytes(path, content, 0o600)
+        for directory, _, filenames in os.walk(staged_config):
+            os.chmod(directory, 0o700)
+            os.chown(directory, DST_RUNTIME_UID, DST_RUNTIME_UID)
+            for filename in filenames:
+                path = Path(directory) / filename
+                os.chmod(path, 0o600)
+                os.chown(path, DST_RUNTIME_UID, DST_RUNTIME_UID)
+
+        project = manifest.get("composeProject")
+        if not isinstance(project, str) or not re.fullmatch(r"fh_[0-9a-f]{32}", project):
+            reject("WORLD_DEPLOYMENT_INVALID")
+        running = parse_running_services(
+            compose_command(instance, project, "ps", "--services", "--status", "running", capture=True)
+        )
+        config_dir = instance / "config"
+        previous_config = work / "previous-config"
+        if config_dir.is_symlink():
+            reject("WORLD_CONFIG_PATH_UNSAFE")
+        had_config = config_dir.exists()
+        if had_config:
+            info = config_dir.lstat()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                reject("WORLD_CONFIG_PATH_UNSAFE")
+        switched = False
+        try:
+            if running:
+                compose_command(instance, project, "stop")
+            if had_config:
+                os.replace(config_dir, previous_config)
+            os.replace(staged_config, config_dir)
+            switched = True
+            compose_command(instance, project, "create", "--force-recreate")
+            if running:
+                compose_command(instance, project, "start", *sorted(running))
+            applied = {"schemaVersion": 1, "instanceId": instance_id, "revision": expected_revision,
+                       "digest": settings_digest, "settings": settings,
+                       "appliedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                       "runtimeVerified": False}
+            atomic_json(instance / "deployed-world.json", applied)
+        except (Rejected, OSError):
+            if switched:
+                try:
+                    if running:
+                        compose_command(instance, project, "stop")
+                    if config_dir.exists():
+                        os.replace(config_dir, work / "failed-config")
+                    if had_config and previous_config.exists():
+                        os.replace(previous_config, config_dir)
+                    compose_command(instance, project, "create", "--force-recreate")
+                    if running:
+                        compose_command(instance, project, "start", *sorted(running))
+                    shutil.rmtree(work, ignore_errors=True)
+                except (Rejected, OSError):
+                    reject("WORLD_APPLY_ROLLBACK_FAILED")
+            raise
+
+        result = {"schemaVersion": 1, "requestId": request_id,
+                  "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
+                  "revision": expected_revision, "activeReleaseId": expected_release_id,
+                  "desiredDigest": settings_digest,
+                  "runtimeVerified": False, "runningShards": sorted(running)}
+        atomic_json(receipt_path, {"schemaVersion": 1, "operationId": operation_id,
+                                  "revision": expected_revision, "desiredDigest": settings_digest,
+                                  "result": result})
+        shutil.rmtree(work, ignore_errors=True)
+        return result
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
@@ -553,11 +858,14 @@ def main(request):
             data = save_config(request)
         elif action == "previewApply":
             data = preview_apply(request)
+        elif action == "apply":
+            data = apply_config(request)
         else:
             reject("WORLD_CONFIG_ACTION_INVALID")
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)
     except Rejected as error:
-        print(json.dumps({"ok": False, "code": str(error)}, separators=(",", ":")), flush=True)
+        print(json.dumps({"ok": False, "code": str(error), "failureKey": error.details.get("failureKey")},
+                         separators=(",", ":")), flush=True)
         raise SystemExit(1)
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
         failure = {"ok": False, "code": "WORLD_CONFIG_FAILED",

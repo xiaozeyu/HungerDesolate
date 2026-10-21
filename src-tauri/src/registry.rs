@@ -292,7 +292,30 @@ pub fn list(database: &Path, request: ConnectionRequest) -> CommandResult<Instan
     with_verified_session(database, &request, |session, host_id| {
         let host_id =
             host_id.ok_or_else(|| error("HOST_UNINITIALIZED", "远端管理目录尚未初始化"))?;
-        list_at(session, Path::new(ROOT), &request, &host_id)
+        let mut response = list_at(session, Path::new(ROOT), &request, &host_id)?;
+        let ids: Vec<String> = response
+            .instances
+            .iter()
+            .filter(|item| item.manifest_available)
+            .map(|item| item.instance_id.clone())
+            .collect();
+        let snapshots = crate::instance_runtime::inspect_many(
+            session,
+            &host_id,
+            &request.request_id,
+            response.registry_revision,
+            &ids,
+        )?;
+        for snapshot in snapshots {
+            if let Some(identity) = response
+                .instances
+                .iter_mut()
+                .find(|item| item.instance_id == snapshot.instance_id)
+            {
+                apply_runtime(identity, &snapshot);
+            }
+        }
+        Ok(response)
     })
     .map_err(|mut error| {
         error.operation = "listInstances";
@@ -316,12 +339,30 @@ pub fn overview(database: &Path, request: OverviewRequest) -> CommandResult<Over
             &request.target.host_id,
             Some(&request.target.instance_id),
         )?;
-        let (identity, manifest) = discovered
+        let registry_revision = discovered.registry_revision;
+        let (mut identity, manifest) = discovered
             .instances
             .into_iter()
             .find(|item| item.0.instance_id == request.target.instance_id)
             .ok_or_else(|| error("INSTANCE_NOT_FOUND", "专服已移除或不存在"))?;
-        let manifest = manifest.ok_or_else(|| error("MANIFEST_NOT_FOUND", "专服创建尚未完成"))?;
+        let mut manifest =
+            manifest.ok_or_else(|| error("MANIFEST_NOT_FOUND", "专服创建尚未完成"))?;
+        let runtime = crate::instance_runtime::inspect_many(
+            session,
+            &request.target.host_id,
+            &request.request_id,
+            registry_revision,
+            std::slice::from_ref(&request.target.instance_id),
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| error("INSTANCE_RUNTIME_PROTOCOL_INVALID", "运行采集结果缺失"))?;
+        if runtime.config_revision != manifest.config_revision {
+            return Err(error("REVISION_CONFLICT", "读取期间配置已变化，请刷新"));
+        }
+        apply_runtime(&mut identity, &runtime);
+        manifest.game_mode = runtime.game_mode.clone().or(manifest.game_mode);
+        manifest.pvp = runtime.pvp.or(manifest.pvp);
         Ok(OverviewResponse {
             schema_version: 1,
             request_id: request.request_id.clone(),
@@ -339,9 +380,14 @@ pub fn overview(database: &Path, request: OverviewRequest) -> CommandResult<Over
             data: InstanceOverview {
                 identity,
                 manifest_summary: manifest,
-                verification_level: "unverified",
-                blockers: vec!["运行状态未采集"],
-                desired_vs_deployed: "unknown",
+                verification_level: runtime.verification_level.clone(),
+                blockers: runtime
+                    .warnings
+                    .iter()
+                    .map(|code| runtime_warning(code).to_string())
+                    .collect(),
+                desired_vs_deployed: runtime.desired_vs_deployed.clone(),
+                runtime,
             },
         })
     })
@@ -349,6 +395,31 @@ pub fn overview(database: &Path, request: OverviewRequest) -> CommandResult<Over
         error.operation = "getInstanceOverview";
         error
     })
+}
+
+fn apply_runtime(
+    identity: &mut InstanceSummary,
+    snapshot: &crate::instance_runtime::RuntimeSnapshot,
+) {
+    identity.runtime_status = snapshot.status;
+    identity.installed_build = snapshot.installed_build.clone();
+    identity.max_players = snapshot.max_players.or(identity.max_players);
+    identity.game_mode = snapshot.game_mode.clone().or(identity.game_mode.take());
+    identity.last_synced_at = Some(snapshot.captured_at.clone());
+}
+
+fn runtime_warning(code: &str) -> &'static str {
+    match code {
+        "MANIFEST_MISSING" => "实例创建尚未完成",
+        "WORLD_CONFIG_UNAVAILABLE" => "世界配置尚未应用或无法读取",
+        "DOCKER_UNAVAILABLE" => "无法读取 Docker 当前状态",
+        "RESOURCE_IDENTITY_INVALID" => "容器归属与实例身份不一致",
+        "CONTAINERS_MISSING" => "缺少预期分片容器",
+        "BUILD_MISMATCH" => "分片版本或镜像与活动 Release 不一致",
+        "PORT_BINDING_MISMATCH" => "宿主端口发布与实例配置不一致",
+        "RUNTIME_PROBE_UNAVAILABLE" => "进程或端口采集未完成，请刷新核对",
+        _ => "部分运行信息尚未核实",
+    }
 }
 
 #[cfg(test)]

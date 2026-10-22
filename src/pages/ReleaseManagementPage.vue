@@ -432,7 +432,6 @@ onUnmounted(() => {
       <section class="release-summary" aria-label="Release 概览">
         <div><strong>{{ releases.length }}</strong><span>Release</span></div>
         <div><strong>{{ creationReadyCount }}</strong><span>可用于创建</span></div>
-        <span class="catalog-digest mono">{{ data.catalogDigest ? shortDigest(data.catalogDigest) : "Catalog 尚未创建" }}</span>
         <StatusLabel v-if="stale" tone="warning" label="结果已过期" />
       </section>
 
@@ -472,9 +471,8 @@ onUnmounted(() => {
             </template>
             <template v-else-if="!release.runtimeVerified">
               <label class="runtime-bundle-picker">
-                <span>{{ bundleReleaseId === release.releaseId ? bundleName : "选择 Klei 配置 ZIP" }}</span>
-                <small>可选：在 DST 主菜单「账户」中生成令牌并打包配置，用于隔离运行验证</small>
-                <input :ref="element => rememberInput(release.releaseId, element)" type="file" accept=".zip,application/zip" :disabled="!!pendingReleaseId || building" @change="readBundle(release, $event)" />
+                <span>{{ bundleReleaseId === release.releaseId ? bundleName : "选择 ZIP 文件" }}</span>
+                <input :ref="element => rememberInput(release.releaseId, element)" type="file" accept=".zip,application/zip" :aria-label="`为 ${release.dstBuild} 选择 Klei 配置 ZIP`" :disabled="!!pendingReleaseId || building" @change="readBundle(release, $event)" />
               </label>
               <button class="button button-compact" :disabled="!!pendingReleaseId || building || bundleReleaseId !== release.releaseId || !bundleBase64" @click="verifyRuntime(release)"><CheckCircle :size="15" />运行验证</button>
               <small v-if="bundleError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ bundleError.message }}</small>
@@ -539,8 +537,7 @@ onUnmounted(() => {
 .release-summary { display: flex; align-items: center; gap: var(--space-5); flex-wrap: wrap; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
 .release-summary > div { display: flex; align-items: baseline; gap: var(--space-2); }
 .release-summary > div strong { font-size: 18px; font-variant-numeric: tabular-nums; }
-.release-summary > div span, .catalog-digest { color: var(--text-secondary); font-size: 12px; }
-.catalog-digest { margin-left: auto; }
+.release-summary > div span { color: var(--text-secondary); font-size: 12px; }
 .release-table-wrap { min-width: 0; }
 .release-table { display: grid; grid-template-columns: minmax(160px, 1.1fr) minmax(150px, 1fr) minmax(140px, .9fr) minmax(240px, 1.35fr); gap: var(--space-4); align-items: center; }
 .release-table-head { min-height: 36px; color: var(--text-secondary); font-size: 11px; border-bottom: 1px solid var(--border); }
@@ -557,10 +554,10 @@ onUnmounted(() => {
 .verification-steps .passed svg { opacity: 1; }
 .release-actions { align-items: flex-start; }
 .button-compact { min-height: 30px; padding: 0 var(--space-2); font-size: 12px; }
-.runtime-bundle-picker { display: block; position: relative; max-width: 100%; color: var(--text-secondary); font-size: 11px; }
+.runtime-bundle-picker { display: inline-flex; position: relative; align-items: center; max-width: 100%; min-height: 30px; padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius-control); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
 .runtime-bundle-picker span { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.runtime-bundle-picker small { display: block; max-width: 220px; margin: 3px 0 5px; color: var(--text-tertiary); line-height: 1.4; overflow-wrap: anywhere; }
-.runtime-bundle-picker input { display: block; width: 220px; max-width: 100%; min-height: 26px; font-size: 11px; }
+.runtime-bundle-picker:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.runtime-bundle-picker input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 .release-action-progress, .release-ready { display: inline-flex; align-items: center; gap: var(--space-2); font-size: 12px; }
 .release-ready { color: var(--success); }
 .release-action-error, .release-action-success { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
@@ -576,7 +573,6 @@ onUnmounted(() => {
   .release-table-head { display: none; }
   .release-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; row-gap: var(--space-3); }
   .release-status-cell, .release-actions { border-top: 1px solid var(--border); padding-top: var(--space-2); }
-  .catalog-digest { margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .state-indicator.busy { animation: none; } }
 </style>

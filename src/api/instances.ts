@@ -12,7 +12,7 @@ export function listInstances(request: ConnectionRequest): Promise<InstanceListR
 export function getInstanceOverview(target: InstanceTarget, requestId: string, expectedRecordVersion: number): Promise<InstanceOverviewResponse> {
   return call("get_instance_overview",{schemaVersion:1,requestId,target,expectedRecordVersion});
 }
-export interface InstanceStartResponse {
+export interface InstanceRuntimeControlResponse {
   schemaVersion: 1; requestId: string; operationId: string; target: InstanceTarget;
   recordVersion: number; revision: number; status: "running" | "stopped"; verificationLevel: "localVerified" | "unverified";
   startedShards: Array<"master"|"caves">; runningShards: Array<"master"|"caves">;
@@ -22,7 +22,55 @@ export function controlInstance(request: {
   action: "start" | "stop" | "restart";
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
   expectedRevision: number; operationId: string;
-}): Promise<InstanceStartResponse> { return call("start_instance", request); }
+}): Promise<InstanceRuntimeControlResponse> { return call("start_instance", request); }
+
+export type BackupCaptureMode = "cold" | "quasiHot";
+export interface BackupSummary {
+  schemaVersion: 1; backupId: string; hostId: string; instanceId: string; createdAt: string;
+  reason: string; captureMode: BackupCaptureMode; captureSemantics: "stoppedBeforeRead" | "onDiskBestEffort";
+  runtimeStatusAtCapture: "running" | "stopped" | "degraded" | "unknown";
+  sizeBytes: number; checksum: string | null; verification: "pending" | "verified" | "failed";
+  restorability: "restorable" | "missingArtifacts" | "incompatible" | "unknown";
+  dstBuild: string | null; dstReleaseId: string | null; modsReleaseId: string | null;
+  configRevision: number; containsSecrets: boolean;
+}
+export interface BackupListResponse {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; configRevision: number; items: BackupSummary[];
+}
+export interface BackupPreviewResponse {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; configRevision: number;
+  captureMode: BackupCaptureMode; runtimeStatus: "running" | "stopped" | "degraded" | "unknown";
+  runtimeVerified: boolean; estimatedArchiveBytes: number; availableBytes: number; fileCount: number;
+  worldDataPresent: boolean; allowed: boolean; warnings: string[];
+}
+export interface InstanceBackupTaskResponse {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot;
+}
+export function listInstanceBackups(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; expectedRevision: number;
+}): Promise<BackupListResponse> { return call("list_instance_backups", request); }
+export function previewInstanceBackup(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
+  expectedRevision: number; captureMode: BackupCaptureMode;
+}): Promise<BackupPreviewResponse> { return call("preview_instance_backup", request); }
+export function createInstanceBackup(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
+  expectedRevision: number; captureMode: BackupCaptureMode; operationId: string; backupId: string; reason: string;
+}): Promise<InstanceBackupTaskResponse> { return call("create_instance_backup", request); }
+export function getInstanceBackupTask(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; operationId: string;
+}): Promise<InstanceBackupTaskResponse> { return call("get_instance_backup_task", request); }
+export function listInstanceBackupTasks(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
+}): Promise<InstanceBackupTaskResponse[]> { return call("list_instance_backup_tasks", request); }
+export interface BackupDownloadResponse { schemaVersion:1; requestId?:string; target:InstanceTarget; operationId:string; backupId:string; status:"queued"|"running"|"interrupted"|"failed"|"succeeded"; stage:string; destination?:string; temporaryPath?:string; checksum?:string; sizeBytes?:number; bytesTransferred?:number; errorCode?:string; attempt?:number; }
+export function pickBackupDownloadPath(): Promise<string|null> { return call("pick_backup_download_path"); }
+export function downloadInstanceBackup(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;backupId:string;operationId:string;destination:string}):Promise<BackupDownloadResponse>{return call("download_instance_backup",request);}
+export function listBackupDownloadTasks(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number}):Promise<BackupDownloadResponse[]>{return call("list_backup_download_tasks",request);}
+export function deleteInstanceBackup(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRevision:number;backupId:string;expectedChecksum:string}):Promise<{schemaVersion:1;requestId:string;target:InstanceTarget;backupId:string;deleted:boolean}>{return call("delete_instance_backup",request);}
+export function restoreInstanceBackup(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRevision:number;backupId:string;operationId:string}):Promise<InstanceBackupTaskResponse>{return call("restore_instance_backup",request);}
+export function getInstanceRestoreTask(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;operationId:string}):Promise<InstanceBackupTaskResponse>{return call("get_instance_restore_task",request);}
+export function listInstanceRestoreTasks(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number}):Promise<InstanceBackupTaskResponse[]>{return call("list_instance_restore_tasks",request);}
 
 export interface InstanceCreateInput {
   displayName: string;

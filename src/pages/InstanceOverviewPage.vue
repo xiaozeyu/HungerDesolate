@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Play, Square, RotateCw, LockKeyhole } from "@lucide/vue";
+import { Play, Square, RotateCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
@@ -37,7 +37,6 @@ const purposeName = (purpose: "game" | "steamMaster" | "steamAuth" | "shard") =>
 const status = computed(() => runtimeStatus.value === "running" ? "运行中"
   : runtimeStatus.value === "stopped" ? "已停止" : runtimeStatus.value === "degraded" ? "部分异常"
   : runtimeStatus.value === "starting" ? "启动中" : "未知");
-const blockers = computed(() => data.value?.blockers ?? []);
 const canStart = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
   && !workspace.preview.value && !loading.value && !runtimeAction.value && runtimeStatus.value !== "running");
 const canStop = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
@@ -238,26 +237,7 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
           </table>
         </div>
         <p v-else class="muted-text">端口信息尚未采集</p>
-        <p class="muted-text">开放防火墙时使用表中的宿主机 UDP 端口。分片内部通信端口不对公网开放；端口发布不代表公网已连通。</p>
       </section>
-      <section class="section-block blockers">
-        <div class="section-heading">
-          <div>
-            <h2>
-              阻断项
-            </h2>
-          </div>
-        </div>
-        <div class="empty-inline">
-          <LockKeyhole :size="18"/>
-          <span>
-            {{blockers.join('；') || (runtime?.status==='running' ? 'DST 分片进程和容器内 UDP 监听已核实' : '暂无已采集的阻断信息')}}
-          </span>
-        </div>
-      </section>
-      <p v-if="runtime?.status==='running'" class="muted-text" role="status">
-        Master/Caves 进程和容器内 UDP 监听已就绪；公网可达性尚未验证。
-      </p>
     </template>
   </div>
 </template>

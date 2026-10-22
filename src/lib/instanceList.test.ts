@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateInstanceList, instanceState, canInspectInstance } from "./instanceList.ts";
+import { validateInstanceList, instanceState, canInspectInstance, gameModeLabel, formatBeijingDateTime } from "./instanceList.ts";
 import type { InstanceListResponse } from "../api/instances.ts";
 import type { InstanceSummary } from "../types/contracts.ts";
 const hostId="11111111-1111-4111-8111-111111111111";
@@ -28,5 +28,11 @@ describe("instance list boundary",()=>{
     assert.ok(validateInstanceList(ticket,hostId,report));
     assert.equal(validateInstanceList(ticket,hostId,{...report,registryRevision:Number.MAX_SAFE_INTEGER+1}),false);
     assert.equal(validateInstanceList(ticket,hostId,{...report,instances:[{...item,players:8,maxPlayers:6}]}),false);
+  });
+  it("formats game modes in Chinese and runtime timestamps in Beijing time",()=>{
+    assert.equal(gameModeLabel("survival"),"生存");
+    assert.equal(gameModeLabel("unknown-mode"),"未知");
+    assert.equal(formatBeijingDateTime("2026-10-21T11:38:15Z"),"2026-10-21 19:38:15");
+    assert.equal(formatBeijingDateTime(null),"未采集");
   });
 });

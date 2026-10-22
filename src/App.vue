@@ -136,17 +136,6 @@ onUnmounted(() => { disposed = true; unlisten?.(); });
       <section class="route-scroll">
         <RouterView/>
       </section>
-      <footer class="operation-bar">
-        <div class="operation-leading">
-          <span class="status-dot muted"/>
-          <span>
-            {{taskStore.tasks.value.length ? `${taskStore.tasks.value.length} 个任务记录` : '没有进行中的任务'}}
-          </span>
-        </div>
-        <button class="text-button" :disabled="workspace.loading.value" @click="workspace.refresh">
-          {{workspace.loading.value?'读取中…':'刷新主机'}}
-        </button>
-      </footer>
     </main>
   </div>
 </template>

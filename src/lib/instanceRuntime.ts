@@ -1,8 +1,8 @@
-import type { InstanceStartResponse } from "../api/instances.ts";
+import type { InstanceRuntimeControlResponse } from "../api/instances.ts";
 import type { InstanceRuntimeSnapshot, InstanceTarget } from "../types/contracts.ts";
 
 export function hasReadyShardListeners(
-  result: Pick<InstanceStartResponse, "runningShards" | "listeners">,
+  result: Pick<InstanceRuntimeControlResponse, "runningShards" | "listeners">,
   cavesEnabled: boolean,
 ): boolean {
   const expected: Array<"master" | "caves"> = cavesEnabled ? ["master", "caves"] : ["master"];

@@ -15,7 +15,6 @@ export function demoEnvironment(request: ConnectionRequest, hostId: string | nul
       {code:"AMD64_REQUIRED",level:"passed",label:"系统架构",message:"通过",recoverySteps:[]},
       {code:denied?"DOCKER_PERMISSION_DENIED":"DOCKER_AVAILABLE",level:denied?"blocker":"passed",label:"Docker",message:denied?"权限不足":"可访问",recoverySteps:denied?["检查当前账户对本机 Docker socket 的访问权限"]:[]},
       {code:"MANAGEMENT_PATH_PERMISSION",level:"blocker",label:"目录权限",message:"管理目录不可写",recoverySteps:["为管理账户配置受控目录权限后重新检查"]},
-      {code:"DEPLOYMENT_COMPATIBILITY_UNVERIFIED",level:"warning",label:"部署兼容性",message:"待验证",recoverySteps:["完成三专服联网、更新与恢复验证"]},
     ],deploymentVerified:false,
   };
 }

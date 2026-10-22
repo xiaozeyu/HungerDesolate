@@ -139,7 +139,7 @@ Token、服务器密码与分片密钥普通 DTO 只暴露 configured/missing/un
 | WorkshopMetadata | workshopId(十进制字符串)、title、author、description、sourceUrl、metadataUpdatedAt、configSchema/null、fetchStatus |
 | InstanceMod | workshopId、desiredEnabled、desiredConfig、deployedEnabled/null、deployedConfigDigest/null、desiredDigest、installedVersion/null、availableVersion/null、checkedAt/null、status |
 | InstanceMods | revision、items[]、desiredDigest、deployedDigest/null、releaseId/null、lastCheckedAt/null、warnings[] |
-| BackupSummary | backupId、hostId、instanceId、createdAt、reason、sizeBytes、checksum、verification、restorability、dstBuild、dstReleaseId、modsReleaseId、configRevision、containsSecrets |
+| BackupSummary | backupId、hostId、instanceId、createdAt、reason、captureMode(cold/quasiHot)、captureSemantics、runtimeStatusAtCapture、sizeBytes、checksum/null(仅 pending/failed)、verification、restorability、dstBuild、dstReleaseId、modsReleaseId、configRevision、containsSecrets |
 | UpdateStatus | installedBuild/null、availableBuild/null、checkedAt/null、dstUpdateState、modUpdateCounts、activeReleases、rollbackCapability、warnings[] |
 | LogPage | shardKind、streamId、cursor/null、nextCursor/null、lines[{sequence,time/null,text}]、truncated、rotated |
 
@@ -617,11 +617,11 @@ type GetInstanceCreationStatusResponse = {
 | command / wrapper | 类型 | 业务输入 | 返回与要求 |
 | --- | --- | --- | --- |
 | list_instance_backups / listInstanceBackups | Q | target、cursor、limit | BackupSummary 分页，包含 retired 实例历史 |
-| preview_instance_backup / previewInstanceBackup | P | target、expectedRevision | 一致性方式、停服影响、空间估算 |
-| create_instance_backup / createInstanceBackup | T | target、planId、expectedRevision、operationId | verified 备份才可用于恢复 |
+| preview_instance_backup / previewInstanceBackup | P | target、captureMode(cold/quasiHot)、expectedRevision | 一致性语义、停服影响、空间估算；准热备份不满足破坏性操作保护点 |
+| create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；metadata 保留采集模式与运行状态 |
 | download_instance_backup / downloadInstanceBackup | T | target、backupId、operationId、本地授权 destinationHandle | SFTP 下载及本地 checksum；不允许前端随意传远端路径 |
-| preview_backup_restore / previewBackupRestore | P | target、backupId、expectedRevision | 归属、产物、空间、当前保护点检查 |
-| restore_instance_backup / restoreInstanceBackup | T | target、backupId、planId、expectedRevision、operationId | 恢复一致恢复点；跨实例明确拒绝 |
+| restore_instance_backup / restoreInstanceBackup | T | target、backupId、expectedRevision、operationId | 用户确认恢复后，命令先同步检查归属、checksum、Release 产物、空间与运行状态；阻断时不创建任务，通过后才接纳恢复 worker；跨实例明确拒绝 |
+| delete_instance_backup / deleteInstanceBackup | M | target、expectedRevision、backupId、expectedChecksum | checksum CAS、实例归属和维护锁校验后删除普通备份；恢复前保护点禁止删除 |
 | read_instance_logs / readInstanceLogs | Q | target、shardKind、cursor、limit | LogPage，游标绑定 stream/target |
 | get_instance_diagnostics / getInstanceDiagnostics | Q | target | 有限健康摘要、证据、失败任务 ID、恢复入口 |
 | list_tasks / listTasks | Q | HostTarget 或 bootstrap ConnectionTaskTarget、instanceId 可选、cursor、limit | 固定目标 TaskSnapshot 分页，不依赖当前详情；合并本地下载/准备任务索引 |

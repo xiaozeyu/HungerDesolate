@@ -7,15 +7,16 @@ import { useWorkspace } from "./useWorkspace";
 import { describeError } from "../lib/commandError";
 import { matchesRuntimeSnapshot } from "../lib/instanceRuntime";
 import type { InstanceOverview } from "../types/contracts";
-export function useInstanceOverview() {
+export function useInstanceOverview(options: { poll?: boolean } = {}) {
   const workspace=useWorkspace(),data=shallowRef<InstanceOverview|null>(null),error=ref<string|null>(null),loading=ref(false),stale=ref(false);
   let sequence=0,current:QueryTicket|null=null;
   let pollTimer:ReturnType<typeof setTimeout>|undefined;
   let inFlight:{key:string;promise:Promise<void>}|null=null;
   let pollingPaused=false,disposed=false;
+  const shouldPoll=options.poll!==false;
   function stopPolling(){if(pollTimer!==undefined){clearTimeout(pollTimer);pollTimer=undefined;}}
   function schedulePolling(){
-    if(!pollingPaused&&!disposed&&!workspace.preview.value)pollTimer=setTimeout(()=>void refresh(),10000);
+    if(shouldPoll&&!pollingPaused&&!disposed&&!workspace.preview.value)pollTimer=setTimeout(()=>void refresh(),10000);
   }
   function pausePolling(){pollingPaused=true;stopPolling();}
   function resumePolling(){pollingPaused=false;stopPolling();schedulePolling();}

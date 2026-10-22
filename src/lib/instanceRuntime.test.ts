@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { firewallUdpPorts, hasReadyShardListeners } from "./instanceRuntime.ts";
 import type { InstanceRuntimeSnapshot } from "../types/contracts.ts";
-import type { InstanceStartResponse } from "../api/instances.ts";
+import type { InstanceRuntimeControlResponse } from "../api/instances.ts";
 
 describe("DST shard readiness", () => {
   it("accepts real server evidence without requiring unused fixed authentication ports", () => {
@@ -12,7 +12,7 @@ describe("DST shard readiness", () => {
       listeners:{master:[11000,27016]}}, false), true);
   });
   it("rejects missing shards, duplicate ports and invalid port evidence", () => {
-    const cases: Pick<InstanceStartResponse,"runningShards"|"listeners">[] = [
+    const cases: Pick<InstanceRuntimeControlResponse,"runningShards"|"listeners">[] = [
       {runningShards:["master"],listeners:{master:[10888,11000,27016]}},
       {runningShards:["master","master"],listeners:{master:[10888,11000,27016],caves:[11001,27017]}},
       {runningShards:["master","caves"],listeners:{master:[11000,27016],caves:[11001,27017]}},

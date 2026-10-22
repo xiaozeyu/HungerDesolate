@@ -570,14 +570,6 @@ pub(crate) fn from_output(
             &["检查 Docker 数据目录所在磁盘的读取权限"],
         );
     }
-    check(
-        &mut checks,
-        "DEPLOYMENT_COMPATIBILITY_UNVERIFIED",
-        CheckLevel::Warning,
-        "部署兼容性",
-        "待验证",
-        &["完成阶段 0 三专服联网、更新与恢复验证后再部署"],
-    );
     Ok(HostEnvironment {
         schema_version: 1,
         request_id: request.request_id.clone(),
@@ -678,11 +670,10 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.level == CheckLevel::Blocker));
-        assert!(has(
-            &report,
-            "DEPLOYMENT_COMPATIBILITY_UNVERIFIED",
-            CheckLevel::Warning
-        ));
+        assert!(!report
+            .checks
+            .iter()
+            .any(|check| { check.code == "DEPLOYMENT_COMPATIBILITY_UNVERIFIED" }));
         assert!(!report.deployment_verified);
         Ok(())
     }

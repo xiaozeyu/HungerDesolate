@@ -2,6 +2,7 @@ import { isUuid } from "./navigationGuard.ts";
 import { matchesConnection, type ConnectionTicket } from "./connectionGuard.ts";
 import type { InstanceSummary } from "../types/contracts";
 import type { InstanceListResponse } from "../api/instances";
+import { dstGameModeOptions } from "./dstGameModes.ts";
 const lifecycles = ["creating","ready","createFailed","deleting","deleteFailed","retired"];
 const runtimes = ["unknown","stopped","starting","running","degraded","stopping","failed"];
 export function validateInstanceList(ticket: ConnectionTicket, expectedHostId: string | null, result: InstanceListResponse): boolean {
@@ -35,4 +36,21 @@ export function instanceState(item: InstanceSummary): {label:string;tone:"succes
 }
 export function canInspectInstance(item: InstanceSummary): boolean {
   return item.manifestAvailable && !["deleting","deleteFailed","retired"].includes(item.lifecycle);
+}
+
+export function gameModeLabel(value: string | null): string {
+  if (!value) return "未知";
+  return dstGameModeOptions.find(option => option.value === value)?.label ?? "未知";
+}
+
+export function formatBeijingDateTime(value: string | null): string {
+  if (!value) return "未采集";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未采集";
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(item => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}:${part("second")}`;
 }

@@ -1,3 +1,4 @@
+mod backups;
 mod commands;
 mod credential_source;
 mod docker_installation;
@@ -65,6 +66,19 @@ pub fn run() -> tauri::Result<()> {
             commands::get_host_initialization,
             commands::list_instances,
             commands::get_instance_overview,
+            commands::list_instance_backups,
+            commands::preview_instance_backup,
+            commands::create_instance_backup,
+            commands::get_instance_backup_task,
+            commands::list_instance_backup_tasks,
+            commands::pick_backup_download_path,
+            commands::download_instance_backup,
+            commands::get_backup_download_task,
+            commands::list_backup_download_tasks,
+            commands::delete_instance_backup,
+            commands::restore_instance_backup,
+            commands::get_instance_restore_task,
+            commands::list_instance_restore_tasks,
             commands::start_instance,
             commands::preview_instance_create,
             commands::create_instance,

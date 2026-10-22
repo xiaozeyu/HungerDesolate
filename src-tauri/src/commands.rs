@@ -246,6 +246,191 @@ pub async fn get_instance_overview(
 }
 
 #[tauri::command]
+pub async fn list_instance_backups(
+    state: State<'_, AppState>,
+    request: crate::backups::ListRequest,
+) -> CommandResult<crate::backups::ListResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listInstanceBackups",
+        safe_request_id(&request.request_id),
+        move || crate::backups::list(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_instance_backup(
+    state: State<'_, AppState>,
+    request: crate::backups::PreviewRequest,
+) -> CommandResult<crate::backups::PreviewResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "previewInstanceBackup",
+        safe_request_id(&request.request_id),
+        move || crate::backups::preview(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn create_instance_backup(
+    state: State<'_, AppState>,
+    request: crate::backups::CreateRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "createInstanceBackup",
+        safe_request_id(&request.request_id),
+        move || crate::backups::create(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_instance_backup_task(
+    state: State<'_, AppState>,
+    request: crate::backups::TaskStatusRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getInstanceBackupTask",
+        safe_request_id(&request.request_id),
+        move || crate::backups::status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_instance_backup_tasks(
+    state: State<'_, AppState>,
+    request: crate::backups::TaskListRequest,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listInstanceBackupTasks",
+        safe_request_id(&request.request_id),
+        move || crate::backups::list_tasks(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn pick_backup_download_path(app: tauri::AppHandle) -> CommandResult<Option<String>> {
+    ssh_blocking("pickBackupDownloadPath", None, move || {
+        Ok(app
+            .dialog()
+            .file()
+            .set_title("保存备份归档")
+            .blocking_save_file()
+            .and_then(|file| {
+                file.into_path()
+                    .ok()
+                    .and_then(|path| path.into_os_string().into_string().ok())
+            }))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn download_instance_backup(
+    state: State<'_, AppState>,
+    request: crate::backups::DownloadRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "downloadInstanceBackup",
+        safe_request_id(&request.request_id),
+        move || crate::backups::download(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_backup_download_task(
+    state: State<'_, AppState>,
+    request: crate::backups::DownloadRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getBackupDownloadTask",
+        safe_request_id(&request.request_id),
+        move || crate::backups::download_status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_backup_download_tasks(
+    state: State<'_, AppState>,
+    request: crate::backups::TaskListRequest,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listBackupDownloadTasks",
+        safe_request_id(&request.request_id),
+        move || crate::backups::list_download_tasks(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_instance_backup(
+    state: State<'_, AppState>,
+    request: crate::backups::DeleteRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "deleteInstanceBackup",
+        safe_request_id(&request.request_id),
+        move || crate::backups::delete(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn restore_instance_backup(
+    state: State<'_, AppState>,
+    request: crate::backups::RestoreRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "restoreInstanceBackup",
+        safe_request_id(&request.request_id),
+        move || crate::backups::restore(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_instance_restore_task(
+    state: State<'_, AppState>,
+    request: crate::backups::RestoreTaskStatusRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getInstanceRestoreTask",
+        safe_request_id(&request.request_id),
+        move || crate::backups::restore_status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_instance_restore_tasks(
+    state: State<'_, AppState>,
+    request: crate::backups::TaskListRequest,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listInstanceRestoreTasks",
+        safe_request_id(&request.request_id),
+        move || crate::backups::restore_list(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn start_instance(
     state: State<'_, AppState>,
     request: crate::instance_runtime::StartRequest,

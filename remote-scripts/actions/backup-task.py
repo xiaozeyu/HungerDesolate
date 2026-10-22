@@ -219,10 +219,11 @@ def backup_restorability(instance, request, release_id):
     settings = desired.get("settings") if isinstance(desired, dict) else None
     digest = "sha256:" + __import__("hashlib").sha256(canonical(settings)).hexdigest()
     if (desired.get("schemaVersion") != 1 or desired.get("instanceId") != request["instanceId"]
-            or desired.get("revision") != request["expectedRevision"] or not isinstance(settings, dict)
+            or type(desired.get("revision")) is not int or desired.get("revision") > request["expectedRevision"]
+            or not isinstance(settings, dict)
             or not isinstance(desired.get("secrets"), dict)
             or deployed.get("schemaVersion") != 1 or deployed.get("instanceId") != request["instanceId"]
-            or deployed.get("revision") != request["expectedRevision"]
+            or deployed.get("revision") != desired.get("revision")
             or deployed.get("digest") != digest or deployed.get("settings") != settings):
         return "incompatible", None
     try:

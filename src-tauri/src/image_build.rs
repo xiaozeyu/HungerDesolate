@@ -11,7 +11,10 @@ use std::{
 };
 
 const BUILD_SCRIPT: &str = include_str!("../../remote-scripts/actions/build-dst-image.sh");
+const BUILD_MIRROR_SCRIPT: &str =
+    include_str!("../../remote-scripts/actions/configure-buildkit-mirrors.py");
 const INSTALL_SCRIPT: &str = include_str!("../../docker/runtime/install-dst.sh");
+const FETCH_WORKSHOP_SCRIPT: &str = include_str!("../../docker/runtime/fetch-workshop.sh");
 const REGISTER_RELEASE_SCRIPT: &str =
     include_str!("../../remote-scripts/actions/register-built-release.py");
 const OP: &str = "buildDstImage";
@@ -242,6 +245,44 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
         })?;
     drop(remote_file);
 
+    let mirror_config_path = "/opt/famine-hub/scripts/actions/configure-buildkit-mirrors.py";
+    let mut remote_file = session
+        .scp_send(
+            Path::new(mirror_config_path),
+            0o644,
+            BUILD_MIRROR_SCRIPT.len() as u64,
+            None,
+        )
+        .map_err(|_| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "无法上传 BuildKit 镜像源配置脚本",
+                json!({}),
+            )
+        })?;
+    remote_file
+        .write_all(BUILD_MIRROR_SCRIPT.as_bytes())
+        .map_err(|_| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "无法写入 BuildKit 镜像源配置脚本",
+                json!({}),
+            )
+        })?;
+    remote_file
+        .send_eof()
+        .and_then(|_| remote_file.wait_eof())
+        .and_then(|_| remote_file.close())
+        .and_then(|_| remote_file.wait_close())
+        .map_err(|_| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "BuildKit 镜像源配置脚本传输异常",
+                json!({}),
+            )
+        })?;
+    drop(remote_file);
+
     // 上传与本地构建共用的 SteamCMD 安装脚本。
     let mut installer = session
         .scp_send(
@@ -271,6 +312,36 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
             )
         })?;
     drop(installer);
+
+    // Bundle the pinned-image Workshop fetch wrapper in releases built on managed hosts.
+    let mut fetcher = session
+        .scp_send(
+            Path::new("/opt/famine-hub/scripts/actions/fetch-workshop.sh"),
+            0o644,
+            FETCH_WORKSHOP_SCRIPT.len() as u64,
+            None,
+        )
+        .map_err(|_| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "无法上传 Workshop 下载脚本",
+                json!({}),
+            )
+        })?;
+    fetcher
+        .write_all(FETCH_WORKSHOP_SCRIPT.as_bytes())
+        .and_then(|_| fetcher.send_eof().map_err(std::io::Error::other))
+        .and_then(|_| fetcher.wait_eof().map_err(std::io::Error::other))
+        .and_then(|_| fetcher.close().map_err(std::io::Error::other))
+        .and_then(|_| fetcher.wait_close().map_err(std::io::Error::other))
+        .map_err(|_| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "Workshop 下载脚本传输异常",
+                json!({}),
+            )
+        })?;
+    drop(fetcher);
 
     // 执行构建（后台运行）。
     let build_command = format!(

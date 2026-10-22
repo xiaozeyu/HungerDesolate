@@ -192,6 +192,8 @@ Docker 的 always/unless-stopped 对手动停止和 daemon 重启行为不同。
 
 releaseId 是实例内不可变安全标识；记录 imageDigest、实际 DST build、产物 checksum、Workshop 项摘要、创建任务和验证结果。staging 校验成功后才成为 release。
 
+构建使用独立 `docker-container` BuildKit builder 时，Docker daemon 的 `registry-mirrors` 不会自动成为 BuildKit 的 Registry 配置。构建脚本需把 daemon 已配置的镜像源写入专属 `buildkitd.toml` 并通过 `--buildkitd-config` 传入；缺少配置时合并默认镜像源，保留 daemon.json 其他字段。镜像源不可达仍按构建失败处理，不能将超时登记为已验证 Release。
+
 每次部署记录完整组合 `deploymentId → configRevision/digests + dstReleaseId + modsReleaseId`。停止目标分片后，在一个 active-release.json 内原子切换组合，再按该组合重建受管服务。不要分散修改多个 symlink 后假设任意断点都是一致发布。manifest 最后记录验证结果；journal 可恢复中间态。
 
 DST 二进制可在同实例两分片只读共享；UGC 可写区按分片独立，MOD 任务顺序准备一致版本。若实际 DST 自动写入要求与只读布局冲突，阶段 0 调整具体 mount 与启动流程，但不允许多个实例共享可写 MOD 或在线覆盖当前产物。
@@ -289,7 +291,9 @@ apply 以已保存 revision 生成预览，实例锁内重查 → staging 渲染
 
 ### 9.3 MOD
 
-Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、enabled、配置；下载、应用、检查版本绑定实例。配置 schema 来自受限解析结果，不执行 modinfo.lua 任意代码；安全解析失败允许展示明确“不支持自动配置”，不退化为 eval。
+Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、enabled、配置；下载、应用、检查版本绑定实例。全局 configRevision 是跨领域 CAS 版本；world.json 和 mods.json 各自 revision 是领域版本，可以小于全局版本，但不能大于它。保存任一领域时在实例锁中推进全局版本；不能因为 MOD 保存而改写世界期望/部署 revision。启动和备份按 world desired/deployed 的领域 revision 与 digest 比较。配置 schema 来自固定产物中的受限 Lua 5.1 求值：仅注入目标游戏的 modinfo 环境，禁止文件、网络、进程和任意模块加载，并设置内存、指令、表深度和进程超时；这不是对宿主环境执行任意代码。安全求值失败允许展示明确“不支持自动配置”，不能把失败转换成无配置项。
+
+MOD 内容准备复核目标实例的活动 DST Release，同时从本地主机已验证 Release 中选择固定 digest 且带有 `steamcmd-workshop-v1` 能力标记的镜像作为 SteamCMD 工具容器；活动镜像优先，缺能力时才使用另一条已验证本地 Release。两种 Release 身份分别记录。worker 通过 systemd controller 持久运行；下载容器不挂 Docker socket，仅挂当前 task staging，以非 root 用户、只读根文件系统和资源限制运行 SteamCMD。SteamCMD 非零退出、超时、Workshop 内容缺失和容器执行失败使用不同稳定错误码；Docker 启动错误仅按 daemon、network、mount、image、permission、runtime 白名单分类，并只返回数值退出码，不回传原始诊断文本。SteamCMD Workshop 缓存按独立 HOME 与可执行文件目录共同检索，覆盖 `Steam/steamapps`、`.steam/steamcmd`、`.steam/steam` 和 `.local/share/Steam` 常见布局；只接受请求 Workshop ID 下找到的普通 `modinfo.lua`，复制其所在内容目录进入任务输出，再进行完整文件清单验证。完成后校验文件类型、路径、数量、总大小、modinfo 与逐文件摘要，再将内容所有权归给远端 root 管理面并发布到只读 `mods/prepared/<workshopId>/<contentDigest>`（目录 `0555`、文件 `0444`、manifest `0600`）。探针逐级拒绝链接、非受管 owner 和可写目录，并以 `O_NOFOLLOW` 打开配置文件；desired 固定摘要缺失时不回退读取其他版本。该阶段不修改活动 UGC/active-release，不启停分片；失败现场保留，重连可从持久任务核对。匿名 SteamCMD 下载、Linux amd64 网络路径和实际 Workshop 样本尚待实机验收。
 
 应用流程：解析/去重/校验 → staging 顺序下载每分片需要的内容 → 记录可识别实际版本/摘要 → 验证一致性与权限 → 停目标分片 → 保护备份 → 切换完整部署 → 启动/重读配置与运行证据。
 
@@ -299,14 +303,14 @@ Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、ena
 
 ### 10.1 备份内容与一致性
 
-包括：完整世界数据、可复现配置、configRevision/digests、DST build/产物标识、MOD 发布摘要、schema、hostId/instanceId、必要秘密恢复材料或受保护引用。普通 keyring 条目不自动装入备份；无法恢复 Token 时明确标记需要重新提供，不宣称备份完全自足。
+包括：完整世界数据、可复现配置、`desired/world.json` 与 `deployed-world.json` 的一致快照、configRevision/digests、DST build/产物标识、MOD 发布摘要、schema、hostId/instanceId，以及秘密的受保护引用。`desired-secrets` 与 `cluster_token.txt` 不进入归档；恢复从本机受保护的 token 引用重新生成 `cluster_token.txt`。引用/文件缺失则预检阻断；Klei 已撤销或拒绝的令牌仍需用户重新生成，不能由备份校验推断令牌有效。
 
 首期明确区分两种备份模式，并在预览、metadata 和 `BackupSummary` 中返回 `captureMode` 与一致性说明：
 
 - `quasiHot`（准热备份）：不要求服务同步或停服，逐文件读取当前已落盘数据。记录开始/结束时间及文件级摘要，标记为 `onDiskBestEffort`；文件可能在采集期间变化，因此不宣称跨文件时间点一致，也不作为配置发布、更新、删除等破坏性操作的保护备份。
-- `cold`（冷备份）：保存原运行状态 → 优雅停止并确认所有目标分片停止 → 打包/校验 → 发布 backup metadata → 若原来运行则启动并验证。停止或恢复运行验证失败时，任务不能报告成功；备份数据明确标记为停服采集。
+- `cold`（冷备份）：保存原运行状态 → 优雅停止并确认所有目标分片停止 → 打包/校验 → 发布 backup metadata → 原状态为 running 时启动并验证。原状态为已核实的 degraded 时，采集完成后保持 stopped，避免恢复自动重启循环；停止或应恢复的运行状态验证失败时，任务不能报告成功；备份数据明确标记为停服采集。
 
-两种模式均检查空间、使用临时路径、生成文件清单/checksum，并校验归属、读取可用性和存档结构后才进入列表 `verified`。只有冷备份可满足需要停服一致性的保护点要求。游戏已在其他维护任务内停止时，冷备份由同一锁 owner 调用备份子阶段，不能递归再获取自己的 flock。备份操作失败时阻断下一破坏性阶段。创建任务尚无存档、首次安装等例外要记录“无已有世界”，不是任意跳过备份。
+两种模式均检查空间、使用临时路径、生成文件清单/checksum，并校验归属、读取可用性和存档结构后才进入列表 `verified`。新备份同步归档非秘密 world-config 快照，并评估配置摘要、Release staging metadata 与本机镜像；列表对历史 verified 备份重新计算 `restorability`，不把缺少依据的旧 metadata 长期显示为待确认。只有冷备份可满足需要停服一致性的保护点要求。已核实容器身份但运行退化时，冷备份会停净分片并在采集后保持停止；未知/身份不匹配仍阻断。备份操作失败时阻断下一破坏性阶段。创建任务尚无存档、首次安装等例外要记录“无已有世界”，不是任意跳过备份。
 
 备份先到临时路径，生成文件清单/checksum，校验归属、读取可用性和存档结构后才进入列表 verified。metadata 包含保护的 deployment/产物引用。若压缩、校验或重启失败，分别保留明确状态，不能把“有一个压缩包”当保护备份有效。
 
@@ -315,7 +319,7 @@ Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、ena
 ### 10.2 恢复
 
 1. 备份包含 `desired/world.json` 与 `deployed-world.json` 的非秘密配置快照。用户点击确认恢复后，命令在接纳远端任务前同步检查 backupId、原实例归属、checksum/schema/路径安全、已应用配置快照、产物可用与兼容性、空间和运行状态；检查失败不创建恢复任务。旧备份缺少快照时，仅当当前 desired/deployed 都与该备份 revision 一致才允许恢复，否则阻断。
-2. 预检通过后由持久 worker 在锁内重新检查；已核实身份但运行退化的分片先统一停服，无法确认 Docker/容器身份时阻断。解压到 staging 并验证容量、权限、摘要。不允许普通跨实例恢复。
+2. 预检通过后由持久 worker 在锁内重新检查；已核实身份但运行退化的分片先统一停服，无法确认 Docker/容器身份时阻断。解压到 staging 并验证容量、权限、摘要；恢复出的 `data/Master`、`data/Caves`、`config/Cluster_1` 递归归还 DST UID/GID 1000，目录设为 0700、普通文件 0600。不允许普通跨实例恢复。
 3. 停分片，生成当前状态保护备份。
 4. journal 记录原 data/config/active-release，将当前数据移动到受控恢复区，提交完整恢复点；每个 rename 有前置/完成证据。
 5. 同步恢复期望与已应用配置快照，并将两者 revision 及 manifest 更新为一个新的递增 configRevision；记录来源旧 revision，不将当前 revision 回退到备份数值。
@@ -327,7 +331,7 @@ Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、ena
 
 下载 task/status 与 operationId 在本地持久化，桌面退出不能承诺继续传输。重启后检查临时文件与摘要、恢复/重下该备份，不对远端世界执行任何写入。所有其他远端维护任务仍按 controller/worker 模型持续和对账。
 
-普通备份删除通过实例 target 和 expectedChecksum 绑定对象，获取主机重任务锁后复核 metadata 并原子移入删除现场，再清理归档；最新恢复前保护点不能删除，更新的保护点产生后，旧保护点允许删除。删除期间若维护锁被占用则拒绝，避免与备份/恢复并发。
+普通备份删除通过实例 target 和 expectedChecksum 绑定对象，获取主机重任务锁后复核 metadata 并原子移入删除现场，再清理归档；按 `createdAt`、再按 `backupId` 决定最新恢复前保护点，仅最新一份不能删除，更新的保护点产生后旧保护点允许删除。删除期间若维护锁被占用则拒绝，避免与备份/恢复并发。
 
 ## 11. 更新、回滚与删除
 

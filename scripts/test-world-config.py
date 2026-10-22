@@ -98,6 +98,22 @@ class WorldConfigTests(unittest.TestCase):
         self.assertEqual(result["data"]["desired"]["roomName"], "生存一服")
         self.assertEqual(result["data"]["tokenStatus"], "missing")
         self.assertIsNone(result["data"]["deployedRevision"])
+
+    def test_world_domain_revision_can_lag_global_revision_after_mod_save(self):
+        self.manifest["configRevision"] = 1
+        (self.instance / "manifest.json").write_text(json.dumps(self.manifest))
+        (self.instance / "manifest.json").chmod(0o600)
+        (self.instance / "desired" / "mods.json").write_text(json.dumps({
+            "schemaVersion": 1, "instanceId": INSTANCE, "revision": 1,
+            "mods": [{"workshopId": "123", "enabled": True, "configurationOptions": {}}],
+        }))
+        (self.instance / "desired" / "mods.json").chmod(0o600)
+        result = MODULE.get_config(self.request())
+        self.assertEqual(result["configRevision"], 1)
+        self.assertEqual(result["data"]["revision"], 0)
+        saved = MODULE.save_config(self.request("save", expectedRevision=1))
+        self.assertEqual(saved["verifiedRevision"], 2)
+        self.assertEqual(saved["data"]["revision"], 2)
         serialized = json.dumps(result).lower()
         self.assertNotIn("cluster_token", serialized)
         self.assertNotIn("server_password", serialized)

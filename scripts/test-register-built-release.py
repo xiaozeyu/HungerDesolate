@@ -83,6 +83,8 @@ class RegisterBuiltReleaseTests(unittest.TestCase):
         def docker_result(command, **_kwargs):
             if "image" in command:
                 return SimpleNamespace(returncode=0, stdout=DIGEST + "\n")
+            if "/srv/capabilities/workshop-fetch" in command[-1]:
+                return SimpleNamespace(returncode=0, stdout="steamcmd-workshop-v1\n")
             if "/bin/sh" in command:
                 return SimpleNamespace(returncode=0, stdout="build-1\n")
             return SimpleNamespace(returncode=0, stdout="")
@@ -114,6 +116,7 @@ class RegisterBuiltReleaseTests(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout=DIGEST + "\n"),
             SimpleNamespace(returncode=0, stdout="build-1\n"),
             SimpleNamespace(returncode=0, stdout="libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6\n"),
+            SimpleNamespace(returncode=0, stdout="steamcmd-workshop-v1\n"),
         ]
         with patch.object(MODULE.subprocess, "run", side_effect=responses) as run:
             MODULE.verify_image(metadata)
@@ -128,11 +131,24 @@ class RegisterBuiltReleaseTests(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout=DIGEST + "\n"),
             SimpleNamespace(returncode=0, stdout="build-1\n"),
             SimpleNamespace(returncode=0, stdout="libcurl-gnutls.so.4 => not found\n"),
+            SimpleNamespace(returncode=0, stdout="steamcmd-workshop-v1\n"),
         ]
         with patch.object(MODULE.subprocess, "run", side_effect=responses):
             with self.assertRaises(MODULE.Rejected) as failure:
                 MODULE.verify_image(metadata)
         self.assertEqual(str(failure.exception), "CREATE_RELEASE_BINARY_CHECK_FAILED")
+
+    def test_registration_requires_workshop_fetch_capability(self):
+        responses = [
+            SimpleNamespace(returncode=0, stdout=DIGEST + "\n"),
+            SimpleNamespace(returncode=0, stdout="build-1\n"),
+            SimpleNamespace(returncode=0, stdout="libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6\n"),
+            SimpleNamespace(returncode=1, stdout=""),
+        ]
+        with patch.object(MODULE.subprocess, "run", side_effect=responses):
+            with self.assertRaises(MODULE.Rejected) as failure:
+                MODULE.register(RELEASE_ID)
+        self.assertEqual(str(failure.exception), "CREATE_RELEASE_WORKSHOP_FETCH_MISSING")
 
     def test_revalidates_an_existing_unverified_catalog_entry(self):
         metadata_path = self.root / "staging" / RELEASE_ID / "release-metadata.json"
@@ -146,6 +162,8 @@ class RegisterBuiltReleaseTests(unittest.TestCase):
         def docker_result(command, **_kwargs):
             if "image" in command:
                 return SimpleNamespace(returncode=0, stdout=DIGEST + "\n")
+            if "/srv/capabilities/workshop-fetch" in command[-1]:
+                return SimpleNamespace(returncode=0, stdout="steamcmd-workshop-v1\n")
             if "/bin/sh" in command:
                 return SimpleNamespace(returncode=0, stdout="build-1\n")
             return SimpleNamespace(returncode=0, stdout="")

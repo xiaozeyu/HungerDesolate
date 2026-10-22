@@ -135,18 +135,35 @@ class SteamcmdInstallTests(unittest.TestCase):
             source = path.read_text()
             self.assertIn("COPY --chown=steam:steam install-dst.sh /home/steam/install-dst.sh", source)
             self.assertIn("RUN bash ./install-dst.sh bootstrap\nRUN bash ./install-dst.sh download", source)
+            self.assertIn("COPY --from=builder --chown=famine:famine /home/steam/steamcmd.sh", source)
+            self.assertIn("/usr/local/bin/famine-workshop-fetch", source)
+            self.assertIn("steamcmd-workshop-v1", source)
+        self.assertIn('fetch-workshop.sh" ./fetch-workshop.sh',
+                      (PROJECT / "remote-scripts/actions/build-dst-image.sh").read_text())
+        fetcher = (PROJECT / "docker/runtime/fetch-workshop.sh").read_text()
+        self.assertIn("+workshop_download_item 322330", fetcher)
+        self.assertIn('"$home_root/Steam/steamapps/workshop/content/322330/$workshop_id"', fetcher)
+        self.assertIn('"$home_root/.local/share/Steam/steamapps/workshop/content/322330/$workshop_id"', fetcher)
+        self.assertIn('output_root="$work_root/output"', fetcher)
+        self.assertIn("WORKSHOP_CONTENT_INVALID", fetcher)
         transport = (PROJECT / "src-tauri/src/image_build.rs").read_text()
         self.assertIn('include_str!("../../docker/runtime/install-dst.sh")', transport)
+        self.assertIn('include_str!("../../docker/runtime/fetch-workshop.sh")', transport)
+        self.assertIn('scripts/actions/fetch-workshop.sh', transport)
         self.assertIn('/opt/famine-hub/scripts/actions/install-dst.sh', transport)
 
     def test_release_build_uses_unique_image_tag_and_scoped_cache_cleanup(self):
         source = (PROJECT / "remote-scripts/actions/build-dst-image.sh").read_text()
         self.assertIn('BUILD_TAG="release-${RELEASE_ID}"', source)
         self.assertIn("docker buildx create --name \"$BUILDER_NAME\"", source)
+        self.assertIn('--buildkitd-config "$BUILDKIT_CONFIG"', source)
+        self.assertIn('configure-buildkit-mirrors.py', source)
         self.assertIn('docker buildx build \\\n    --builder "$BUILDER_NAME"', source)
         self.assertIn('docker buildx prune --builder "$BUILDER_NAME" --all --force', source)
         self.assertIn('docker buildx rm --force "$BUILDER_NAME"', source)
         self.assertNotIn("docker builder prune", source)
+        transport = (PROJECT / "src-tauri/src/image_build.rs").read_text()
+        self.assertIn('include_str!("../../remote-scripts/actions/configure-buildkit-mirrors.py")', transport)
 
 
 if __name__ == "__main__":

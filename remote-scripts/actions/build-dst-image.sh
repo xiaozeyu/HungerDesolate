@@ -11,11 +11,13 @@ STAGING_DIR="/var/lib/famine-hub/staging"
 RELEASE_ID="${1:-}"
 BUILDER_NAME="famine-release-${RELEASE_ID//-/}"
 BUILDER_CREATED=0
+BUILDKIT_CONFIG="/var/lib/famine-hub/buildkitd-${RELEASE_ID}.toml"
 
 cleanup_builder() {
     if [ "$BUILDER_CREATED" -eq 1 ]; then
         docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
     fi
+    sudo rm -f "$BUILDKIT_CONFIG" >/dev/null 2>&1 || true
 }
 trap cleanup_builder EXIT
 
@@ -33,23 +35,15 @@ fi
 echo 'FAMINE_BUILD_STARTED'
 echo "==> 配置 Docker 镜像加速（优化国内网络）"
 DAEMON_JSON="/etc/docker/daemon.json"
-if [ ! -f "$DAEMON_JSON" ] || ! grep -q "registry-mirrors" "$DAEMON_JSON"; then
-    echo "配置镜像加速器..."
-    sudo mkdir -p /etc/docker
-    sudo tee "$DAEMON_JSON" > /dev/null <<'EOF'
-{
-  "registry-mirrors": [
-    "https://docker.mirrors.ustc.edu.cn",
-    "https://hub-mirror.c.163.com",
-    "https://mirror.ccs.tencentyun.com"
-  ]
-}
-EOF
+mkdir -p "$BUILD_DIR"
+MIRROR_CONFIG_STATUS=$(sudo python3 "$SCRIPT_DIR/actions/configure-buildkit-mirrors.py" \
+    "$DAEMON_JSON" "$BUILDKIT_CONFIG")
+if [ "$MIRROR_CONFIG_STATUS" = "daemon-updated" ]; then
     echo "重启 Docker 服务..."
-    sudo systemctl restart docker || true
+    sudo systemctl restart docker
     sleep 5
-    echo "Docker 镜像加速配置完成"
 fi
+echo "Docker daemon 与 BuildKit 镜像源已配置"
 
 echo "==> 准备构建目录"
 mkdir -p "$BUILD_DIR"
@@ -60,6 +54,7 @@ rm -rf dst-runtime-build
 mkdir dst-runtime-build
 cd dst-runtime-build
 cp "${SCRIPT_DIR}/actions/install-dst.sh" ./install-dst.sh
+cp "${SCRIPT_DIR}/actions/fetch-workshop.sh" ./fetch-workshop.sh
 
 echo "==> 创建 Dockerfile"
 cat > Dockerfile <<'DOCKERFILE_END'
@@ -121,12 +116,18 @@ RUN groupadd -g 1000 famine && \
 
 # 复制 DST 服务端文件
 COPY --from=builder --chown=famine:famine /home/steam/dst /srv/dst
+COPY --from=builder --chown=famine:famine /home/steam/steamcmd.sh /opt/famine/steamcmd/steamcmd.sh
+COPY --from=builder --chown=famine:famine /home/steam/linux32 /opt/famine/steamcmd/linux32
+COPY --from=builder --chown=famine:famine /home/steam/package /opt/famine/steamcmd/package
+COPY --chown=famine:famine fetch-workshop.sh /usr/local/bin/famine-workshop-fetch
 
 # 设置工作目录
 WORKDIR /srv/dst/bin64
 
 # 创建必要的目录
-RUN mkdir -p /srv/config /srv/data /srv/ugc && \
+RUN chmod 0755 /usr/local/bin/famine-workshop-fetch && \
+    mkdir -p /srv/config /srv/data /srv/ugc /srv/capabilities && \
+    printf '%s\n' 'steamcmd-workshop-v1' > /srv/capabilities/workshop-fetch && \
     chown -R famine:famine /srv
 
 USER famine
@@ -139,7 +140,8 @@ echo "==> 开始构建 Docker 镜像（这可能需要 10-20 分钟）"
 IMAGE_NAME="hungerdesolate/dst-runtime"
 BUILD_TAG="release-${RELEASE_ID}"
 docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
-docker buildx create --name "$BUILDER_NAME" --driver docker-container >/dev/null
+docker buildx create --name "$BUILDER_NAME" --driver docker-container \
+    --buildkitd-config "$BUILDKIT_CONFIG" >/dev/null
 BUILDER_CREATED=1
 
 docker buildx build \
@@ -153,6 +155,10 @@ docker buildx build \
 echo "==> 获取镜像 digest"
 IMAGE_ID=$(docker inspect "${IMAGE_NAME}:${BUILD_TAG}" --format='{{.Id}}')
 IMAGE_DIGEST="sha256:${IMAGE_ID#sha256:}"
+
+echo "==> 验证固定 SteamCMD Workshop 获取能力"
+docker run --rm --network none --entrypoint /bin/sh "${IMAGE_NAME}:${BUILD_TAG}" \
+    -ec 'test -x /usr/local/bin/famine-workshop-fetch && test -s /srv/capabilities/workshop-fetch && grep -Fxq steamcmd-workshop-v1 /srv/capabilities/workshop-fetch'
 
 echo "==> 提取 DST build 版本"
 DST_BUILD=$(docker run --rm "${IMAGE_NAME}:${BUILD_TAG}" \

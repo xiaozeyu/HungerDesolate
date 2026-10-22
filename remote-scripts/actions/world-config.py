@@ -327,6 +327,7 @@ def deployed_world(instance_id, manifest, schema):
             or value.get("instanceId") != instance_id
             or type(value.get("revision")) is not int
             or not isinstance(value.get("settings"), dict)
+            or value.get("revision") > manifest.get("configRevision", -1)
             or value.get("digest") != digest(value["settings"])):
         reject("WORLD_CONFIG_STATE_INVALID")
     validate_settings(value["settings"], manifest, schema)
@@ -338,15 +339,14 @@ def load_desired(instance_id, manifest, schema):
     if desired_path.exists():
         desired = read_json(desired_path, 262144)
         if (desired.get("schemaVersion") != 1 or desired.get("instanceId") != instance_id
-                or desired.get("revision") != manifest["configRevision"]
+                or type(desired.get("revision")) is not int
+                or desired.get("revision") > manifest["configRevision"]
                 or not isinstance(desired.get("settings"), dict)
                 or not isinstance(desired.get("secrets"), dict)):
             reject("WORLD_CONFIG_STATE_INVALID")
     else:
-        if manifest.get("configRevision") != 0:
-            reject("WORLD_CONFIG_STATE_INVALID")
         desired = {"schemaVersion": 1, "instanceId": instance_id,
-                   "revision": manifest["configRevision"],
+                   "revision": 0,
                    "settings": default_settings(manifest.get("cavesEnabled") is True,
                                                 manifest.get("displayName", "")),
                    "secrets": {"tokenRef": None, "serverPasswordRef": None}}
@@ -370,7 +370,7 @@ def config_response(request, manifest, desired, token_present, password_present,
                        "instanceId": request["instanceId"]},
             "snapshotId": str(uuid.uuid4()), "capturedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "source": "remote", "freshness": "fresh", "configRevision": manifest["configRevision"],
-            "data": {"revision": manifest["configRevision"], "desired": settings,
+            "data": {"revision": desired["revision"], "desired": settings,
                      "deployed": deployed["settings"] if deployed else None,
                      "desiredDigest": digest(settings), "deployedDigest": deployed["digest"] if deployed else None,
                      "deployedRevision": deployed["revision"] if deployed else None,
@@ -678,7 +678,7 @@ def apply_config(request):
             result["requestId"] = request_id
             return result
         previous_deployed = deployed_world(instance_id, manifest, schema)
-        if (previous_deployed is not None and previous_deployed.get("revision") == expected_revision
+        if (previous_deployed is not None and previous_deployed.get("revision") == desired.get("revision")
                 and previous_deployed.get("digest") == settings_digest):
             result = {"schemaVersion": 1, "requestId": request_id,
                       "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
@@ -810,7 +810,7 @@ def apply_config(request):
             compose_command(instance, project, "create", "--force-recreate")
             if running:
                 compose_command(instance, project, "start", *sorted(running))
-            applied = {"schemaVersion": 1, "instanceId": instance_id, "revision": expected_revision,
+            applied = {"schemaVersion": 1, "instanceId": instance_id, "revision": desired["revision"],
                        "digest": settings_digest, "settings": settings,
                        "appliedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                        "runtimeVerified": False}

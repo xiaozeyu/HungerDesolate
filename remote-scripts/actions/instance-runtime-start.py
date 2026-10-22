@@ -367,7 +367,7 @@ def _start_locked(request, host_id, instance_id, instance):
     desired = read_json(instance / "desired" / "world.json", 262144)
     deployed = read_json(instance / "deployed-world.json", 262144)
     settings = desired.get("settings") if isinstance(desired, dict) else None
-    if (desired.get("revision") != revision or deployed.get("revision") != revision
+    if (desired.get("revision") != deployed.get("revision")
             or deployed.get("digest") != "sha256:" + hashlib.sha256(canonical(settings)).hexdigest()
             or desired.get("settings") != deployed.get("settings")):
         reject("INSTANCE_START_CONFIG_NOT_APPLIED")
@@ -483,7 +483,17 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
         result["maxPlayers"] = settings.get("maxPlayers")
         result["gameMode"] = settings.get("gameMode")
         result["pvp"] = settings.get("pvp")
-        result["desiredVsDeployed"] = "inSync" if deployed.get("revision") == manifest.get("configRevision") else "pending"
+        desired_path = instance / "desired" / "world.json"
+        if desired_path.exists():
+            desired = read_json(desired_path, 262144)
+            desired_settings = desired.get("settings", {})
+            desired_digest = "sha256:" + hashlib.sha256(canonical(desired_settings)).hexdigest()
+            if (desired.get("schemaVersion") != 1 or desired.get("instanceId") != instance_id
+                    or type(desired.get("revision")) is not int
+                    or desired.get("revision") > manifest.get("configRevision", 0)
+                    or not isinstance(desired_settings, dict)):
+                reject("INSTANCE_START_STATE_INVALID")
+            result["desiredVsDeployed"] = "inSync" if desired_digest == deployed.get("digest") else "pending"
     roles = ["master"] + (["caves"] if manifest["cavesEnabled"] else [])
     port_plan = manifest.get("ports", [])
     if not isinstance(port_plan, list) or len(port_plan) != (6 if manifest["cavesEnabled"] else 3):

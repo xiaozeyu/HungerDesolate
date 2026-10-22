@@ -50,12 +50,18 @@ RUN groupadd -g 1000 famine && \
 
 # 复制 DST 服务端文件
 COPY --from=builder --chown=famine:famine /home/steam/dst /srv/dst
+COPY --from=builder --chown=famine:famine /home/steam/steamcmd.sh /opt/famine/steamcmd/steamcmd.sh
+COPY --from=builder --chown=famine:famine /home/steam/linux32 /opt/famine/steamcmd/linux32
+COPY --from=builder --chown=famine:famine /home/steam/package /opt/famine/steamcmd/package
+COPY --chown=famine:famine fetch-workshop.sh /usr/local/bin/famine-workshop-fetch
 
 # 设置工作目录
 WORKDIR /srv/dst/bin64
 
 # 创建必要的目录
-RUN mkdir -p /srv/config /srv/data /srv/ugc && \
+RUN chmod 0755 /usr/local/bin/famine-workshop-fetch && \
+    mkdir -p /srv/config /srv/data /srv/ugc /srv/capabilities && \
+    printf '%s\n' 'steamcmd-workshop-v1' > /srv/capabilities/workshop-fetch && \
     chown -R famine:famine /srv
 
 USER famine

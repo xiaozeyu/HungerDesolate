@@ -622,7 +622,7 @@ pub fn get(database: &Path, request: GetRequest) -> CommandResult<WorldQueryResp
             || remote.target.server_id != request.target.server_id
             || remote.target.host_id != request.target.host_id
             || remote.target.instance_id != request.target.instance_id
-            || remote.config_revision != remote.data.revision
+            || remote.data.revision > remote.config_revision
             || remote.snapshot_id.is_empty()
             || remote.captured_at.is_empty()
             || remote.source != "remote"

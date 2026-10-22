@@ -123,20 +123,21 @@ async function refresh() {
     if (!current(ticket)) return;
     if (response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId
       || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId
-      || response.configRevision !== response.data.revision) {
+      || typeof response.configRevision !== "number" || !Number.isSafeInteger(response.configRevision)
+      || response.data.revision > response.configRevision) {
       throw new Error("世界配置响应身份或版本不匹配");
     }
-    if (baseRevision.value > response.data.revision || (data.value && data.value.revision > response.data.revision)) {
+    if (baseRevision.value > response.configRevision || (data.value && data.value.revision > response.data.revision)) {
       throw new Error("世界配置版本早于已读取结果");
     }
     data.value = response.data;
     if (!preserveDraft) {
       assignSettings(response.data.desired);
       baseDesired.value = copySettings(response.data.desired);
-      baseRevision.value = response.data.revision;
+      baseRevision.value = response.configRevision;
       tokenValue.value = "";
       passwordValue.value = "";
-    } else if (response.data.revision !== baseRevision.value) {
+    } else if (response.configRevision !== baseRevision.value) {
       error.value = { code: "REVISION_CONFLICT", message: "期望配置已被其他操作更新；本地草稿已保留，请比较后重载或重新编辑。", recoverySteps: [], field: null };
     }
     tokenStatus.value = response.data.tokenStatus;
@@ -228,7 +229,7 @@ async function save() {
     }
     data.value = response.data;
     baseDesired.value = copySettings(response.data.desired);
-    baseRevision.value = response.data.revision;
+    baseRevision.value = response.verifiedRevision;
     tokenStatus.value = response.data.tokenStatus;
     passwordStatus.value = response.data.serverPasswordStatus;
     if (draftVersion.value === version) {
@@ -251,7 +252,7 @@ async function save() {
 async function previewApply() {
   const instanceTarget=target.value,connection=server.value,config=data.value;
   if(!instanceTarget||!connection||!config||loading.value||saving.value||hasChanges.value||stale.value)return;
-  const ticketEpoch=epoch,version=draftVersion.value,revision=config.revision,requestId=crypto.randomUUID();
+  const ticketEpoch=epoch,version=draftVersion.value,revision=baseRevision.value,domainRevision=config.revision,requestId=crypto.randomUUID();
   previewBusy.value=true;error.value=null;
   try {
     const result=await previewWorldApply({
@@ -259,7 +260,7 @@ async function previewApply() {
       expectedRecordVersion: connection.recordVersion, expectedRevision: revision,
     });
     if(epoch!==ticketEpoch||draftVersion.value!==version||target.value?.instanceId!==instanceTarget.instanceId
-      ||server.value?.recordVersion!==connection.recordVersion||data.value?.revision!==revision)return;
+      ||server.value?.recordVersion!==connection.recordVersion||baseRevision.value!==revision||data.value?.revision!==domainRevision)return;
     if(result.requestId!==requestId||result.revision!==revision||result.target.serverId!==instanceTarget.serverId
       ||result.target.hostId!==instanceTarget.hostId||result.target.instanceId!==instanceTarget.instanceId)
       throw new Error("配置应用预览身份或版本不匹配");

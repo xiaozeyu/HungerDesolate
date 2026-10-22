@@ -14,6 +14,8 @@ mod instance_dto;
 mod instance_runtime;
 mod instance_task;
 mod managed_files;
+mod mod_parser;
+mod mods;
 mod persistence;
 mod registry;
 mod release_catalog;
@@ -23,6 +25,7 @@ mod server_input;
 mod ssh;
 mod ssh_dto;
 mod ssh_state;
+mod workshop;
 mod world_config;
 
 use std::{error::Error, path::PathBuf};
@@ -87,6 +90,12 @@ pub fn run() -> tauri::Result<()> {
             commands::preview_instance_delete,
             commands::delete_instance,
             commands::get_world_config,
+            commands::get_workshop_metadata,
+            commands::list_instance_mods,
+            commands::save_instance_mods,
+            commands::prepare_instance_mods,
+            commands::get_instance_mod_task,
+            commands::list_instance_mod_tasks,
             commands::save_world_config,
             commands::preview_world_apply,
             commands::apply_world_config,

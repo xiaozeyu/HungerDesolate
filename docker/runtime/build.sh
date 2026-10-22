@@ -52,6 +52,9 @@ echo "==> 提取 DST build 版本"
 DST_BUILD=$(docker run --rm "${IMAGE_NAME}:${BUILD_TAG}" \
     cat /srv/dst/version.txt 2>/dev/null || echo "unknown")
 
+docker run --rm --network none --entrypoint /bin/sh "${IMAGE_NAME}:${BUILD_TAG}" \
+    -ec 'test -x /usr/local/bin/famine-workshop-fetch && grep -Fxq steamcmd-workshop-v1 /srv/capabilities/workshop-fetch'
+
 echo "    DST Build: ${DST_BUILD}"
 
 # 生成 release 元数据

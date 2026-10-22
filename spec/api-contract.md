@@ -612,6 +612,10 @@ type GetInstanceCreationStatusResponse = {
 | preview_instance_update / previewInstanceUpdate | P | target、scope(dst/mods/both)、expectedRevision | 固定目标 build/Workshop 摘要与回滚能力 |
 | run_instance_update / runInstanceUpdate | T | target、planId、expectedRevision、operationId | 保护备份后更新预览指定的目标产物 |
 
+当前已实现的 `get_workshop_metadata` 按主机连接查询最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，分别返回期望启用、已部署启用、期望配置、产物摘要和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 已保存 desired MOD 列表，使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁；成功仅推进实例期望状态与全局 revision，不代表内容已下载、已部署或正在运行。Workshop 元数据查询不写入实例配置；用户显式选择“加入列表”后才保存。MOD 领域 revision 与世界领域 revision 各自推进，均不超过 manifest 全局 revision；领域间保存不能覆盖或强迫重写另一领域的 desired/deployed 数据。
+
+`prepare_instance_mods` 接受完整目标、全局 `expectedRevision`、`operationId` 和已启用 Workshop ID，返回持久任务。任务固定一个本地已验证、具备 `steamcmd-workshop-v1` 能力的工具镜像 digest，并单独核对/记录目标 DST Release；无符合条件的本地镜像时返回 `MOD_FETCH_CAPABILITY_UNAVAILABLE`。`get_instance_mod_task/list_instance_mod_tasks` 按完整 InstanceTarget 查询任务。成功结果包含准备好的 Workshop ID 与 contentDigest，仅表示内容固定在实例 `mods/prepared`；不表示已部署或运行。
+
 ### 7.3 备份、日志、诊断、任务
 
 | command / wrapper | 类型 | 业务输入 | 返回与要求 |
@@ -621,7 +625,7 @@ type GetInstanceCreationStatusResponse = {
 | create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；metadata 保留采集模式与运行状态 |
 | download_instance_backup / downloadInstanceBackup | T | target、backupId、operationId、本地授权 destinationHandle | SFTP 下载及本地 checksum；不允许前端随意传远端路径 |
 | restore_instance_backup / restoreInstanceBackup | T | target、backupId、expectedRevision、operationId | 用户确认恢复后，命令先同步检查归属、checksum、Release 产物、空间与运行状态；阻断时不创建任务，通过后才接纳恢复 worker；跨实例明确拒绝 |
-| delete_instance_backup / deleteInstanceBackup | M | target、expectedRevision、backupId、expectedChecksum | checksum CAS、实例归属和维护锁校验后删除普通备份；恢复前保护点禁止删除 |
+| delete_instance_backup / deleteInstanceBackup | M | target、expectedRevision、backupId、expectedChecksum | checksum CAS、实例归属和维护锁校验后删除普通备份；按 createdAt/backupId 确定最新恢复前保护点并拒绝删除，较旧保护点允许删除 |
 | read_instance_logs / readInstanceLogs | Q | target、shardKind、cursor、limit | LogPage，游标绑定 stream/target |
 | get_instance_diagnostics / getInstanceDiagnostics | Q | target | 有限健康摘要、证据、失败任务 ID、恢复入口 |
 | list_tasks / listTasks | Q | HostTarget 或 bootstrap ConnectionTaskTarget、instanceId 可选、cursor、limit | 固定目标 TaskSnapshot 分页，不依赖当前详情；合并本地下载/准备任务索引 |

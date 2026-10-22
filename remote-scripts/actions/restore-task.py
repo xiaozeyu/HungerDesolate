@@ -262,10 +262,11 @@ def rebase_world_config(desired, deployed, instance_id, backup_revision, new_rev
     deployed_settings = deployed.get("settings") if isinstance(deployed, dict) else None
     settings_digest = "sha256:" + __import__("hashlib").sha256(canonical(settings)).hexdigest()
     if (desired.get("schemaVersion") != 1 or desired.get("instanceId") != instance_id
-            or desired.get("revision") != backup_revision or not isinstance(settings, dict)
+            or type(desired.get("revision")) is not int or desired.get("revision") > backup_revision
+            or not isinstance(settings, dict)
             or not isinstance(desired.get("secrets"), dict)
             or deployed.get("schemaVersion") != 1 or deployed.get("instanceId") != instance_id
-            or deployed.get("revision") != backup_revision or deployed.get("digest") != settings_digest
+            or deployed.get("revision") != desired.get("revision") or deployed.get("digest") != settings_digest
             or deployed_settings != settings):
         reject("BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID")
     desired["revision"] = new_revision
@@ -331,8 +332,9 @@ def _worker_impl(task_id):
         else:
             restore_desired = read_json(instance / "desired" / "world.json", 262144)
             restore_deployed = read_json(instance / "deployed-world.json", 262144)
-            if (restore_desired.get("revision") != backup_revision
-                    or restore_deployed.get("revision") != backup_revision):
+            if (type(restore_desired.get("revision")) is not int
+                    or restore_desired.get("revision") != restore_deployed.get("revision")
+                    or restore_desired.get("revision") > backup_revision):
                 reject("BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING")
         new_revision = request["expectedRevision"] + 1
         restore_desired, restore_deployed = rebase_world_config(

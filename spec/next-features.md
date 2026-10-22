@@ -8,7 +8,19 @@
 
 用户已确认应用创建并启动的 DST 专服容器可以正常运行、进入游戏并游玩。概览实时运行状态、DST build、UDP 端口采集与重新进入刷新，以及 Release 基础验证放行和按 Release 隔离镜像已接入。该结果证明当前单实例主路径可用；三实例隔离、外网/LAN/Steam 全路径、断线/主机重启和恢复仍需阶段 0 验收。
 
+## 0.1 2026-10-22 恢复故障诊断
+
+用户提供的 Master/Caves 日志显示两项独立启动条件失败：游戏运行用户不能写入恢复后的 `Cluster_1` 配置目录；DST 同时报告 `E_INVALID_TOKEN` / `No auth token could be found`。恢复实现现将归档目录和文件改为运行用户 UID/GID 1000 所有并使用可写私有权限；`cluster_token.txt` 不从归档读取，而按备份期望配置中的 token 引用从本机受保护的 `desired-secrets` 重新生成。若本机 token 引用或文件缺失，恢复预检阻断。日志已经证明当前令牌被 Klei 拒绝，用户需要重新生成并通过应用更新令牌后再验证；自动恢复不能让失效令牌变有效。
+
+已核实身份但 Master/Caves 处于退化状态时，冷备份先停净分片并在采集后保持停服；恢复也保持停服，避免旧的自动重启策略形成循环。该行为尚未在用户 Linux amd64 主机复验。
+
 ## 1. 当前可用与本轮修复
+
+2026-10-22 开始 MOD 管理实现：新增受限 `modinfo.lua` 求值器、实例 MOD 只读查询和真实 MOD 页面。求值器使用目标游戏兼容的 Lua 5.1 运行时，注入 `folder_name`、`locale`、`ChooseTranslationTable`，限制源码大小、内存、指令和表结构；执行失败、确实无配置项、产物未准备和部分字段不支持分别返回。远端查询只读取当前实例的 `desired/mods.json`、`deployed-mods.json`、活动 MOD 产物和 manifest，所有请求绑定完整 `InstanceTarget`。本轮没有实现 Workshop 搜索、下载、保存配置、应用、更新或删除，MOD 页面不显示示例数据。
+
+随后新增 Workshop 元数据查询、实例期望列表保存和启用/禁用/移除控制：保存使用实例锁、全局 configRevision CAS、operationId 重放和 pending journal 恢复，不修改活动 UGC。跨领域 revision 允许世界领域版本落后于全局版本，并按 world desired/deployed digest 判断一致性。
+
+新增 MOD 内容准备任务：固定 Release 镜像携带 SteamCMD fetch wrapper 和 `steamcmd-workshop-v1` 能力标记；准备任务从本地已验证 Release 中选工具镜像，并单独绑定目标实例活动 DST Release。远端持久任务以隔离 Docker 容器下载，校验内容后把产物改为 root 管理、只读目录树（目录 `0555`、文件 `0444`、manifest `0600`）；MOD 探针逐级验证 owner/mode、拒绝符号链接并以 `O_NOFOLLOW` 读取，固定摘要不存在时不回退其他版本。对照原项目后修正 SteamCMD HOME 缓存发现：wrapper 覆盖 SteamCMD 安装目录与 HOME 下常见 Steam 缓存布局，并支持 modinfo 位于条目子目录；对应脚本模拟测试通过。该 wrapper 已打包在 Release 镜像内，需重新构建 Release 才能用于后续准备任务。MOD 页可监视后台任务并在完成后读取配置 schema。没有能力镜像时明确阻断。Release 构建现将 daemon registry mirrors 显式传给专属 BuildKit builder，并原子合并 daemon.json 设置；仍需真实 Linux 主机验证镜像源可达。SteamCMD 匿名下载和真实 Workshop 样本仍须实机验收；配置编辑、更新检查、应用发布和删除仍待实现。
 
 已实现独立桌面工程、主机记录增删改、SSH 指纹扫描/确认、系统凭据库接口、登录验证、固定 host.json 只读发现，以及两层导航和部分查询/任务隔离基础。
 
@@ -59,7 +71,7 @@ B3 必须先于安装/恢复等长任务成熟。现有 task reducer 和本地�
 | 顺序 | 功能 | 关键交付/验收 |
 | --- | --- | --- |
 | C1 | 世界配置 | 基础/联机字段、Master/Caves DST 选项、期望配置 CAS 保存与应用影响预览已实现；实际 apply 仍由备份与配置发布任务阻断，待实现保护备份、渲染、发布和运行验证。洞穴拓扑只读，拓扑变更需专门迁移并保留存档 |
-| C2 | 备份与恢复（代码闭环已接入，实机验收待做） | 冷备份/准热备份、SFTP 断点下载、本机 checksum 与原子发布、已应用世界配置快照、恢复前点击门禁、恢复保护点/提交/回滚、中断对账和普通备份删除已接入；新备份会核验已应用世界配置和 Release 后标记恢复能力。旧备份只在当前已应用配置 revision 与备份 revision 一致时兼容恢复；仅最新恢复前保护点不可删除，后续保护点建立后旧保护点可清理。拒绝跨实例恢复；Linux amd64 磁盘满、checksum 错误、错误实例、停服/重启失败、强制中断、SSH/桌面重启等实机验收完成前，不开放现存存档世界配置应用 |
+| C2 | 备份与恢复（代码闭环已接入，Linux 实机故障验收未通过） | 冷备份/准热备份、SFTP 断点下载、本机 checksum 与原子发布、已应用世界配置快照、恢复前点击门禁、保护点/提交/回滚、中断对账和普通备份删除已接入。列表会复核既有备份的 checksum、配置快照、Release 产物和镜像并更新恢复能力；仅最新恢复前保护点不可删除。旧备份仅当当前已应用配置 revision 与备份 revision 一致时兼容恢复。已加入 UID/GID 1000 权限修复和本机受保护令牌引用重建；实机日志仍显示 `E_INVALID_TOKEN`，需更新 Klei 令牌后复测。拒绝跨实例恢复；磁盘满、checksum 错误、错误实例、停服/重启失败、强制中断、SSH/桌面重启等 Linux amd64 实机验收完成前，不开放现存存档世界配置应用 |
 | C3 | MOD 管理 | Workshop 元数据、实例启用/配置、受限 Lua 解析、检查更新、staging 下载/应用、分片 UGC 一致性 |
 | C4 | DST/MOD 更新 | 固定目标版本、保护备份、发布切换、实际版本验证与完整恢复点回滚 |
 | C5 | 日志与诊断 | 有界分片日志/游标、脱敏、健康摘要、失败任务证据与恢复入口 |

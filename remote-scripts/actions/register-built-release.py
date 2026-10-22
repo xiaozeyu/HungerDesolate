@@ -127,6 +127,12 @@ def verify_image(metadata):
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, timeout=30, check=False, env=environment,
         )
+        workshop_check = subprocess.run(
+            ["docker", "run", "--rm", "--network", "none", "--entrypoint", "/bin/sh", image_id,
+             "-ec", "test -x /usr/local/bin/famine-workshop-fetch && cat /srv/capabilities/workshop-fetch"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=30, check=False, env=environment,
+        )
     except FileNotFoundError:
         reject("CREATE_DOCKER_UNAVAILABLE")
     except subprocess.TimeoutExpired:
@@ -135,6 +141,8 @@ def verify_image(metadata):
         reject("CREATE_RELEASE_BUILD_MISMATCH")
     if binary_check.returncode != 0 or "not found" in binary_check.stdout:
         reject("CREATE_RELEASE_BINARY_CHECK_FAILED")
+    if workshop_check.returncode != 0 or workshop_check.stdout.strip() != "steamcmd-workshop-v1":
+        reject("CREATE_RELEASE_WORKSHOP_FETCH_MISSING")
 
 
 def write_catalog(value):

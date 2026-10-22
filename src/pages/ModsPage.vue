@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { RefreshCw } from "@lucide/vue";
+import { Pencil, RefreshCw, RotateCcw } from "@lucide/vue";
 import AppDialog from "../components/AppDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
@@ -15,6 +15,14 @@ import { normalizeWorkshopIds } from "../lib/workshopInput";
 import { createSerialQueue } from "../lib/serialQueue";
 import { useTasks } from "../composables/useTasks";
 import type { TaskSnapshot } from "../types/contracts";
+import {
+  cloneConfiguration,
+  groupModFields,
+  mergeChangedConfiguration,
+  sameJsonValue,
+  validateChangedConfiguration,
+} from "../lib/modConfiguration";
+import type { ModFieldGroup } from "../lib/modConfiguration";
 
 const workspace = useWorkspace();
 const { server, target, instanceName } = usePageTarget();
@@ -32,6 +40,16 @@ const workshopError = ref("");
 const savingWorkshopId = ref<string | null>(null);
 const prepareTask = ref<TaskSnapshot | null>(null);
 const taskError = ref("");
+const configEditorOpen = ref(false);
+const editingMod = ref<InstanceModSummary | null>(null);
+const configBase = ref<Record<string, unknown>>({});
+const configFieldGroups = computed(() => editingMod.value
+  ? groupModFields(editingMod.value.schema, configBase.value) : []);
+const configDraft = ref<Record<string, unknown>>({});
+const configChangedFields = ref<string[]>([]);
+const configOptionSelection = ref<Record<string, string>>({});
+const configError = ref("");
+const configSaving = ref(false);
 let epoch = 0;
 let sequence = 0;
 let latestRequestId = "";
@@ -100,6 +118,9 @@ function resetContext() {
   addOpen.value = false;
   prepareTask.value = null;
   taskError.value = "";
+  configEditorOpen.value = false;
+  editingMod.value = null;
+  configSaving.value = false;
   if (taskPollTimer) clearTimeout(taskPollTimer);
   taskPollTimer = undefined;
 }
@@ -181,6 +202,151 @@ async function addWorkshopItem(item: WorkshopItem) {
     if (epoch === savedEpoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget
       && server.value?.recordVersion === savedRecordVersion) savingWorkshopId.value = null;
+  }
+}
+
+function canEditConfiguration(item: InstanceModSummary) {
+  return item.desiredEnabled !== null && !!item.preparedDigest
+    && (item.schema.status === "available" || item.schema.status === "partial")
+    && item.schema.fields.length > 0;
+}
+
+function openConfigurationEditor(item: InstanceModSummary) {
+  if (!canEditConfiguration(item)) {
+    error.value = "此 MOD 没有可编辑的配置项";
+    return;
+  }
+  editingMod.value = item;
+  configBase.value = cloneConfiguration(item.desiredConfiguration);
+  configDraft.value = {};
+  configChangedFields.value = [];
+  configError.value = "";
+  const selections: Record<string, string> = {};
+  for (const group of configFieldGroups.value) {
+    if (group.control !== "choice") continue;
+    const hasValue = Object.hasOwn(configBase.value, group.name);
+    const current = hasValue ? configBase.value[group.name] : group.hasDefault ? group.defaultValue : undefined;
+    const index = group.options.findIndex(option => sameJsonValue(option.value, current));
+    selections[group.name] = index < 0 ? (hasValue ? "__unmapped__" : "") : String(index);
+  }
+  configOptionSelection.value = selections;
+  configEditorOpen.value = true;
+}
+
+function fieldValueMismatch(group: ModFieldGroup) {
+  if (!Object.hasOwn(configBase.value, group.name)) return false;
+  const current = configBase.value[group.name];
+  if (group.control === "choice") return !group.options.some(option => sameJsonValue(option.value, current));
+  return group.control === "boolean" ? typeof current !== "boolean"
+    : group.control === "number" ? typeof current !== "number" || !Number.isFinite(current)
+      : group.control === "text" ? typeof current !== "string" : true;
+}
+
+function scalarFieldValue(group: ModFieldGroup): string | number | boolean {
+  if (Object.hasOwn(configDraft.value, group.name)) return configDraft.value[group.name] as string | number | boolean;
+  const current = configBase.value[group.name];
+  if (!fieldValueMismatch(group) && Object.hasOwn(configBase.value, group.name)) return current as string | number | boolean;
+  if (group.hasDefault && (typeof group.defaultValue === "string" || typeof group.defaultValue === "number"
+    || typeof group.defaultValue === "boolean")) return group.defaultValue;
+  return group.control === "boolean" ? false : "";
+}
+
+function markConfigurationChanged(name: string) {
+  if (!configChangedFields.value.includes(name)) configChangedFields.value = [...configChangedFields.value, name];
+}
+
+function updateOptionSelection(group: ModFieldGroup, value: string) {
+  configOptionSelection.value = { ...configOptionSelection.value, [group.name]: value };
+  markConfigurationChanged(group.name);
+  const index = Number(value);
+  if (value === "" || !Number.isInteger(index) || index < 0 || index >= group.options.length) {
+    const draft = { ...configDraft.value };
+    delete draft[group.name];
+    configDraft.value = draft;
+    return;
+  }
+  configDraft.value = { ...configDraft.value, [group.name]: group.options[index]!.value };
+}
+
+function updateScalarField(group: ModFieldGroup, event: Event) {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement)) return;
+  const value: unknown = group.control === "boolean" ? input.checked
+    : group.control === "number" ? input.value === "" ? "" : Number(input.value)
+      : input.value;
+  configDraft.value = { ...configDraft.value, [group.name]: value };
+  markConfigurationChanged(group.name);
+}
+
+function resetConfigurationField(group: ModFieldGroup) {
+  const draft = { ...configDraft.value };
+  delete draft[group.name];
+  configDraft.value = draft;
+  markConfigurationChanged(group.name);
+  if (group.options.length > 0) {
+    const index = group.hasDefault
+      ? group.options.findIndex(option => sameJsonValue(option.value, group.defaultValue)) : -1;
+    configOptionSelection.value = { ...configOptionSelection.value, [group.name]: index < 0 ? "" : String(index) };
+  }
+}
+
+const configValidationError = computed(() => editingMod.value
+  ? validateChangedConfiguration(editingMod.value.schema, configBase.value, configDraft.value, configChangedFields.value)
+  : null);
+
+async function saveConfiguration() {
+  const connection = server.value;
+  const instanceTarget = target.value;
+  const item = editingMod.value;
+  const expectedRevision = revision.value;
+  if (!connection || !instanceTarget || !item || expectedRevision === null || workspace.preview.value
+      || configSaving.value || configChangedFields.value.length === 0 || configValidationError.value) return;
+  if (!item.preparedDigest || !item.modinfoSha256) {
+    configError.value = "固定 MOD 产物或配置摘要不可用，请刷新后重试";
+    return;
+  }
+  const requestId = crypto.randomUUID();
+  const operationId = crypto.randomUUID();
+  const savedEpoch = epoch;
+  const savedTarget = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  const savedRecordVersion = connection.recordVersion;
+  const nextConfiguration = mergeChangedConfiguration(configBase.value, configDraft.value, configChangedFields.value);
+  const existing = items.value.filter(current => current.desiredEnabled !== null).map(current => ({
+    workshopId: current.workshopId,
+    enabled: current.desiredEnabled === true,
+    configurationOptions: current.workshopId === item.workshopId
+      ? nextConfiguration : current.desiredConfiguration ?? {},
+    artifactDigest: current.workshopId === item.workshopId
+      ? item.preparedDigest : current.artifactDigest,
+  }));
+  configSaving.value = true;
+  configError.value = "";
+  try {
+    const response = await queueSsh(() => saveInstanceMods({
+      schemaVersion: 1, requestId, target: instanceTarget, expectedRecordVersion: savedRecordVersion,
+      expectedRevision, operationId, mods: existing,
+      schemaBindings: [{ workshopId: item.workshopId, artifactDigest: item.preparedDigest!,
+        modinfoSha256: item.modinfoSha256!, changedFields: [...configChangedFields.value].sort() }],
+    }));
+    if (savedEpoch !== epoch || target.value === null
+      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== savedTarget
+      || server.value?.recordVersion !== savedRecordVersion) return;
+    if (response.schemaVersion !== 1 || response.requestId !== requestId || response.operationId !== operationId
+      || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
+      || response.target.instanceId !== instanceTarget.instanceId || response.verifiedRevision <= expectedRevision) {
+      throw new Error("MOD 配置保存响应身份或版本不匹配");
+    }
+    configEditorOpen.value = false;
+    editingMod.value = null;
+    await refresh();
+  } catch (cause) {
+    if (savedEpoch === epoch && target.value
+      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget
+      && server.value?.recordVersion === savedRecordVersion) configError.value = describeError(cause).message;
+  } finally {
+    if (savedEpoch === epoch && target.value
+      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget
+      && server.value?.recordVersion === savedRecordVersion) configSaving.value = false;
   }
 }
 
@@ -374,8 +540,12 @@ onBeforeUnmount(() => { if (taskPollTimer) clearTimeout(taskPollTimer); });
               <button v-if="item.desiredEnabled === true && !item.preparedDigest" class="text-button"
                 :disabled="workspace.preview.value || savingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status)"
                 @click="prepareMod(item)">{{ taskIncludesWorkshop(prepareTask, item.workshopId) && prepareTask?.status === 'running' ? '准备中…' : '准备内容' }}</button>
-              <span v-else-if="item.preparedDigest" class="muted-text">固定内容</span>
+              <span v-if="item.preparedDigest" class="muted-text">固定内容</span>
               <span v-else class="muted-text">启用后可准备</span>
+              <button v-if="canEditConfiguration(item)" class="icon-button" type="button"
+                :aria-label="`编辑 ${item.schema.metadata.name ?? item.workshopId} 配置`"
+                title="编辑配置" :disabled="workspace.preview.value || configSaving || loading"
+                @click="openConfigurationEditor(item)"><Pencil :size="15"/></button>
             </td>
           </tr>
         </tbody>
@@ -414,6 +584,54 @@ onBeforeUnmount(() => { if (taskPollTimer) clearTimeout(taskPollTimer); });
       <template #footer>
         <button class="button" type="button" @click="addOpen = false">关闭</button>
         <button class="button primary" type="button" :disabled="workshopBusy || workspace.preview.value" @click="resolveWorkshop">{{ workshopBusy ? '查询中…' : '查询' }}</button>
+      </template>
+    </AppDialog>
+
+    <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod?.schema.metadata.name ?? editingMod?.workshopId ?? ''}`">
+      <div v-if="editingMod" class="mod-config-editor">
+        <div class="mod-config-meta">
+          <span class="mono">{{ editingMod.workshopId }}</span>
+          <span>{{ editingMod.schema.metadata.version ?? '版本未知' }}</span>
+          <span class="mono">{{ editingMod.preparedDigest?.slice(0, 12) }}</span>
+        </div>
+        <div v-for="group in configFieldGroups" :key="group.name" class="mod-config-field">
+          <div class="mod-config-field-heading">
+            <label :for="`mod-config-${group.name}`">{{ group.label }}<span v-if="group.shared" class="mod-config-shared">共用</span></label>
+            <button v-if="group.control !== 'unsupported'" class="icon-button" type="button"
+              :aria-label="`恢复 ${group.label} 的 MOD 默认值`" title="恢复 MOD 默认值"
+              :disabled="configSaving || !configChangedFields.includes(group.name) && !Object.hasOwn(configBase, group.name)"
+              @click="resetConfigurationField(group)"><RotateCcw :size="14"/></button>
+          </div>
+          <select v-if="group.control === 'choice'" :id="`mod-config-${group.name}`"
+            :value="configOptionSelection[group.name] ?? ''" :disabled="configSaving"
+            @change="updateOptionSelection(group, ($event.target as HTMLSelectElement).value)">
+            <option v-if="configOptionSelection[group.name] === '__unmapped__'" value="__unmapped__" disabled>当前值不在此版本选项中</option>
+            <option value="">使用 MOD 默认值</option>
+            <option v-for="(option, index) in group.options" :key="index" :value="String(index)" :title="option.hover ?? undefined">
+              {{ option.label }}
+            </option>
+          </select>
+          <label v-else-if="group.control === 'boolean'" class="mod-config-toggle" :for="`mod-config-${group.name}`">
+            <input :id="`mod-config-${group.name}`" type="checkbox" :checked="scalarFieldValue(group) === true"
+              :disabled="configSaving" @change="updateScalarField(group, $event)" />
+            <span>{{ scalarFieldValue(group) === true ? '开启' : '关闭' }}</span>
+          </label>
+          <input v-else-if="group.control === 'number'" :id="`mod-config-${group.name}`" type="number" step="any"
+            :value="scalarFieldValue(group)" :disabled="configSaving" @input="updateScalarField(group, $event)" />
+          <input v-else-if="group.control === 'text'" :id="`mod-config-${group.name}`" type="text"
+            :value="scalarFieldValue(group)" :disabled="configSaving" @input="updateScalarField(group, $event)" />
+          <div v-else class="mod-config-unsupported">{{ group.issue ?? group.fields[0]?.reason ?? '此配置项的类型无法安全编辑' }}</div>
+          <small v-if="group.hover" class="mod-config-hover">{{ group.hover }}</small>
+          <small v-if="fieldValueMismatch(group)" class="mod-config-warning">当前保存值与此版本可选值不匹配；保存其他项不会覆盖它</small>
+        </div>
+      </div>
+      <div v-if="configError" class="error-strip">{{ configError }}</div>
+      <div v-if="configValidationError" class="error-strip">{{ configValidationError }}</div>
+      <template #footer>
+        <button class="button" type="button" :disabled="configSaving" @click="configEditorOpen = false">取消</button>
+        <button class="button primary" type="button"
+          :disabled="configSaving || workspace.preview.value || configChangedFields.length === 0 || !!configValidationError"
+          @click="saveConfiguration">{{ configSaving ? '保存中…' : '保存配置' }}</button>
       </template>
     </AppDialog>
   </div>

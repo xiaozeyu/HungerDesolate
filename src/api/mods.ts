@@ -13,6 +13,7 @@ export function saveInstanceMods(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
   expectedRevision: number; operationId: string;
   mods: { workshopId: string; enabled: boolean; configurationOptions: Record<string, unknown>; artifactDigest: string | null }[];
+  schemaBindings?: { workshopId: string; artifactDigest: string; modinfoSha256: string; changedFields: string[] }[];
 }): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; operationId: string; verifiedRevision: number; data: { revision: number; mods: unknown[] }; invalidate: unknown[] }> {
   return call("save_instance_mods", request);
 }

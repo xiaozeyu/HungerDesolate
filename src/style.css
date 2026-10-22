@@ -73,6 +73,18 @@ td { padding: var(--space-4) var(--space-2); border-bottom: 1px solid var(--bord
 .mod-task-state > div { display: grid; gap: var(--space-1); min-width: 0; }
 .mod-task-state > div > span { color: var(--text-secondary); font-size: 12px; }
 .mod-task-state > div > .task-failure-detail { color: var(--danger); }
+.mod-config-editor { display: grid; gap: var(--space-4); }
+.mod-config-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); color: var(--text-secondary); font-size: 12px; padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
+.mod-config-field { display: grid; gap: var(--space-2); min-width: 0; }
+.mod-config-field-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.mod-config-field-heading label { font-size: 13px; font-weight: 550; }
+.mod-config-shared { margin-left: var(--space-2); color: var(--text-secondary); font-size: 11px; font-weight: 400; }
+.mod-config-field .icon-button { width: 28px; height: 28px; }
+.mod-config-toggle { display: flex; align-items: center; gap: var(--space-2); min-height: 36px; font-size: 13px; }
+.mod-config-toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+.mod-config-hover, .mod-config-unsupported, .mod-config-warning { color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.mod-config-warning { color: var(--warning); }
+.mod-config-unsupported { padding: var(--space-2) 0; }
 .list-sync-meta { display:flex; flex-wrap:wrap; gap:var(--space-4); margin-bottom:var(--space-4); color:var(--text-secondary); font-size:12px; }
 .muted-text { color: var(--text-secondary); } .identity-strip { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-6); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: var(--space-4) 0; margin-bottom: var(--space-8); }
 .identity-strip>div { display: grid; gap: var(--space-1); } .identity-strip strong { font-size: 13px; } .label { color: var(--text-tertiary); font-size: 12px; }

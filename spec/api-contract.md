@@ -603,7 +603,7 @@ type GetInstanceCreationStatusResponse = {
 | get_workshop_metadata / getWorkshopMetadata | Q/global | workshopIds[] | 元数据；上限 100，不需要实例，不含启用状态 |
 | search_workshop / searchWorkshop | Q/global | query、cursor、limit | 元数据搜索，外部来源能力待验证，失败允许手工输入 ID |
 | list_instance_mods / listInstanceMods | Q | target | InstanceMods |
-| save_instance_mods / saveInstanceMods | M | target、desiredMods[]、expectedRevision、operationId | 保存实例期望配置；去重及配置结构校验 |
+| save_instance_mods / saveInstanceMods | M | target、desiredMods[]、expectedRevision、operationId；编辑配置时附带 schemaBindings[] | CAS 保存实例期望配置；编辑字段绑定固定 contentDigest 与 modinfoSha256，后端复读当前 schema 并校验值与变更字段 |
 | check_instance_mod_updates / checkInstanceModUpdates | Q | target | 只检查；有目标和请求顺序，失败保留最后检查时间 |
 | preview_mods_apply / previewModsApply | P | target、expectedRevision | 实际差异、下载、停服、保护备份 |
 | apply_instance_mods / applyInstanceMods | T | target、planId、expectedRevision、operationId | staging → 部署 → 运行验证 |
@@ -612,7 +612,7 @@ type GetInstanceCreationStatusResponse = {
 | preview_instance_update / previewInstanceUpdate | P | target、scope(dst/mods/both)、expectedRevision | 固定目标 build/Workshop 摘要与回滚能力 |
 | run_instance_update / runInstanceUpdate | T | target、planId、expectedRevision、operationId | 保护备份后更新预览指定的目标产物 |
 
-当前已实现的 `get_workshop_metadata` 按主机连接查询最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，分别返回期望启用、已部署启用、期望配置、产物摘要和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 已保存 desired MOD 列表，使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁；成功仅推进实例期望状态与全局 revision，不代表内容已下载、已部署或正在运行。Workshop 元数据查询不写入实例配置；用户显式选择“加入列表”后才保存。MOD 领域 revision 与世界领域 revision 各自推进，均不超过 manifest 全局 revision；领域间保存不能覆盖或强迫重写另一领域的 desired/deployed 数据。
+当前已实现的 `get_workshop_metadata` 按主机连接查询最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，分别返回期望启用、已部署启用、期望配置、产物摘要和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁。配置编辑请求的 `schemaBindings[]` 结构为 `{ workshopId, artifactDigest, modinfoSha256, changedFields[] }`；Rust 在 revision 未变化时重新读取实例快照，复求当前 schema，校验绑定摘要、可编辑字段、枚举候选值与基础类型，并确认未声明字段保持原值。游戏侧以 `name` 持久化配置，同名项会作为共享字段编辑；同名定义的共同候选集/类型由前后端共同校验，无法安全合并的组只读而不阻断其他字段。revision 已变化时由远端操作回执优先支持同一 operationId 幂等重放，新的过期操作仍由 CAS 拒绝。编辑保存会固定当前已准备 contentDigest，成功仅推进实例期望状态与全局 revision，不代表内容已部署或正在运行。配置表单只提交实际修改的字段；复杂/不支持字段与未知旧值保留不变。Workshop 元数据查询不写入实例配置；用户显式选择“加入列表”后才保存。MOD 领域 revision 与世界领域 revision 各自推进，均不超过 manifest 全局 revision；领域间保存不能覆盖或强迫重写另一领域的 desired/deployed 数据。
 
 `prepare_instance_mods` 接受完整目标、全局 `expectedRevision`、`operationId` 和已启用 Workshop ID，返回持久任务。任务固定一个本地已验证、具备 `steamcmd-workshop-v1` 能力的工具镜像 digest，并单独核对/记录目标 DST Release；无符合条件的本地镜像时返回 `MOD_FETCH_CAPABILITY_UNAVAILABLE`。`get_instance_mod_task/list_instance_mod_tasks` 按完整 InstanceTarget 查询任务。成功结果包含准备好的 Workshop ID 与 contentDigest，仅表示内容固定在实例 `mods/prepared`；不表示已部署或运行。
 

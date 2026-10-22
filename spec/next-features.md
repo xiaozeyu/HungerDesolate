@@ -20,7 +20,9 @@
 
 随后新增 Workshop 元数据查询、实例期望列表保存和启用/禁用/移除控制：保存使用实例锁、全局 configRevision CAS、operationId 重放和 pending journal 恢复，不修改活动 UGC。跨领域 revision 允许世界领域版本落后于全局版本，并按 world desired/deployed digest 判断一致性。
 
-新增 MOD 内容准备任务：固定 Release 镜像携带 SteamCMD fetch wrapper 和 `steamcmd-workshop-v1` 能力标记；准备任务从本地已验证 Release 中选工具镜像，并单独绑定目标实例活动 DST Release。远端持久任务以隔离 Docker 容器下载，校验内容后把产物改为 root 管理、只读目录树（目录 `0555`、文件 `0444`、manifest `0600`）；MOD 探针逐级验证 owner/mode、拒绝符号链接并以 `O_NOFOLLOW` 读取，固定摘要不存在时不回退其他版本。对照原项目后修正 SteamCMD HOME 缓存发现：wrapper 覆盖 SteamCMD 安装目录与 HOME 下常见 Steam 缓存布局，并支持 modinfo 位于条目子目录；对应脚本模拟测试通过。该 wrapper 已打包在 Release 镜像内，需重新构建 Release 才能用于后续准备任务。MOD 页可监视后台任务并在完成后读取配置 schema。没有能力镜像时明确阻断。Release 构建现将 daemon registry mirrors 显式传给专属 BuildKit builder，并原子合并 daemon.json 设置；仍需真实 Linux 主机验证镜像源可达。SteamCMD 匿名下载和真实 Workshop 样本仍须实机验收；配置编辑、更新检查、应用发布和删除仍待实现。
+新增 MOD 内容准备任务：固定 Release 镜像携带 SteamCMD fetch wrapper 和 `steamcmd-workshop-v1` 能力标记；准备任务从本地已验证 Release 中选工具镜像，并单独绑定目标实例活动 DST Release。远端持久任务以隔离 Docker 容器下载，校验内容后把产物改为 root 管理、只读目录树（目录 `0555`、文件 `0444`、manifest `0600`）；MOD 探针逐级验证 owner/mode、拒绝符号链接并以 `O_NOFOLLOW` 读取，固定摘要不存在时不回退其他版本。对照原项目后修正 SteamCMD HOME 缓存发现：wrapper 覆盖 SteamCMD 安装目录与 HOME 下常见 Steam 缓存布局，并支持 modinfo 位于条目子目录；对应脚本模拟测试通过。该 wrapper 已打包在 Release 镜像内，需重新构建 Release 才能用于后续准备任务。MOD 页可监视后台任务并在完成后读取配置 schema。没有能力镜像时明确阻断。Release 构建现将 daemon registry mirrors 显式传给专属 BuildKit builder，并原子合并 daemon.json 设置；仍需真实 Linux 主机验证镜像源可达。SteamCMD 匿名下载和真实 Workshop 样本仍须实机验收。
+
+随后新增 MOD 配置编辑/保存：按 schema 提供枚举、布尔、数字和字符串控件，复杂字段只读；同名字段按游戏的 name 键合并为共享控件，冲突字段组只读且不阻断其余配置；仅提交变更字段，保留未知旧配置。Rust 保存前重新读取目标实例快照并复求 schema，校验 artifactDigest、modinfoSha256、字段和值，再通过现有 CAS/idempotency 保存 desired。成功固定该 MOD 的 contentDigest 并保持“待应用”，不修改活动 UGC。MOD 内容真实下载已由用户在主机上验收；配置编辑代码与本地校验已通过，待该主机联调。MOD 更新检查、预览/应用发布、分片 UGC 一致性和删除仍待实现。
 
 已实现独立桌面工程、主机记录增删改、SSH 指纹扫描/确认、系统凭据库接口、登录验证、固定 host.json 只读发现，以及两层导航和部分查询/任务隔离基础。
 

@@ -108,6 +108,17 @@ pub struct SaveRequest {
     pub expected_revision: u64,
     pub operation_id: String,
     pub mods: Vec<DesiredMod>,
+    #[serde(default)]
+    pub schema_bindings: Vec<ModSchemaBinding>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModSchemaBinding {
+    pub workshop_id: String,
+    pub artifact_digest: String,
+    pub modinfo_sha256: String,
+    pub changed_fields: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -458,6 +469,253 @@ fn schema_for(item: &RemoteItem) -> CommandResult<(ModSchema, Option<String>)> {
     Ok((schema, Some(artifact.source_sha256.clone())))
 }
 
+fn validate_schema_bindings(session: &Session, request: &SaveRequest) -> CommandResult<()> {
+    if request.schema_bindings.is_empty() {
+        return Ok(());
+    }
+    if request.schema_bindings.len() > 50 {
+        return Err(error(
+            "MOD_SCHEMA_BINDING_INVALID",
+            "MOD 配置绑定数量超出限制",
+        ));
+    }
+    let snapshot_request_id = uuid::Uuid::new_v4().to_string();
+    let response = invoke(
+        session,
+        &serde_json::json!({
+            "schemaVersion": 1,
+            "requestId": snapshot_request_id,
+            "serverId": request.target.server_id,
+            "hostId": request.target.host_id,
+            "instanceId": request.target.instance_id,
+        }),
+    )?;
+    let snapshot: RemoteResponse = serde_json::from_value(response)
+        .map_err(|_| error("MOD_PROTOCOL_INVALID", "MOD 配置校验快照无效"))?;
+    if snapshot.request_id != snapshot_request_id
+        || snapshot.target.server_id != request.target.server_id
+        || snapshot.target.host_id != request.target.host_id
+        || snapshot.target.instance_id != request.target.instance_id
+    {
+        return Err(error("MOD_PROTOCOL_INVALID", "MOD 配置校验快照目标不匹配"));
+    }
+    if snapshot.config_revision != request.expected_revision {
+        // Let the save controller replay an existing operation receipt before
+        // applying CAS. A new stale operation is still rejected there.
+        return Ok(());
+    }
+
+    let mut bound_ids = std::collections::HashSet::new();
+    for binding in &request.schema_bindings {
+        if !binding
+            .workshop_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            || binding.workshop_id.is_empty()
+            || binding.workshop_id.len() > 20
+            || !is_sha256(&binding.artifact_digest)
+            || !is_sha256(&binding.modinfo_sha256)
+            || binding.changed_fields.is_empty()
+            || binding.changed_fields.len() > 256
+            || !bound_ids.insert(binding.workshop_id.as_str())
+        {
+            return Err(error(
+                "MOD_SCHEMA_BINDING_INVALID",
+                "MOD 配置与固定产物绑定无效",
+            ));
+        }
+        let requested = request
+            .mods
+            .iter()
+            .find(|item| item.workshop_id == binding.workshop_id)
+            .ok_or_else(|| {
+                error(
+                    "MOD_SCHEMA_BINDING_INVALID",
+                    "配置绑定的 MOD 不在保存列表中",
+                )
+            })?;
+        if requested.artifact_digest.as_deref() != Some(binding.artifact_digest.as_str()) {
+            return Err(error(
+                "MOD_SCHEMA_BINDING_INVALID",
+                "保存请求未固定到正在编辑的 MOD 产物",
+            ));
+        }
+        let current = snapshot
+            .items
+            .iter()
+            .find(|item| item.workshop_id == binding.workshop_id)
+            .ok_or_else(|| error("MOD_SCHEMA_STALE", "MOD 已从实例期望列表移除，请刷新后重试"))?;
+        let (schema, modinfo_sha256) = schema_for(current)?;
+        let content_digest = current
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.content_digest.as_deref());
+        if content_digest != Some(binding.artifact_digest.as_str())
+            || modinfo_sha256.as_deref() != Some(binding.modinfo_sha256.as_str())
+            || !matches!(
+                schema.status,
+                mod_parser::SchemaStatus::Available | mod_parser::SchemaStatus::Partial
+            )
+        {
+            return Err(error(
+                "MOD_SCHEMA_STALE",
+                "MOD 配置 schema 或固定产物已变化，请刷新后重试",
+            ));
+        }
+
+        let current_configuration = current
+            .desired
+            .as_ref()
+            .and_then(|state| state.configuration_options.as_object())
+            .ok_or_else(|| error("MOD_STATE_INVALID", "当前 MOD 配置格式无效"))?;
+        let mut changed = std::collections::HashSet::new();
+        for name in &binding.changed_fields {
+            if name.is_empty() || name.len() > 256 || !changed.insert(name.as_str()) {
+                return Err(error("MOD_SCHEMA_BINDING_INVALID", "MOD 配置字段绑定无效"));
+            }
+            let matching_fields = schema
+                .fields
+                .iter()
+                .filter(|field| field.name == *name)
+                .collect::<Vec<_>>();
+            if matching_fields.is_empty() || matching_fields.iter().any(|field| !field.editable) {
+                return Err(error(
+                    "MOD_CONFIG_UNSUPPORTED",
+                    "缺失或不支持的 MOD 配置字段不能保存",
+                ));
+            }
+            let fields = matching_fields;
+            if !schema_fields_share_control(&fields, current_configuration.get(name)) {
+                return Err(error(
+                    "MOD_CONFIG_UNSUPPORTED",
+                    "同名 MOD 配置字段的类型不兼容",
+                ));
+            }
+            if fields.len() > 1
+                && fields[0].options.is_empty()
+                && !current_configuration.contains_key(name)
+                && fields
+                    .iter()
+                    .any(|field| field.default_value != fields[0].default_value)
+            {
+                return Err(error(
+                    "MOD_CONFIG_UNSUPPORTED",
+                    "同名 MOD 配置字段的默认值不兼容",
+                ));
+            }
+        }
+
+        let next_configuration = requested
+            .configuration_options
+            .as_object()
+            .ok_or_else(|| error("MOD_INPUT_INVALID", "MOD 配置必须是对象"))?;
+        for (key, old_value) in current_configuration {
+            if !changed.contains(key.as_str()) && next_configuration.get(key) != Some(old_value) {
+                return Err(error(
+                    "MOD_CONFIG_UNBOUND_CHANGE",
+                    "保存包含未绑定的 MOD 配置变更",
+                ));
+            }
+        }
+        for (key, value) in next_configuration {
+            if changed.contains(key.as_str()) {
+                let fields = schema
+                    .fields
+                    .iter()
+                    .filter(|field| field.name == *key)
+                    .collect::<Vec<_>>();
+                if fields.is_empty() {
+                    return Err(error("MOD_SCHEMA_STALE", "配置字段不属于当前 MOD schema"));
+                }
+                for field in fields {
+                    validate_field_value(field, value, current_configuration.get(key))?;
+                }
+            } else if current_configuration.get(key) != Some(value) {
+                return Err(error(
+                    "MOD_CONFIG_UNBOUND_CHANGE",
+                    "保存包含未绑定的 MOD 配置变更",
+                ));
+            }
+        }
+        for key in current_configuration.keys() {
+            if !changed.contains(key.as_str()) && !next_configuration.contains_key(key) {
+                return Err(error(
+                    "MOD_CONFIG_UNBOUND_CHANGE",
+                    "保存包含未绑定的 MOD 配置变更",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn validate_field_value(
+    field: &mod_parser::ModField,
+    value: &Value,
+    current: Option<&Value>,
+) -> CommandResult<()> {
+    if !field.options.is_empty() {
+        if field.options.iter().any(|option| option.value == *value) {
+            return Ok(());
+        }
+        return Err(error(
+            "MOD_CONFIG_VALUE_INVALID",
+            "配置值不在 MOD 提供的候选项中",
+        ));
+    }
+    let valid = match schema_field_control(field, current) {
+        "boolean" => value.is_boolean(),
+        "number" => value.as_f64().is_some_and(f64::is_finite),
+        "text" => value.is_string(),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(error(
+            "MOD_CONFIG_VALUE_INVALID",
+            "配置值类型与 MOD schema 不匹配",
+        ))
+    }
+}
+
+fn schema_field_control(field: &mod_parser::ModField, current: Option<&Value>) -> &'static str {
+    if !field.options.is_empty() {
+        return "choice";
+    }
+    let value = field
+        .default_value
+        .as_ref()
+        .filter(|value| !value.is_null())
+        .or(current);
+    match value {
+        Some(Value::Bool(_)) => "boolean",
+        Some(Value::Number(_)) => "number",
+        Some(Value::String(_)) => "text",
+        _ => "unknown",
+    }
+}
+
+fn schema_fields_share_control(fields: &[&mod_parser::ModField], current: Option<&Value>) -> bool {
+    fields
+        .first()
+        .map(|first| {
+            let expected = schema_field_control(first, current);
+            expected != "unknown"
+                && fields
+                    .iter()
+                    .all(|field| schema_field_control(field, current) == expected)
+        })
+        .unwrap_or(false)
+}
+
 pub fn list(database: &Path, request: ListRequest) -> CommandResult<ListResponse> {
     validate_request(&request)?;
     let connection = ConnectionRequest {
@@ -561,6 +819,7 @@ pub fn save(database: &Path, request: SaveRequest) -> CommandResult<SaveResponse
         if host_id.as_deref() != Some(request.target.host_id.as_str()) {
             return Err(error("HOST_IDENTITY_MISMATCH", "MOD 目标主机身份不一致"));
         }
+        validate_schema_bindings(session, &request)?;
         let value = invoke_save(
             session,
             &serde_json::json!({"schemaVersion":1,"requestId":request.request_id,"operationId":request.operation_id,"serverId":request.target.server_id,"hostId":request.target.host_id,"instanceId":request.target.instance_id,"expectedRevision":request.expected_revision,"mods":request.mods}),
@@ -752,4 +1011,63 @@ pub fn download_tasks(
             })
         },
     )
+}
+
+#[cfg(test)]
+mod schema_binding_tests {
+    use super::*;
+
+    fn field(default_value: Option<Value>, options: Vec<Value>) -> mod_parser::ModField {
+        mod_parser::ModField {
+            name: "value".into(),
+            label: "Value".into(),
+            hover: None,
+            default_value,
+            options: options
+                .into_iter()
+                .map(|value| mod_parser::ModOption {
+                    label: value.to_string(),
+                    value,
+                    hover: None,
+                })
+                .collect(),
+            editable: true,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn validates_option_values_and_scalar_types_against_schema() {
+        let choices = field(None, vec![Value::from(1), Value::from(2)]);
+        assert!(validate_field_value(&choices, &Value::from(2), None).is_ok());
+        assert!(validate_field_value(&choices, &Value::from("2"), None).is_err());
+
+        let boolean = field(Some(Value::Bool(false)), Vec::new());
+        assert!(validate_field_value(&boolean, &Value::Bool(true), None).is_ok());
+        assert!(validate_field_value(&boolean, &Value::from(1), None).is_err());
+
+        let numeric = field(Some(Value::from(2)), Vec::new());
+        assert!(validate_field_value(&numeric, &Value::from(3.5), None).is_ok());
+        assert!(validate_field_value(&numeric, &Value::from("3.5"), None).is_err());
+    }
+
+    #[test]
+    fn same_name_fields_can_share_only_compatible_values() {
+        let first = field(None, vec![Value::from(1), Value::from(2)]);
+        let second = field(None, vec![Value::from(2), Value::from(3)]);
+        assert!(schema_fields_share_control(&[&first, &second], None));
+        assert!(validate_field_value(&first, &Value::from(2), None).is_ok());
+        assert!(validate_field_value(&second, &Value::from(2), None).is_ok());
+        assert!(validate_field_value(&first, &Value::from(1), None).is_ok());
+        assert!(validate_field_value(&second, &Value::from(1), None).is_err());
+
+        let boolean = field(Some(Value::Bool(false)), Vec::new());
+        let number = field(Some(Value::from(1)), Vec::new());
+        assert!(!schema_fields_share_control(&[&boolean, &number], None));
+        assert!(!schema_fields_share_control(
+            &[&boolean, &number],
+            Some(&Value::Bool(false))
+        ));
+        assert!(schema_fields_share_control(&[&boolean, &boolean], None));
+    }
 }

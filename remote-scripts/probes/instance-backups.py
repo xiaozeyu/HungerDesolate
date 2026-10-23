@@ -140,6 +140,19 @@ def runtime_state(instance_id, manifest):
     return "degraded", True
 
 
+def restore_acceptance(host_id):
+    try:
+        evidence = read_json(ROOT / "restore-acceptance.json", 65536)
+    except FileNotFoundError:
+        return False
+    return (evidence.get("schemaVersion") == 1
+            and evidence.get("hostId") == host_id
+            and evidence.get("runtimeVerified") is True
+            and valid_uuid(evidence.get("instanceId"))
+            and valid_uuid(evidence.get("taskId"))
+            and isinstance(evidence.get("verifiedAt"), str))
+
+
 def list_backups(request):
     host_id, instance_id, instance, manifest = identity(request)
     catalog = ROOT / "backups" / instance_id
@@ -148,7 +161,8 @@ def list_backups(request):
     except FileNotFoundError:
         return {"schemaVersion": 1, "requestId": request["requestId"],
                 "target": {"serverId": request["serverId"], "hostId": host_id,
-                           "instanceId": instance_id}, "items": []}
+                           "instanceId": instance_id},
+                "restoreAcceptancePassed": restore_acceptance(host_id), "items": []}
     items = []
     for child in catalog.iterdir():
         if not valid_uuid(child.name):
@@ -172,7 +186,8 @@ def list_backups(request):
     items.sort(key=lambda item: item.get("createdAt", ""), reverse=True)
     return {"schemaVersion": 1, "requestId": request["requestId"],
             "target": {"serverId": request["serverId"], "hostId": host_id,
-                       "instanceId": instance_id}, "items": items}
+                       "instanceId": instance_id},
+            "restoreAcceptancePassed": restore_acceptance(host_id), "items": items}
 
 
 def assess_restorability(backup, metadata, instance, manifest, host_id, instance_id):

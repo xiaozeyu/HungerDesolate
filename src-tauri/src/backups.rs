@@ -152,6 +152,7 @@ struct RemoteList {
     schema_version: u32,
     request_id: String,
     target: InstanceTarget,
+    restore_acceptance_passed: bool,
     items: Vec<BackupSummary>,
 }
 
@@ -162,6 +163,7 @@ pub struct ListResponse {
     pub request_id: String,
     pub target: InstanceTarget,
     pub config_revision: u64,
+    pub restore_acceptance_passed: bool,
     pub items: Vec<BackupSummary>,
 }
 
@@ -1169,6 +1171,7 @@ pub fn list(database: &Path, request: ListRequest) -> CommandResult<ListResponse
             request_id: request.request_id,
             target: request.target,
             config_revision: request.expected_revision,
+            restore_acceptance_passed: remote.restore_acceptance_passed,
             items: remote.items,
         })
     })

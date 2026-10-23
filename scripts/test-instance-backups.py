@@ -59,6 +59,16 @@ class InstanceBackupsTests(unittest.TestCase):
         result = MODULE.list_backups(dict(self.request))
         self.assertEqual(result["items"], [])
         self.assertEqual(result["target"]["instanceId"], INSTANCE)
+        self.assertFalse(result["restoreAcceptancePassed"])
+
+    def test_restore_acceptance_reads_host_scoped_evidence(self):
+        evidence = self.root / "restore-acceptance.json"
+        evidence.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST,
+            "instanceId": INSTANCE, "taskId": REQUEST_ID,
+            "verifiedAt": "2026-10-22T00:00:00Z", "runtimeVerified": True}))
+        evidence.chmod(0o600)
+        result = MODULE.list_backups(dict(self.request))
+        self.assertTrue(result["restoreAcceptancePassed"])
 
     def test_preview_distinguishes_hot_capture_and_cold_status_requirement(self):
         with patch.object(MODULE, "runtime_state", return_value=("running", True)):

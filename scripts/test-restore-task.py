@@ -1,11 +1,13 @@
 """Verify restore task state is created with permissions accepted by its reader."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import stat
 import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -61,6 +63,50 @@ class RestoreTaskStateTests(unittest.TestCase):
             self.assertEqual(token.read_bytes(), b"private-token\n")
             self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o600)
             self.assertTrue(any(call.args[1:] == (1000, 1000) for call in chown.call_args_list))
+
+    def test_runtime_acceptance_requires_game_processes_and_configured_udp_listeners(self):
+        with tempfile.TemporaryDirectory(prefix="restore-runtime-verify-") as temporary:
+            instance = Path(temporary)
+            config = instance / "config" / "Cluster_1"
+            for role, game_port, query_port in (("Master", 11000, 27000), ("Caves", 11001, 27001)):
+                shard = config / role
+                shard.mkdir(parents=True, exist_ok=True)
+                (shard / "server.ini").write_text(
+                    f"[NETWORK]\nserver_port={game_port}\n[STEAM]\nmaster_server_port={query_port}\n"
+                )
+            (config / "cluster.ini").write_text("[SHARD]\nmaster_port=11002\n")
+            containers = {"master": "a" * 64, "caves": "b" * 64}
+            labels = [
+                {"com.hungerdesolate.hostId": HOST_ID, "com.hungerdesolate.instanceId": INSTANCE_ID,
+                 "com.hungerdesolate.role": role}
+                for role in ("master", "caves")
+            ]
+
+            def run(args, **_kwargs):
+                if args[1:4] == ["container", "ls", "--all"]:
+                    return SimpleNamespace(returncode=0, stdout="\n".join(containers.values()))
+                if args[1:3] == ["container", "inspect"]:
+                    rows = [json.dumps(value) + "\trunning" for value in labels]
+                    return SimpleNamespace(returncode=0, stdout="\n".join(rows))
+                if args[1] == "exec" and "DST_RUNNING" in args[-1]:
+                    return SimpleNamespace(returncode=0, stdout="DST_RUNNING")
+                if args[1] == "exec":
+                    role = "master" if args[2] == containers["master"] else "caves"
+                    ports = [11000, 27000, 11002] if role == "master" else [11001, 27001]
+                    if getattr(run, "omit_listener", False) and role == "caves":
+                        ports.remove(27001)
+                    rows = ["sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode"]
+                    rows.extend(f"{index}: 00000000:{port:04X} 00000000:0000 07 00000000:00000000 00:00000000 00000000 0 0 0"
+                                for index, port in enumerate(ports))
+                    return SimpleNamespace(returncode=0, stdout="\n".join(rows))
+                raise AssertionError(args)
+
+            run.omit_listener = False
+            manifest = {"hostId": HOST_ID, "cavesEnabled": True}
+            with patch.object(MODULE.subprocess, "run", side_effect=run):
+                self.assertTrue(MODULE.verify_runtime_processes(instance, INSTANCE_ID, manifest, ["master", "caves"]))
+                run.omit_listener = True
+                self.assertFalse(MODULE.verify_runtime_processes(instance, INSTANCE_ID, manifest, ["master", "caves"]))
 
     def test_task_status_and_journal_are_private_and_readable(self):
         with tempfile.TemporaryDirectory(prefix="restore-task-") as temporary:

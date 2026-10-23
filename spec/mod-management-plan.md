@@ -198,9 +198,7 @@ MOD 可能有 Token/webhook 等敏感配置：标记为秘密的字段不能写�
 
 ### 6.1 检查更新
 
-check 是只读查询，不占维护操作栏，不修改 desired/deployed。批量采集每项外部可见更新时间和可用内容标识，返回 checkedAt、latestKnown、updateHint、error；失败保留上次成功时间，并记录本次失败。
-
-有可靠上游内容标识时比较标识；只有时间时标为候选更新；只有作者 version 时不能严格判断。准备后完整 contentSha256 相同则无需内容更新，元数据变化独立展示。启用且实际部署的 MOD 是默认检查集合；禁用但保留条目可显式检查。
+检查由桌面端读取 Workshop `hcontent_file` 并与固定产物中的 `sourceHandle` 比较，不下载内容。标识相同显示已是最新；标识变化时，用户明确请求获取该候选版本，再由现有 Docker/SteamCMD worker 下载并按 `contentSha256` 固定候选产物。Lua `modinfo.version` 是作者声明的展示版本；内容变化而作者版本未变时必须明确显示，不能把时间戳或摘要冒充版本号。候选内容单独保存，不修改 desired/deployed；用户采用后才将候选 digest 固定为 desired。若 Steam 内容标识缺失，状态为无法判断。旧产物没有来源标识时，首次检查需要获取一次当前内容建立基线；若摘要相同，后续检查不再下载。
 
 ### 6.2 发布阶段机
 

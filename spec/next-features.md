@@ -18,11 +18,13 @@
 
 2026-10-22 开始 MOD 管理实现：新增受限 `modinfo.lua` 求值器、实例 MOD 只读查询和真实 MOD 页面。求值器使用目标游戏兼容的 Lua 5.1 运行时，注入 `folder_name`、`locale`、`ChooseTranslationTable`，限制源码大小、内存、指令和表结构；执行失败、确实无配置项、产物未准备和部分字段不支持分别返回。远端查询只读取当前实例的 `desired/mods.json`、`deployed-mods.json`、活动 MOD 产物和 manifest，所有请求绑定完整 `InstanceTarget`。本轮没有实现 Workshop 搜索、下载、保存配置、应用、更新或删除，MOD 页面不显示示例数据。
 
-随后新增 Workshop 元数据查询、实例期望列表保存和启用/禁用/移除控制：保存使用实例锁、全局 configRevision CAS、operationId 重放和 pending journal 恢复，不修改活动 UGC。跨领域 revision 允许世界领域版本落后于全局版本，并按 world desired/deployed digest 判断一致性。
+随后新增 Workshop 元数据查询、实例期望列表保存和启用/禁用/移除控制：元数据查询由桌面端 HTTPS 请求 Steam，保存使用实例锁、全局 configRevision CAS、operationId 重放和 pending journal 恢复，不修改活动 UGC。跨领域 revision 允许世界领域版本落后于全局版本，并按 world desired/deployed digest 判断一致性。
 
 新增 MOD 内容准备任务：固定 Release 镜像携带 SteamCMD fetch wrapper 和 `steamcmd-workshop-v1` 能力标记；准备任务从本地已验证 Release 中选工具镜像，并单独绑定目标实例活动 DST Release。远端持久任务以隔离 Docker 容器下载，校验内容后把产物改为 root 管理、只读目录树（目录 `0555`、文件 `0444`、manifest `0600`）；MOD 探针逐级验证 owner/mode、拒绝符号链接并以 `O_NOFOLLOW` 读取，固定摘要不存在时不回退其他版本。对照原项目后修正 SteamCMD HOME 缓存发现：wrapper 覆盖 SteamCMD 安装目录与 HOME 下常见 Steam 缓存布局，并支持 modinfo 位于条目子目录；对应脚本模拟测试通过。该 wrapper 已打包在 Release 镜像内，需重新构建 Release 才能用于后续准备任务。MOD 页可监视后台任务并在完成后读取配置 schema。没有能力镜像时明确阻断。Release 构建现将 daemon registry mirrors 显式传给专属 BuildKit builder，并原子合并 daemon.json 设置；仍需真实 Linux 主机验证镜像源可达。SteamCMD 匿名下载和真实 Workshop 样本仍须实机验收。
 
-随后新增 MOD 配置编辑/保存：按 schema 提供枚举、布尔、数字和字符串控件，复杂字段只读；同名字段按游戏的 name 键合并为共享控件，冲突字段组只读且不阻断其余配置；仅提交变更字段，保留未知旧配置。Rust 保存前重新读取目标实例快照并复求 schema，校验 artifactDigest、modinfoSha256、字段和值，再通过现有 CAS/idempotency 保存 desired。成功固定该 MOD 的 contentDigest 并保持“待应用”，不修改活动 UGC。MOD 内容真实下载已由用户在主机上验收；配置编辑代码与本地校验已通过，待该主机联调。MOD 更新检查、预览/应用发布、分片 UGC 一致性和删除仍待实现。
+随后新增 MOD 配置编辑/保存：按 schema 提供枚举、布尔、数字和字符串控件，复杂字段只读；同名字段按游戏的 name 键合并为共享控件，冲突字段组只读且不阻断其余配置；仅提交变更字段，保留未知旧配置。Rust 保存前重新读取目标实例快照并复求 schema，校验 artifactDigest、modinfoSha256、字段和值，再通过现有 CAS/idempotency 保存 desired。成功固定该 MOD 的 contentDigest 并保持“待应用”，不修改活动 UGC。MOD 页新增只读应用预览，合并当前 MOD、运行概览和备份恢复能力；展示差异、目标分片和保护点。恢复任务在运行中实例成功恢复并重新启动核验后写入主机级验收证据，未有证据时预览明确阻断发布。另新增 Workshop 时间戳只读检查：仅检查启用且已准备的 MOD，时间晚于固定产物准备时间时标记“有更新候选”，不宣称内容版本确定，不触发下载或更改 desired。检查结果暂留在当前页面内存，退出页面后不保留。MOD 内容真实下载已由用户在主机上验收；配置编辑代码与本地校验已通过，预览/更新时间检查待真实主机联调。持久应用 worker、发布验证、分片 UGC 一致性和删除仍待实现。
+
+2026-10-23 更新检查实现改为比较 Steam `contentHandle` 与固定产物来源标识；发现变化后用户可单独获取候选，候选内容以摘要隔离保存，解析作者 `modinfo.version` 后显示具体可用版本。采用候选才会更新 desired；已部署版本继续按 deployed artifact 展示。旧产物缺来源标识时首次获取当前内容作基线，内容摘要相同后可判定已是最新。该路径仍需真实 Linux/SteamCMD 验收。
 
 已实现独立桌面工程、主机记录增删改、SSH 指纹扫描/确认、系统凭据库接口、登录验证、固定 host.json 只读发现，以及两层导航和部分查询/任务隔离基础。
 

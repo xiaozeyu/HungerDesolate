@@ -1,8 +1,10 @@
 """Identity-bound world restore task with protection point and rollback."""
+import configparser
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -11,6 +13,7 @@ from datetime import datetime, timezone
 
 ROOT = Path("/var/lib/famine-hub")
 TASKS = ROOT / "restore-tasks"
+RESTORE_ACCEPTANCE = ROOT / "restore-acceptance.json"
 MAX_REVISION = 9007199254740991
 DST_RUNTIME_UID = 1000
 
@@ -194,6 +197,81 @@ def runtime(instance_id, manifest):
     return "degraded", roles
 
 
+def verify_runtime_processes(instance, instance_id, manifest, roles):
+    result = subprocess.run(["docker", "container", "ls", "--all", "--quiet", "--no-trunc",
+                             "--filter", "label=com.hungerdesolate.instanceId=" + instance_id],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                            timeout=15, check=False, env=docker_env())
+    container_ids = result.stdout.splitlines()
+    if result.returncode != 0 or len(container_ids) != len(roles):
+        return False
+    inspected = subprocess.run(["docker", "container", "inspect", "--format",
+                                "{{json .Config.Labels}}\t{{.State.Status}}", *container_ids],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                               timeout=15, check=False, env=docker_env())
+    if inspected.returncode != 0:
+        return False
+    by_role = {}
+    try:
+        for row in inspected.stdout.splitlines():
+            labels_raw, separator, state = row.partition("\t")
+            labels = json.loads(labels_raw)
+            role = labels.get("com.hungerdesolate.role") if isinstance(labels, dict) else None
+            if (not separator or labels.get("com.hungerdesolate.hostId") != manifest["hostId"]
+                    or labels.get("com.hungerdesolate.instanceId") != instance_id
+                    or role not in roles or role in by_role or state != "running"):
+                return False
+            by_role[role] = container_ids[len(by_role)]
+    except (ValueError, KeyError, TypeError):
+        return False
+    if set(by_role) != set(roles):
+        return False
+
+    config_root = instance / "config" / "Cluster_1"
+    expected = {}
+    try:
+        for role in roles:
+            settings = configparser.ConfigParser(interpolation=None)
+            settings.read(config_root / role.title() / "server.ini", encoding="utf-8")
+            ports = {settings.getint("NETWORK", "server_port"),
+                     settings.getint("STEAM", "master_server_port")}
+            if role == "master" and manifest.get("cavesEnabled") is True:
+                cluster = configparser.ConfigParser(interpolation=None)
+                cluster.read(config_root / "cluster.ini", encoding="utf-8")
+                ports.add(cluster.getint("SHARD", "master_port"))
+            if not ports or any(port < 1 or port > 65535 for port in ports):
+                return False
+            expected[role] = ports
+    except (OSError, configparser.Error, UnicodeError, ValueError):
+        return False
+
+    for role, container_id in by_role.items():
+        process_probe = ('for p in /proc/[0-9]*/exe; do x=$(readlink "$p" 2>/dev/null) || continue; '
+                         'if [ "$x" = /srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64 ]; '
+                         "then printf DST_RUNNING; exit 0; fi; done; printf DST_NOT_FOUND")
+        process = subprocess.run(["docker", "exec", container_id, "/bin/sh", "-c", process_probe],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                 timeout=10, check=False, env=docker_env())
+        sockets = subprocess.run(["docker", "exec", container_id, "/bin/sh", "-c",
+                                  "cat /proc/net/udp && { if [ -r /proc/net/udp6 ]; then cat /proc/net/udp6; fi; }"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                 timeout=10, check=False, env=docker_env())
+        if process.returncode != 0 or process.stdout.strip() != "DST_RUNNING" or sockets.returncode != 0:
+            return False
+        observed = set()
+        for line in sockets.stdout.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 2 or ":" not in fields[1]:
+                continue
+            try:
+                observed.add(int(fields[1].rsplit(":", 1)[1], 16))
+            except ValueError:
+                return False
+        if not expected[role].issubset(observed):
+            return False
+    return True
+
+
 def remove_path(path):
     if path.is_symlink() or (path.exists() and not path.is_dir()):
         path.unlink()
@@ -301,6 +379,7 @@ def _worker_impl(task_id):
     staging = instance / (".restore-staging-" + task_id)
     moved = []
     stopped = False
+    runtime_verified = False
     original_manifest = dict(manifest)
     active_path = instance / "active-release.json"
     original_active = read_json(active_path, 65536)
@@ -415,8 +494,10 @@ def _worker_impl(task_id):
             set_status(directory, "running", "start", completed="restoreCommit")
             compose(instance, manifest, "start", roles)
             running_after, _ = runtime(request["instanceId"], manifest)
-            if running_after != "running":
+            if (running_after != "running"
+                    or not verify_runtime_processes(instance, request["instanceId"], manifest, roles)):
                 reject("BACKUP_RESTART_FAILED")
+            runtime_verified = True
         elif stopped:
             stopped_after, _ = runtime(request["instanceId"], manifest)
             if stopped_after != "stopped":
@@ -424,7 +505,26 @@ def _worker_impl(task_id):
         set_status(directory, "running", "verify", completed="start" if runtime_before == "running" else "restoreCommit")
         shutil.rmtree(recovery, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
-        return set_status(directory, "succeeded", "finalize", completed="verify", result={"protectionBackupId": protection_id, "configRevision": manifest["configRevision"], "verification": "passed"})
+        result_payload = {"protectionBackupId": protection_id, "configRevision": manifest["configRevision"], "verification": "passed", "runtimeVerified": runtime_verified, "restoreAcceptanceRecorded": False}
+        result = set_status(directory, "succeeded", "finalize", completed="verify", result=result_payload)
+        if not runtime_verified:
+            return result
+        try:
+            atomic_json(RESTORE_ACCEPTANCE, {
+                "schemaVersion": 1,
+                "hostId": request["hostId"],
+                "instanceId": request["instanceId"],
+                "taskId": task_id,
+                "verifiedAt": now(),
+                "runtimeVerified": True,
+            })
+        except (OSError, ValueError, TypeError):
+            return result
+        result_payload["restoreAcceptanceRecorded"] = True
+        try:
+            return set_status(directory, "succeeded", "finalize", completed="verify", result=result_payload)
+        except (OSError, ValueError, TypeError):
+            return result
     except Exception as failure:
         code = getattr(failure, "code", "BACKUP_RESTORE_FAILED")
         try:

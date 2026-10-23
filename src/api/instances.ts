@@ -35,7 +35,8 @@ export interface BackupSummary {
   configRevision: number; containsSecrets: boolean;
 }
 export interface BackupListResponse {
-  schemaVersion: 1; requestId: string; target: InstanceTarget; configRevision: number; items: BackupSummary[];
+  schemaVersion: 1; requestId: string; target: InstanceTarget; configRevision: number;
+  restoreAcceptancePassed: boolean; items: BackupSummary[];
 }
 export interface BackupPreviewResponse {
   schemaVersion: 1; requestId: string; target: InstanceTarget; configRevision: number;

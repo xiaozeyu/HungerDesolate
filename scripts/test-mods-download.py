@@ -83,6 +83,8 @@ class ModsDownloadTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_worker_publishes_only_verified_prepared_content(self):
+        self.request["sourceHandles"] = {"123456": "777777"}
+        self.write_json(self.task / "request.json", self.request)
         def run(command, **_kwargs):
             if command[1:3] == ["image", "inspect"]:
                 image_digest = command[command.index("inspect") + 3]
@@ -111,6 +113,11 @@ class ModsDownloadTests(unittest.TestCase):
         self.assertEqual(manifest["contentDigest"], prepared["contentDigest"])
         self.assertEqual(manifest["dstReleaseId"], RELEASE)
         self.assertEqual(manifest["fetcherImage"], "example/fetch@" + FETCH_DIGEST)
+        self.assertEqual(manifest["sourceHandle"], "777777")
+        self.assertEqual(result["result"]["preparedMods"][0]["sourceHandle"], "777777")
+        candidate = json.loads((self.instance / "mods" / "candidates" / "123456.json").read_text())
+        self.assertEqual(candidate["contentDigest"], prepared["contentDigest"])
+        self.assertEqual(candidate["sourceHandle"], "777777")
         self.assertEqual((artifact / "content").stat().st_mode & 0o777, 0o555)
         self.assertEqual((artifact / "content" / "modinfo.lua").stat().st_mode & 0o777, 0o444)
         self.assertEqual((artifact / "manifest.json").stat().st_mode & 0o777, 0o600)

@@ -52,6 +52,10 @@ struct RemoteItem {
     desired: Option<RemoteState>,
     deployed: Option<RemoteState>,
     artifact: Option<RemoteArtifact>,
+    #[serde(default)]
+    deployed_artifact: Option<RemoteArtifact>,
+    #[serde(default)]
+    candidate_artifact: Option<RemoteArtifact>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +73,9 @@ struct RemoteArtifact {
     source_base64: String,
     source_sha256: String,
     content_digest: Option<String>,
+    prepared_at: Option<String>,
+    #[serde(default)]
+    source_handle: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,10 +85,20 @@ pub struct ModSummary {
     pub desired_enabled: Option<bool>,
     pub deployed_enabled: Option<bool>,
     pub desired_configuration: Option<Value>,
+    pub deployed_configuration: Option<Value>,
     pub schema: ModSchema,
     pub artifact_digest: Option<String>,
+    pub desired_artifact_digest: Option<String>,
+    pub deployed_artifact_digest: Option<String>,
     pub prepared_digest: Option<String>,
+    pub prepared_at: Option<String>,
     pub modinfo_sha256: Option<String>,
+    pub prepared_source_handle: Option<String>,
+    pub deployed_version: Option<String>,
+    pub candidate_digest: Option<String>,
+    pub candidate_version: Option<String>,
+    pub candidate_source_handle: Option<String>,
+    pub candidate_prepared_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +181,8 @@ pub struct PrepareRequest {
     pub expected_revision: u64,
     pub operation_id: String,
     pub workshop_ids: Vec<String>,
+    #[serde(default)]
+    pub source_handles: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,6 +467,11 @@ fn schema_for(item: &RemoteItem) -> CommandResult<(ModSchema, Option<String>)> {
             None,
         ));
     };
+    let (schema, digest) = schema_for_artifact(artifact)?;
+    Ok((schema, Some(digest)))
+}
+
+fn schema_for_artifact(artifact: &RemoteArtifact) -> CommandResult<(ModSchema, String)> {
     let source = STANDARD
         .decode(&artifact.source_base64)
         .map_err(|_| error("MOD_ARTIFACT_INVALID", "MOD 配置源码编码无效"))?;
@@ -466,7 +490,7 @@ fn schema_for(item: &RemoteItem) -> CommandResult<(ModSchema, Option<String>)> {
         return Err(error("MOD_ARTIFACT_INVALID", "MOD 配置源码摘要不匹配"));
     }
     let schema = mod_parser::parse_modinfo(&source, &artifact.folder_name, "zh");
-    Ok((schema, Some(artifact.source_sha256.clone())))
+    Ok((schema, artifact.source_sha256.clone()))
 }
 
 fn validate_schema_bindings(session: &Session, request: &SaveRequest) -> CommandResult<()> {
@@ -755,28 +779,82 @@ pub fn list(database: &Path, request: ListRequest) -> CommandResult<ListResponse
                 return Err(error("MOD_PROTOCOL_INVALID", "MOD Workshop ID 无效"));
             }
             let (schema, modinfo_sha256) = schema_for(&item)?;
-            let artifact_digest = item
+            let desired_artifact_digest = item
                 .desired
                 .as_ref()
-                .and_then(|state| state.artifact_digest.clone())
-                .or_else(|| {
-                    item.deployed
-                        .as_ref()
-                        .and_then(|state| state.artifact_digest.clone())
-                });
+                .and_then(|state| state.artifact_digest.clone());
+            let deployed_artifact_digest = item
+                .deployed
+                .as_ref()
+                .and_then(|state| state.artifact_digest.clone());
+            let artifact_digest = desired_artifact_digest
+                .clone()
+                .or_else(|| deployed_artifact_digest.clone());
             let prepared_digest = item
                 .artifact
                 .as_ref()
                 .and_then(|artifact| artifact.content_digest.clone());
+            let prepared_at = item
+                .artifact
+                .as_ref()
+                .and_then(|artifact| artifact.prepared_at.clone());
+            let prepared_source_handle = item
+                .artifact
+                .as_ref()
+                .and_then(|artifact| artifact.source_handle.clone());
+            let deployed_version = if let Some(artifact) = item.deployed_artifact.as_ref() {
+                schema_for_artifact(artifact)
+                    .ok()
+                    .and_then(|(schema, _)| schema.metadata.version)
+            } else if deployed_artifact_digest.is_some()
+                && deployed_artifact_digest.as_deref() == prepared_digest.as_deref()
+            {
+                schema.metadata.version.clone()
+            } else {
+                None
+            };
+            let candidate_digest = item
+                .candidate_artifact
+                .as_ref()
+                .and_then(|artifact| artifact.content_digest.clone());
+            let candidate_prepared_at = item
+                .candidate_artifact
+                .as_ref()
+                .and_then(|artifact| artifact.prepared_at.clone());
+            let candidate_source_handle = item
+                .candidate_artifact
+                .as_ref()
+                .and_then(|artifact| artifact.source_handle.clone());
+            let candidate_version = item
+                .candidate_artifact
+                .as_ref()
+                .and_then(|artifact| schema_for_artifact(artifact).ok())
+                .and_then(|(schema, _)| schema.metadata.version);
             items.push(ModSummary {
                 workshop_id: item.workshop_id,
                 desired_enabled: item.desired.as_ref().map(|state| state.enabled),
                 deployed_enabled: item.deployed.as_ref().map(|state| state.enabled),
-                desired_configuration: item.desired.map(|state| state.configuration_options),
+                desired_configuration: item
+                    .desired
+                    .as_ref()
+                    .map(|state| state.configuration_options.clone()),
+                deployed_configuration: item
+                    .deployed
+                    .as_ref()
+                    .map(|state| state.configuration_options.clone()),
                 schema,
                 artifact_digest,
+                desired_artifact_digest,
+                deployed_artifact_digest,
                 prepared_digest,
+                prepared_at,
                 modinfo_sha256,
+                prepared_source_handle,
+                deployed_version,
+                candidate_digest,
+                candidate_version,
+                candidate_source_handle,
+                candidate_prepared_at,
             });
         }
         Ok(ListResponse {
@@ -885,6 +963,19 @@ pub fn prepare(database: &Path, request: PrepareRequest) -> CommandResult<Downlo
     {
         return Err(error("MOD_TASK_INPUT_INVALID", "MOD 准备任务参数无效"));
     }
+    if request.source_handles.len() > request.workshop_ids.len()
+        || request
+            .source_handles
+            .iter()
+            .any(|(workshop_id, source_handle)| {
+                !request.workshop_ids.contains(workshop_id)
+                    || source_handle.is_empty()
+                    || source_handle.len() > 64
+                    || !source_handle.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    {
+        return Err(error("MOD_TASK_INPUT_INVALID", "Workshop 候选版本绑定无效"));
+    }
     let connection = ConnectionRequest {
         schema_version: 1,
         request_id: request.request_id.clone(),
@@ -900,7 +991,7 @@ pub fn prepare(database: &Path, request: PrepareRequest) -> CommandResult<Downlo
         }
         let value = invoke_download(
             session,
-            &serde_json::json!({"schemaVersion":1,"action":"start","requestId":request.request_id,"operationId":request.operation_id,"serverId":request.target.server_id,"hostId":request.target.host_id,"instanceId":request.target.instance_id,"expectedRecordVersion":request.expected_record_version,"expectedRevision":request.expected_revision,"workshopIds":request.workshop_ids}),
+            &serde_json::json!({"schemaVersion":1,"action":"start","requestId":request.request_id,"operationId":request.operation_id,"serverId":request.target.server_id,"hostId":request.target.host_id,"instanceId":request.target.instance_id,"expectedRecordVersion":request.expected_record_version,"expectedRevision":request.expected_revision,"workshopIds":request.workshop_ids,"sourceHandles":request.source_handles}),
         )?;
         let task = value
             .get("task")

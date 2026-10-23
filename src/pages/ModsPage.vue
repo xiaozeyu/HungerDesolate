@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Pencil, RefreshCw, RotateCcw } from "@lucide/vue";
+import { Eye, Pencil, RefreshCw, RotateCcw } from "@lucide/vue";
 import AppDialog from "../components/AppDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import { getInstanceModTask, listInstanceModTasks, listInstanceMods, prepareInstanceMods, saveInstanceMods } from "../api/mods";
+import { getInstanceModTask, listInstanceModTasks, listInstanceMods, listModApplyProtectionBackups, prepareInstanceMods, saveInstanceMods } from "../api/mods";
+import { getInstanceOverview } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { describeError } from "../lib/commandError";
@@ -12,6 +13,7 @@ import type { InstanceModSummary, ModSchemaStatus } from "../types/mods";
 import { getWorkshopMetadata } from "../api/workshop";
 import type { WorkshopItem } from "../types/workshop";
 import { normalizeWorkshopIds } from "../lib/workshopInput";
+import { compareWorkshopRevision, type ModUpdateHint } from "../lib/modUpdateCheck";
 import { createSerialQueue } from "../lib/serialQueue";
 import { useTasks } from "../composables/useTasks";
 import type { TaskSnapshot } from "../types/contracts";
@@ -23,6 +25,7 @@ import {
   validateChangedConfiguration,
 } from "../lib/modConfiguration";
 import type { ModFieldGroup } from "../lib/modConfiguration";
+import { buildModApplyPreview, modNeedsApply, type ModApplyPreview } from "../lib/modApplyPreview";
 
 const workspace = useWorkspace();
 const { server, target, instanceName } = usePageTarget();
@@ -38,6 +41,7 @@ const workshopItems = ref<WorkshopItem[]>([]);
 const workshopBusy = ref(false);
 const workshopError = ref("");
 const savingWorkshopId = ref<string | null>(null);
+const preparingWorkshopId = ref<string | null>(null);
 const prepareTask = ref<TaskSnapshot | null>(null);
 const taskError = ref("");
 const configEditorOpen = ref(false);
@@ -50,14 +54,26 @@ const configChangedFields = ref<string[]>([]);
 const configOptionSelection = ref<Record<string, string>>({});
 const configError = ref("");
 const configSaving = ref(false);
+const applyPreviewOpen = ref(false);
+const applyPreviewLoading = ref(false);
+const applyPreviewError = ref("");
+const applyPreview = ref<ModApplyPreview | null>(null);
+const applyPreviewRevision = ref<number | null>(null);
+const applyPreviewRuntime = ref<string | null>(null);
+const updateCheckBusy = ref(false);
+const updateCheckError = ref("");
+const updateCheckResults = ref<Record<string, { hint: ModUpdateHint; checkedAt: string; sourceHandle: string | null }>>({});
 let epoch = 0;
 let sequence = 0;
 let latestRequestId = "";
 let workshopSequence = 0;
+let updateSequence = 0;
+let candidateFetchActive = false;
 let taskPollTimer: ReturnType<typeof setTimeout> | undefined;
 
 const enabledCount = computed(() => items.value.filter(item => item.desiredEnabled === true).length);
-const pendingCount = computed(() => items.value.filter(item => item.desiredEnabled !== item.deployedEnabled).length);
+const pendingCount = computed(() => items.value.filter(modNeedsApply).length);
+const checkableModsCount = computed(() => items.value.filter(item => item.desiredEnabled === true && !!item.preparedDigest).length);
 
 function statusLabel(status: ModSchemaStatus) {
   return { available: "可配置", partial: "部分支持", noOptions: "无配置项", unavailable: "未准备", failed: "解析失败" }[status];
@@ -107,11 +123,13 @@ function resetContext() {
   epoch += 1;
   sequence += 1;
   workshopSequence += 1;
+  updateSequence += 1;
   latestRequestId = "";
   items.value = [];
   revision.value = null;
   error.value = "";
   savingWorkshopId.value = null;
+  preparingWorkshopId.value = null;
   workshopBusy.value = false;
   workshopItems.value = [];
   workshopError.value = "";
@@ -121,6 +139,16 @@ function resetContext() {
   configEditorOpen.value = false;
   editingMod.value = null;
   configSaving.value = false;
+  applyPreviewOpen.value = false;
+  applyPreviewLoading.value = false;
+  applyPreviewError.value = "";
+  applyPreview.value = null;
+  applyPreviewRevision.value = null;
+  applyPreviewRuntime.value = null;
+  updateCheckBusy.value = false;
+  updateCheckError.value = "";
+  updateCheckResults.value = {};
+  candidateFetchActive = false;
   if (taskPollTimer) clearTimeout(taskPollTimer);
   taskPollTimer = undefined;
 }
@@ -350,6 +378,164 @@ async function saveConfiguration() {
   }
 }
 
+function modActionChangeLabel(change: NonNullable<ModApplyPreview["changes"]>[number]) {
+  return change.actionLabel;
+}
+
+async function openApplyPreview() {
+  const connection = server.value;
+  const instanceTarget = target.value;
+  const expectedRevision = revision.value;
+  if (!connection || !instanceTarget || expectedRevision === null || workspace.preview.value
+      || loading.value || applyPreviewLoading.value) return;
+  const requestEpoch = epoch;
+  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  const recordVersion = connection.recordVersion;
+  const requestIds = { overview: crypto.randomUUID(), backups: crypto.randomUUID() };
+  applyPreviewOpen.value = true;
+  applyPreviewLoading.value = true;
+  applyPreviewError.value = "";
+  applyPreview.value = null;
+  try {
+    const [overview, backups] = await Promise.all([
+      queueSsh(() => getInstanceOverview(instanceTarget, requestIds.overview, recordVersion)),
+      queueSsh(() => listModApplyProtectionBackups({ schemaVersion: 1, requestId: requestIds.backups,
+        target: instanceTarget, expectedRecordVersion: recordVersion, expectedRevision })),
+    ]);
+    if (requestEpoch !== epoch || target.value === null
+      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
+      || server.value?.recordVersion !== recordVersion) return;
+    if (revision.value !== expectedRevision) throw new Error("MOD 配置版本已变化，请刷新后重新生成预览");
+    if (overview.schemaVersion !== 1 || overview.requestId !== requestIds.overview
+      || overview.recordVersion !== recordVersion || overview.configRevision !== expectedRevision
+      || overview.target.serverId !== instanceTarget.serverId || overview.target.hostId !== instanceTarget.hostId
+      || overview.target.instanceId !== instanceTarget.instanceId || !overview.data.manifestSummary
+      || overview.data.manifestSummary.configRevision !== expectedRevision) {
+      throw new Error("运行概览与 MOD 配置版本不一致，请刷新后重试");
+    }
+    if (backups.schemaVersion !== 1 || backups.requestId !== requestIds.backups
+      || backups.configRevision !== expectedRevision || backups.target.serverId !== instanceTarget.serverId
+      || backups.target.hostId !== instanceTarget.hostId || backups.target.instanceId !== instanceTarget.instanceId) {
+      throw new Error("保护备份快照身份或版本不匹配");
+    }
+    const freshItems = items.value;
+    const preview = buildModApplyPreview({
+      mods: freshItems,
+      backups: backups.items,
+      runtimeStatus: overview.data.runtime?.status ?? overview.data.identity.runtimeStatus,
+      cavesEnabled: overview.data.manifestSummary.cavesEnabled,
+      worldDesiredVsDeployed: overview.data.desiredVsDeployed,
+      restoreAcceptancePassed: backups.restoreAcceptancePassed,
+    });
+    applyPreview.value = preview;
+    applyPreviewRevision.value = expectedRevision;
+    applyPreviewRuntime.value = overview.data.runtime?.status ?? overview.data.identity.runtimeStatus;
+  } catch (cause) {
+    if (requestEpoch === epoch && target.value
+      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
+      && server.value?.recordVersion === recordVersion) applyPreviewError.value = describeError(cause).message;
+  } finally {
+    if (requestEpoch === epoch && target.value
+      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
+      && server.value?.recordVersion === recordVersion) applyPreviewLoading.value = false;
+  }
+}
+
+async function checkModUpdates() {
+  const connection = server.value;
+  const instanceTarget = target.value;
+  const expectedRevision = revision.value;
+  if (!connection || !instanceTarget || expectedRevision === null || workspace.preview.value
+      || updateCheckBusy.value || loading.value) return;
+  const candidates = items.value.filter(item => item.desiredEnabled === true && item.preparedDigest);
+  if (!candidates.length) {
+    updateCheckError.value = "没有已准备且启用的 MOD 可检查";
+    return;
+  }
+  const requestEpoch = epoch;
+  const ticket = ++updateSequence;
+  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  const recordVersion = connection.recordVersion;
+  const checkedAt = new Date().toISOString();
+  updateCheckBusy.value = true;
+  updateCheckError.value = "";
+  const isCurrentCheck = () => ticket === updateSequence && requestEpoch === epoch
+    && target.value !== null && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
+    && server.value?.recordVersion === recordVersion && revision.value === expectedRevision;
+  try {
+    for (let offset = 0; offset < candidates.length; offset += 100) {
+      const batch = candidates.slice(offset, offset + 100);
+      const requestId = crypto.randomUUID();
+      const response = await queueSsh(() => getWorkshopMetadata({
+        schemaVersion: 1, requestId, serverId: connection.serverId,
+        expectedRecordVersion: recordVersion, workshopIds: batch.map(item => item.workshopId),
+      }));
+      if (!isCurrentCheck()) return;
+      if (response.schemaVersion !== 1 || response.requestId !== requestId
+        || response.serverId !== connection.serverId || response.recordVersion !== recordVersion) {
+        throw new Error("Workshop 更新检查响应身份不匹配");
+      }
+      const metadata = new Map(response.items.map(item => [item.workshopId, item]));
+      const next = { ...updateCheckResults.value };
+      for (const item of batch) {
+        const current = metadata.get(item.workshopId);
+        next[item.workshopId] = {
+          hint: current?.result === 1 ? compareWorkshopRevision(current.contentHandle, item.preparedSourceHandle) : "unknown",
+          checkedAt,
+          sourceHandle: current?.contentHandle ?? null,
+        };
+      }
+      updateCheckResults.value = next;
+    }
+  } catch (cause) {
+    if (isCurrentCheck()) updateCheckError.value = describeError(cause).message;
+  } finally {
+    if (ticket === updateSequence && requestEpoch === epoch
+      && target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
+      && server.value?.recordVersion === recordVersion) updateCheckBusy.value = false;
+  }
+}
+
+function updateHintLabel(workshopId: string) {
+  const result = updateCheckResults.value[workshopId];
+  if (!result) return "未检查";
+  const item = items.value.find(current => current.workshopId === workshopId);
+  const candidateCurrent = !!item?.candidateDigest && !!result.sourceHandle
+    && result.sourceHandle === item.candidateSourceHandle;
+  const candidateIsCurrentContent = candidateCurrent && item?.candidateDigest === item.preparedDigest;
+  if (candidateIsCurrentContent || result.hint === "unchanged") return "已是最新";
+  if (candidateCurrent && item?.candidateVersion
+      && item.candidateVersion !== item.deployedVersion) return `${displayVersion(item.candidateVersion)} 可用`;
+  if (candidateCurrent) return "内容有更新，版本号未声明";
+  return result.hint === "candidate"
+    ? item?.preparedSourceHandle ? "发现更新，可获取版本" : "首次获取版本基线"
+    : "无法判断";
+}
+function updateHintTone(workshopId: string) {
+  const result = updateCheckResults.value[workshopId];
+  return result?.hint === "candidate" && updateHintLabel(workshopId) !== "已是最新" ? "warning"
+    : result?.hint === "unchanged" || updateHintLabel(workshopId) === "已是最新" ? "success" : "muted";
+}
+function updateCandidateHandle(workshopId: string) {
+  const result = updateCheckResults.value[workshopId];
+  const item = items.value.find(current => current.workshopId === workshopId);
+  if (!result?.sourceHandle) return null;
+  return result.sourceHandle === item?.candidateSourceHandle
+    || result.sourceHandle === item?.preparedSourceHandle ? null : result.sourceHandle;
+}
+function hasCurrentCandidate(workshopId: string) {
+  const result = updateCheckResults.value[workshopId];
+  const item = items.value.find(current => current.workshopId === workshopId);
+  return !!result?.sourceHandle && !!item?.candidateDigest
+    && item.candidateSourceHandle === result.sourceHandle;
+}
+function displayVersion(value: string | null) {
+  if (!value) return "版本未知";
+  const normalized = value.trim();
+  return /^v/i.test(normalized) ? normalized : `v${normalized}`;
+}
+const applyPreviewStale = computed(() => applyPreviewRevision.value !== null && revision.value !== applyPreviewRevision.value);
+
 function taskBelongsHere(task: TaskSnapshot, targetKey: string) {
   return task.operation === "modPrepare" && "instanceId" in task.target
     && `${task.target.serverId}:${task.target.hostId}:${task.target.instanceId}` === targetKey;
@@ -363,7 +549,13 @@ function acceptPrepareTask(task: TaskSnapshot, targetKey: string) {
   else {
     if (taskPollTimer) clearTimeout(taskPollTimer);
     taskPollTimer = undefined;
-    if (task.status === "succeeded") void refresh();
+    if (task.status === "succeeded") {
+      const checkCandidate = candidateFetchActive;
+      candidateFetchActive = false;
+      void refresh().then(() => checkCandidate ? checkModUpdates() : undefined);
+    } else if (task.status === "failed" || task.status === "interrupted") {
+      candidateFetchActive = false;
+    }
   }
 }
 
@@ -417,21 +609,88 @@ function scheduleTaskPoll(targetKey: string, operationId: string) {
   }, 3000);
 }
 
-async function prepareMod(item: InstanceModSummary) {
+async function adoptModCandidate(item: InstanceModSummary) {
+  const connection = server.value;
+  const instanceTarget = target.value;
+  const expectedRevision = revision.value;
+  if (!connection || !instanceTarget || expectedRevision === null || !item.candidateDigest
+      || !hasCurrentCandidate(item.workshopId) || item.candidateDigest === item.desiredArtifactDigest
+      || workspace.preview.value || savingWorkshopId.value !== null) return;
+  const savedEpoch = epoch;
+  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  const requestId = crypto.randomUUID();
+  const operationId = crypto.randomUUID();
+  savingWorkshopId.value = item.workshopId;
+  taskError.value = "";
+  try {
+    const mods = items.value.filter(current => current.desiredEnabled !== null).map(current => ({
+      workshopId: current.workshopId,
+      enabled: current.desiredEnabled === true,
+      configurationOptions: current.desiredConfiguration ?? {},
+      artifactDigest: current.workshopId === item.workshopId
+        ? item.candidateDigest : current.artifactDigest,
+    }));
+    const response = await queueSsh(() => saveInstanceMods({
+      schemaVersion: 1, requestId, target: instanceTarget,
+      expectedRecordVersion: connection.recordVersion, expectedRevision, operationId, mods,
+    }));
+    if (savedEpoch !== epoch || target.value === null
+        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
+        || server.value?.recordVersion !== connection.recordVersion) return;
+    if (response.schemaVersion !== 1 || response.requestId !== requestId
+        || response.operationId !== operationId || response.verifiedRevision <= expectedRevision
+        || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
+        || response.target.instanceId !== instanceTarget.instanceId) {
+      throw new Error("MOD 候选版本保存响应身份或版本不匹配");
+    }
+    await refresh();
+    await checkModUpdates();
+  } catch (cause) {
+    if (savedEpoch === epoch && target.value
+      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
+      && server.value?.recordVersion === connection.recordVersion) taskError.value = describeError(cause).message;
+  } finally {
+    if (savedEpoch === epoch && target.value
+      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
+      && server.value?.recordVersion === connection.recordVersion) savingWorkshopId.value = null;
+  }
+}
+
+async function prepareMod(item: InstanceModSummary, sourceHandle?: string) {
   const connection = server.value;
   const instanceTarget = target.value;
   if (!connection || !instanceTarget || revision.value === null || item.desiredEnabled !== true
-    || item.preparedDigest || savingWorkshopId.value !== null || workspace.preview.value
+    || (!sourceHandle && item.preparedDigest) || savingWorkshopId.value !== null
+    || preparingWorkshopId.value !== null || workspace.preview.value
     || prepareTask.value && ["queued", "running"].includes(prepareTask.value.status)) return;
   const requestEpoch = epoch;
   const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
   const operationId = crypto.randomUUID();
   taskError.value = "";
+  candidateFetchActive = !!sourceHandle;
+  preparingWorkshopId.value = item.workshopId;
   try {
+    const metadataRequestId = crypto.randomUUID();
+    const metadata = await queueSsh(() => getWorkshopMetadata({
+      schemaVersion: 1, requestId: metadataRequestId, serverId: connection.serverId,
+      expectedRecordVersion: connection.recordVersion, workshopIds: [item.workshopId],
+    }));
+    if (requestEpoch !== epoch || target.value === null
+        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
+        || server.value?.recordVersion !== connection.recordVersion) return;
+    if (metadata.schemaVersion !== 1 || metadata.requestId !== metadataRequestId
+        || metadata.serverId !== connection.serverId || metadata.recordVersion !== connection.recordVersion) {
+      throw new Error("Workshop 候选版本响应身份无效");
+    }
+    const currentSourceHandle = metadata.items.find(entry => entry.workshopId === item.workshopId)?.contentHandle ?? undefined;
+    if (sourceHandle && currentSourceHandle !== sourceHandle) {
+      throw new Error("Workshop 内容已再次更新，请重新检查后获取");
+    }
+    const pinnedSourceHandle = sourceHandle ?? currentSourceHandle;
     const requestId = crypto.randomUUID();
     const response = await queueSsh(() => prepareInstanceMods({ schemaVersion: 1, requestId, target: instanceTarget,
       expectedRecordVersion: connection.recordVersion, expectedRevision: revision.value!, operationId,
-      workshopIds: [item.workshopId] }));
+      workshopIds: [item.workshopId], sourceHandles: pinnedSourceHandle ? { [item.workshopId]: pinnedSourceHandle } : {} }));
     if (requestEpoch !== epoch || target.value === null
       || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
       || server.value?.recordVersion !== connection.recordVersion) return;
@@ -442,8 +701,12 @@ async function prepareMod(item: InstanceModSummary) {
     }
     acceptPrepareTask(response.task, targetKey);
   } catch (cause) {
+    candidateFetchActive = false;
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) taskError.value = describeError(cause).message;
+  } finally {
+    if (requestEpoch === epoch && target.value
+      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) preparingWorkshopId.value = null;
   }
 }
 
@@ -480,6 +743,10 @@ function prepareFailureLabel(task: TaskSnapshot) {
     : labels[error.code] ?? "MOD 准备失败";
   return `${label}${suffix}`;
 }
+function runtimeLabel(status: string | null) {
+  return status === "running" ? "运行中" : status === "stopped" ? "已停止"
+    : status === "degraded" ? "部分异常" : status === "starting" ? "启动中" : "未知";
+}
 function taskIncludesWorkshop(task: TaskSnapshot | null, workshopId: string) {
   if (!task || !task.result || typeof task.result !== "object" || !("requestedWorkshopIds" in task.result)) return false;
   const requested = task.result.requestedWorkshopIds;
@@ -497,6 +764,10 @@ onBeforeUnmount(() => { if (taskPollTimer) clearTimeout(taskPollTimer); });
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="MOD">
       <template #actions>
+        <button class="button" :disabled="workspace.preview.value || !target || loading || applyPreviewLoading"
+          @click="openApplyPreview"><Eye :size="15"/>应用预览</button>
+        <button class="button" :disabled="workspace.preview.value || !target || !checkableModsCount || loading || updateCheckBusy"
+          @click="checkModUpdates">{{ updateCheckBusy ? '检查中…' : '检查更新' }}</button>
         <button class="button primary" :disabled="workspace.preview.value || !target" @click="openWorkshopDialog">添加 MOD</button>
         <button class="button" :disabled="loading || !target" @click="refresh">
           <RefreshCw :size="16" :class="{ spinning: loading }" />
@@ -507,6 +778,7 @@ onBeforeUnmount(() => { if (taskPollTimer) clearTimeout(taskPollTimer); });
 
     <div v-if="error" class="inline-error">{{ error }}</div>
     <div v-if="taskError" class="error-strip">{{ taskError }}</div>
+    <div v-if="updateCheckError" class="error-strip">{{ updateCheckError }}</div>
     <section v-if="prepareTask" class="mod-task-state" aria-live="polite">
       <div>
         <strong>{{ prepareTask.status === 'succeeded' ? 'MOD 内容已准备' : prepareTask.status === 'failed' ? 'MOD 准备失败' : prepareTask.status === 'interrupted' ? 'MOD 任务中断' : '正在准备 MOD 内容' }}</strong>
@@ -527,18 +799,33 @@ onBeforeUnmount(() => { if (taskPollTimer) clearTimeout(taskPollTimer); });
     <div v-else-if="!loading && items.length === 0" class="empty-state"><h2>尚未发现 MOD</h2></div>
     <div v-else class="table-wrap">
       <table>
-        <thead><tr><th>Workshop ID</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th>内容</th><th class="table-action">操作</th></tr></thead>
+        <thead><tr><th>Workshop ID</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th>更新检查</th><th>内容</th><th class="table-action">操作</th></tr></thead>
         <tbody>
           <tr v-for="item in items" :key="item.workshopId">
             <td class="mono">{{ item.workshopId }}</td>
             <td><StatusLabel :tone="item.desiredEnabled === null ? 'warning' : item.desiredEnabled ? 'success' : 'muted'" :label="item.desiredEnabled === null ? '已移出期望' : item.desiredEnabled ? '启用' : '禁用'" /></td>
-            <td><StatusLabel :tone="item.deployedEnabled === item.desiredEnabled ? 'success' : 'warning'" :label="item.deployedEnabled === item.desiredEnabled ? '一致' : '待应用'" /></td>
+            <td>
+              <StatusLabel :tone="modNeedsApply(item) ? 'warning' : 'success'" :label="modNeedsApply(item) ? '待应用' : '一致'" />
+              <small class="table-sub">{{ item.deployedVersion ? displayVersion(item.deployedVersion) : '运行版本未知' }}</small>
+            </td>
             <td><StatusLabel :tone="statusTone(item.schema.status)" :label="statusLabel(item.schema.status)" /></td>
-            <td class="mono">{{ item.schema.metadata.version ?? '未知' }}</td>
+            <td class="mono">{{ displayVersion(item.schema.metadata.version) }}</td>
+            <td>
+              <StatusLabel :tone="updateHintTone(item.workshopId)" :label="updateHintLabel(item.workshopId)" />
+              <div v-if="updateCheckResults[item.workshopId]?.hint === 'candidate' && updateCandidateHandle(item.workshopId)" class="table-inline-actions">
+                <button class="text-button" :disabled="workspace.preview.value || preparingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status)"
+                  @click="prepareMod(item, updateCandidateHandle(item.workshopId) ?? undefined)">{{ item.preparedSourceHandle ? '获取版本' : '建立基线' }}</button>
+              </div>
+              <div v-if="hasCurrentCandidate(item.workshopId) && item.candidateDigest !== item.desiredArtifactDigest" class="table-inline-actions">
+                <small v-if="item.candidateVersion" class="table-sub">可用 {{ displayVersion(item.candidateVersion) }}</small>
+                <button class="text-button" :disabled="workspace.preview.value || savingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status)"
+                  @click="adoptModCandidate(item)">采用版本</button>
+              </div>
+            </td>
             <td><StatusLabel :tone="item.preparedDigest ? 'success' : 'warning'" :label="item.preparedDigest ? '已准备' : '未准备'" /></td>
             <td class="table-action">
               <button v-if="item.desiredEnabled === true && !item.preparedDigest" class="text-button"
-                :disabled="workspace.preview.value || savingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status)"
+                :disabled="workspace.preview.value || savingWorkshopId !== null || preparingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status)"
                 @click="prepareMod(item)">{{ taskIncludesWorkshop(prepareTask, item.workshopId) && prepareTask?.status === 'running' ? '准备中…' : '准备内容' }}</button>
               <span v-if="item.preparedDigest" class="muted-text">固定内容</span>
               <span v-else class="muted-text">启用后可准备</span>
@@ -632,6 +919,50 @@ onBeforeUnmount(() => { if (taskPollTimer) clearTimeout(taskPollTimer); });
         <button class="button primary" type="button"
           :disabled="configSaving || workspace.preview.value || configChangedFields.length === 0 || !!configValidationError"
           @click="saveConfiguration">{{ configSaving ? '保存中…' : '保存配置' }}</button>
+      </template>
+    </AppDialog>
+
+    <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容、分片与恢复条件">
+      <div v-if="applyPreviewLoading" class="empty-state"><h2>正在核对应用条件</h2></div>
+      <div v-else-if="applyPreviewError" class="inline-error">{{ applyPreviewError }}</div>
+      <div v-else-if="applyPreview" class="mod-apply-preview">
+        <div class="mod-apply-summary">
+          <div><span>配置版本</span><strong class="mono">{{ applyPreviewRevision }}</strong></div>
+          <div><span>专服状态</span><strong>{{ runtimeLabel(applyPreviewRuntime) }}</strong></div>
+          <div><span>目标分片</span><strong>{{ applyPreview.shards.map(shard => shard === 'master' ? 'Master' : 'Caves').join(' / ') || '无待应用变更' }}</strong></div>
+        </div>
+        <div v-if="applyPreviewStale" class="error-strip">MOD 配置版本已变化，此预览已失效。请重新生成。</div>
+        <section class="mod-apply-section">
+          <h3>MOD 变更 <span class="muted-text">{{ applyPreview.changes.length }}</span></h3>
+          <p v-if="!applyPreview.changes.length" class="muted-text">期望与已部署状态一致</p>
+          <div v-for="change in applyPreview.changes" :key="change.workshopId" class="mod-apply-change">
+            <span class="mono">{{ change.workshopId }}</span>
+            <StatusLabel tone="warning" :label="modActionChangeLabel(change)" />
+            <span v-if="change.configurationKeys.length" class="muted-text">配置：{{ change.configurationKeys.join('、') }}</span>
+            <span v-if="change.contentDigest" class="mono muted-text">{{ change.contentDigest.slice(0, 12) }}</span>
+          </div>
+        </section>
+        <section v-if="applyPreview.changes.length" class="mod-apply-section">
+          <h3>冷保护备份</h3>
+          <div v-if="applyPreview.protectionBackup" class="mod-protection-backup">
+            <StatusLabel tone="success" label="可恢复" />
+            <span>{{ applyPreview.protectionBackup.createdAt }}</span>
+            <span class="mono">{{ applyPreview.protectionBackup.backupId }}</span>
+          </div>
+          <p v-else class="mod-preview-warning">尚无可用冷保护点；应用任务必须先创建并验证冷备份。</p>
+        </section>
+        <div v-if="applyPreview.warnings.length" class="mod-preview-warning-list">
+          <p v-for="warning in applyPreview.warnings" :key="warning">{{ warning }}</p>
+        </div>
+        <div v-if="applyPreview.blockers.length" class="mod-preview-blockers">
+          <strong>当前不能发布</strong>
+          <p v-for="blocker in applyPreview.blockers" :key="blocker">{{ blocker }}</p>
+        </div>
+      </div>
+      <template #footer>
+        <button class="button" type="button" @click="applyPreviewOpen = false">关闭</button>
+        <button class="button primary" type="button" :disabled="applyPreviewLoading || !applyPreview || applyPreviewStale"
+          @click="openApplyPreview">重新核对</button>
       </template>
     </AppDialog>
   </div>

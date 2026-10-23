@@ -2,11 +2,18 @@ import { call } from "./invoke";
 import type { InstanceTarget } from "../types/contracts";
 import type { InstanceModsResponse } from "../types/mods";
 import type { TaskSnapshot } from "../types/contracts";
+import type { BackupListResponse } from "./instances";
 
 export function listInstanceMods(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
 }): Promise<InstanceModsResponse> {
   return call("list_instance_mods", request);
+}
+
+export function listModApplyProtectionBackups(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; expectedRevision: number;
+}): Promise<BackupListResponse> {
+  return call("list_instance_backups", request);
 }
 
 export function saveInstanceMods(request: {
@@ -20,7 +27,7 @@ export function saveInstanceMods(request: {
 
 export function prepareInstanceMods(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
-  expectedRevision: number; operationId: string; workshopIds: string[];
+  expectedRevision: number; operationId: string; workshopIds: string[]; sourceHandles?: Record<string, string>;
 }): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot }> {
   return call("prepare_instance_mods", request);
 }

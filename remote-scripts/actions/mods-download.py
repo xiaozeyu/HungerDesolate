@@ -218,6 +218,11 @@ def valid_request(request):
     ids = request["workshopIds"]
     if any(not isinstance(value, str) or not WORKSHOP_ID.fullmatch(value) for value in ids) or len(set(ids)) != len(ids):
         reject("MOD_TASK_INPUT_INVALID")
+    sources = request.get("sourceHandles", {})
+    if (not isinstance(sources, dict) or set(sources) - set(ids)
+            or any(not isinstance(value, str) or not value.isdigit() or len(value) > 64
+                   for value in sources.values())):
+        reject("MOD_TASK_INPUT_INVALID")
 
 
 def docker_environment():
@@ -436,6 +441,7 @@ def worker(task_id):
         for key in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "DOCKER_CONFIG"):
             environment.pop(key, None)
         environment.update({"LC_ALL": "C", "DOCKER_HOST": "unix:///var/run/docker.sock"})
+        source_handles = request.get("sourceHandles", {})
         for index, workshop_id in enumerate(request["workshopIds"]):
             CURRENT_STAGE = "download"
             set_status(directory, "running", "download", completed="prepare",
@@ -494,7 +500,8 @@ def worker(task_id):
                 atomic_json(candidate / "manifest.json", {"schemaVersion": 1, "workshopId": workshop_id,
                     "contentDigest": content_digest, "dstReleaseId": context["dstReleaseId"],
                     "fetcherImage": context["image"],
-                    "preparedAt": now(), "fileCount": len(files), "sizeBytes": size_bytes})
+                    "preparedAt": now(), "fileCount": len(files), "sizeBytes": size_bytes,
+                    "sourceHandle": source_handles.get(workshop_id)})
                 for current, _, names in os.walk(candidate / "content"):
                     os.chown(current, 0, 0)
                     os.chmod(current, 0o555)
@@ -504,8 +511,20 @@ def worker(task_id):
                         os.chmod(path, 0o444)
                 os.chmod(candidate / "manifest.json", 0o600)
                 os.rename(candidate, final)
+            if workshop_id in source_handles:
+                candidate_root = instance / "mods" / "candidates"
+                safe_dir(instance / "mods", create=True)
+                safe_dir(candidate_root, create=True)
+                atomic_json(candidate_root / (workshop_id + ".json"), {
+                    "schemaVersion": 1,
+                    "workshopId": workshop_id,
+                    "contentDigest": content_digest,
+                    "sourceHandle": source_handles[workshop_id],
+                    "preparedAt": now(),
+                })
             result["preparedMods"].append({"workshopId": workshop_id, "contentDigest": content_digest,
-                "dstReleaseId": context["dstReleaseId"], "fetcherImage": context["image"], "sizeBytes": size_bytes})
+                "dstReleaseId": context["dstReleaseId"], "fetcherImage": context["image"], "sizeBytes": size_bytes,
+                "sourceHandle": source_handles.get(workshop_id), "updateCandidate": workshop_id in source_handles})
             result["remoteChanged"] = True
             set_status(directory, "running", "verify", completed="download",
                 progress={"kind": "determinate", "completed": index + 1, "total": len(request["workshopIds"])}, result=result)

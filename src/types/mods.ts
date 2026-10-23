@@ -12,8 +12,12 @@ export interface ModField {
 export interface ModSchema { status: ModSchemaStatus; folderName: string; locale: string; metadata: ModMetadata; fields: ModField[]; diagnostics: ModDiagnostic[]; }
 export interface InstanceModSummary {
   workshopId: string; desiredEnabled: boolean | null; deployedEnabled: boolean | null;
-  desiredConfiguration: Record<string, unknown> | null; schema: ModSchema;
-  artifactDigest: string | null; preparedDigest: string | null; modinfoSha256: string | null;
+  desiredConfiguration: Record<string, unknown> | null; deployedConfiguration: Record<string, unknown> | null;
+  schema: ModSchema; artifactDigest: string | null; desiredArtifactDigest: string | null;
+  deployedArtifactDigest: string | null; preparedDigest: string | null; preparedAt: string | null;
+  modinfoSha256: string | null; preparedSourceHandle: string | null;
+  deployedVersion: string | null; candidateDigest: string | null; candidateVersion: string | null;
+  candidateSourceHandle: string | null; candidatePreparedAt: string | null;
 }
 export interface InstanceModsResponse {
   schemaVersion: 1; requestId: string; target: InstanceTarget; snapshotId: string;

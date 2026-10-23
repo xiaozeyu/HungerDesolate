@@ -217,13 +217,87 @@ def read_modinfo(instance_id, workshop_id, release_id, artifact_digest=None):
             os.close(fd)
         if not source or source.startswith(b"\x1b"):
             reject("MOD_ARTIFACT_INVALID")
+        prepared_at = None
+        content_digest = None
+        if path.parent.name == "content":
+            content_digest = path.parents[1].name
+            metadata = read_json(path.parents[1] / "manifest.json", None)
+            if isinstance(metadata, dict) and metadata.get("contentDigest") == content_digest:
+                prepared_at = metadata.get("preparedAt") if isinstance(metadata.get("preparedAt"), str) else None
         return {
             "folderName": f"workshop-{workshop_id}" if path.parent.name == "content" else path.parent.name,
             "sourceBase64": base64.b64encode(source).decode("ascii"),
             "sourceSha256": hashlib.sha256(source).hexdigest(),
-            "contentDigest": path.parents[1].name if path.parent.name == "content" else None,
+            "contentDigest": content_digest,
+            "preparedAt": prepared_at,
         }
     return None
+
+
+def read_prepared_artifact(instance_id, workshop_id, content_digest):
+    if not isinstance(content_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", content_digest):
+        return None
+    root = ROOT / "instances" / instance_id / "mods" / "prepared" / workshop_id
+    if not all(safe_directory(path) for path in (root.parents[2], root.parents[1], root.parents[0], root)):
+        return None
+    directory = root / content_digest
+    if not safe_directory(directory):
+        return None
+    metadata = read_json(directory / "manifest.json", None)
+    if (not isinstance(metadata, dict) or metadata.get("workshopId") != workshop_id
+            or metadata.get("contentDigest") != content_digest):
+        reject("MOD_ARTIFACT_INVALID")
+    path = directory / "content" / "modinfo.lua"
+    if not safe_artifact_path(ROOT / "instances" / instance_id / "mods", path.parent):
+        reject("MOD_ARTIFACT_INVALID")
+    try:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_MODINFO
+                or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022):
+            reject("MOD_ARTIFACT_INVALID")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            opened = os.fstat(fd)
+            if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                    or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                    or opened.st_size > MAX_MODINFO or opened.st_mode & 0o022):
+                reject("MOD_ARTIFACT_INVALID")
+            with os.fdopen(fd, "rb", closefd=False) as source_file:
+                source = source_file.read(MAX_MODINFO + 1)
+        finally:
+            os.close(fd)
+        if not source or len(source) > MAX_MODINFO or source.startswith(b"\x1b"):
+            reject("MOD_ARTIFACT_INVALID")
+    except FileNotFoundError:
+        return None
+    return {
+        "folderName": f"workshop-{workshop_id}",
+        "sourceBase64": base64.b64encode(source).decode("ascii"),
+        "sourceSha256": hashlib.sha256(source).hexdigest(),
+        "contentDigest": content_digest,
+        "preparedAt": metadata.get("preparedAt") if isinstance(metadata.get("preparedAt"), str) else None,
+        "sourceHandle": metadata.get("sourceHandle") if isinstance(metadata.get("sourceHandle"), str) else None,
+    }
+
+
+def read_candidate_artifact(instance_id, workshop_id, desired_digest):
+    root = ROOT / "instances" / instance_id
+    candidate_root = root / "mods" / "candidates"
+    if not all(safe_directory(path) for path in (root, root / "mods", candidate_root)):
+        return None
+    pointer = read_json(candidate_root / (workshop_id + ".json"), None)
+    if (not isinstance(pointer, dict) or pointer.get("schemaVersion") != 1
+            or pointer.get("workshopId") != workshop_id):
+        return None
+    digest = pointer.get("contentDigest")
+    if not isinstance(digest, str) or digest == desired_digest:
+        return None
+    artifact = read_prepared_artifact(instance_id, workshop_id, digest)
+    if artifact is None:
+        return None
+    artifact["sourceHandle"] = pointer.get("sourceHandle")
+    artifact["preparedAt"] = pointer.get("preparedAt")
+    return artifact
 
 
 def main(request):
@@ -246,11 +320,20 @@ def main(request):
     for workshop_id in sorted(set(desired) | set(deployed)):
         wanted = desired.get(workshop_id) or deployed.get(workshop_id) or {}
         artifact = read_modinfo(instance_id, workshop_id, release_id, wanted.get("artifactDigest"))
+        deployed_state = deployed.get(workshop_id)
+        deployed_artifact = None
+        if isinstance(deployed_state, dict) and isinstance(deployed_state.get("artifactDigest"), str):
+            deployed_artifact = read_prepared_artifact(instance_id, workshop_id, deployed_state["artifactDigest"])
+        candidate_artifact = read_candidate_artifact(
+            instance_id, workshop_id,
+            wanted.get("artifactDigest") if isinstance(wanted, dict) else None)
         items.append({
             "workshopId": workshop_id,
             "desired": desired.get(workshop_id),
-            "deployed": deployed.get(workshop_id),
+            "deployed": deployed_state,
             "artifact": artifact,
+            "deployedArtifact": deployed_artifact,
+            "candidateArtifact": candidate_artifact,
         })
     response = {
         "schemaVersion": 1,

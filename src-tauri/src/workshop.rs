@@ -1,21 +1,16 @@
 use crate::{
     dto::{CommandError, CommandResult},
-    ssh::with_verified_session,
+    persistence,
     ssh_dto::ConnectionRequest,
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ssh2::{ExtendedData, Session};
-use std::{
-    io::{Read, Write},
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{io::Read, path::Path, thread, time::Duration};
 
 const OP: &str = "getWorkshopMetadata";
-const SCRIPT: &str = include_str!("../../remote-scripts/probes/workshop-metadata.py");
+const API: &str = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
 const MAX_IDS: usize = 100;
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -27,8 +22,7 @@ pub struct Request {
     pub workshop_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 struct RemoteItem {
     workshop_id: String,
     result: Option<i64>,
@@ -41,6 +35,61 @@ struct RemoteItem {
     file_size: Option<i64>,
     preview_url: Option<String>,
     content_handle: Option<String>,
+}
+
+impl RemoteItem {
+    fn parse(value: Value) -> CommandResult<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| error("WORKSHOP_RESPONSE_INVALID", "Steam Workshop 条目格式无效"))?;
+        let workshop_id = scalar_string(object.get("publishedfileid"))
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 20
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            .ok_or_else(|| error("WORKSHOP_RESPONSE_INVALID", "Steam Workshop 条目标识无效"))?;
+        Ok(Self {
+            workshop_id,
+            result: scalar_i64(object.get("result")),
+            title: string_value(object.get("title")),
+            description: string_value(object.get("short_description")),
+            creator_app_id: scalar_i64(object.get("creator_appid"))
+                .and_then(|value| u32::try_from(value).ok()),
+            consumer_app_id: scalar_i64(object.get("consumer_appid"))
+                .and_then(|value| u32::try_from(value).ok()),
+            time_created: scalar_i64(object.get("time_created")),
+            time_updated: scalar_i64(object.get("time_updated")),
+            file_size: scalar_i64(object.get("file_size")),
+            preview_url: string_value(object.get("preview_url")),
+            content_handle: scalar_string(object.get("hcontent_file")).filter(|handle| {
+                !handle.is_empty()
+                    && handle.len() <= 64
+                    && handle.bytes().all(|byte| byte.is_ascii_digit())
+                    && handle.bytes().any(|byte| byte != b'0')
+            }),
+        })
+    }
+}
+
+fn string_value(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(str::to_owned)
+}
+
+fn scalar_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(|value| match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    })
+}
+
+fn scalar_i64(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|value| match value {
+        Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -75,7 +124,7 @@ fn error(code: &'static str, message: &'static str) -> Box<CommandError> {
         "workshop",
         OP,
         message,
-        "检查 Workshop ID 和远端网络后重试",
+        "检查 Workshop ID 和本机网络后重试",
     )
 }
 
@@ -85,83 +134,137 @@ fn safe_preview_url(value: Option<String>) -> Option<String> {
     })
 }
 
-fn invoke(session: &Session, request: &Request) -> CommandResult<Vec<RemoteItem>> {
-    let payload = serde_json::json!({"schemaVersion":1,"workshopIds":request.workshop_ids});
-    let encoded_request = STANDARD.encode(
-        serde_json::to_vec(&payload)
-            .map_err(|_| error("WORKSHOP_PROTOCOL_INVALID", "Workshop 请求编码失败"))?,
+fn ensure_tls_provider() -> CommandResult<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_none()
+        && rustls::crypto::ring::default_provider()
+            .install_default()
+            .is_err()
+        && rustls::crypto::CryptoProvider::get_default().is_none()
+    {
+        return Err(error(
+            "WORKSHOP_CLIENT_FAILED",
+            "无法初始化 Workshop 安全连接",
+        ));
+    }
+    Ok(())
+}
+
+fn invoke(request: &Request) -> CommandResult<Vec<RemoteItem>> {
+    ensure_tls_provider()?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| error("WORKSHOP_CLIENT_FAILED", "无法初始化 Workshop 查询"))?;
+    let mut form = vec![(
+        "itemcount".to_string(),
+        request.workshop_ids.len().to_string(),
+    )];
+    form.extend(
+        request
+            .workshop_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (format!("publishedfileids[{index}]"), id.clone())),
     );
-    let encoded_script = STANDARD.encode(SCRIPT.as_bytes());
-    let source = format!("import base64,json\nnamespace={{'__name__':'workshop_probe'}}\nexec(compile(base64.b64decode('{encoded_script}'),'<workshop-metadata>','exec'),namespace)\ntry:\n    namespace['main'](json.loads(base64.b64decode('{encoded_request}').decode('utf-8')))\nexcept Exception:\n    print(json.dumps({{'schemaVersion':1,'ok':False,'code':'WORKSHOP_PROBE_FAILED'}},separators=(',',':')))\n");
-    let mut channel = session
-        .channel_session()
-        .map_err(|_| error("WORKSHOP_CHANNEL_FAILED", "无法建立 Workshop 查询通道"))?;
-    channel
-        .handle_extended_data(ExtendedData::Ignore)
-        .map_err(|_| error("WORKSHOP_CHANNEL_FAILED", "无法配置 Workshop 查询通道"))?;
-    channel
-        .exec("/usr/bin/python3 -I -")
-        .map_err(|_| error("WORKSHOP_RUNTIME_REQUIRED", "远端需要 /usr/bin/python3"))?;
-    channel
-        .write_all(source.as_bytes())
-        .map_err(|_| error("WORKSHOP_CHANNEL_FAILED", "无法提交 Workshop 查询"))?;
-    channel
-        .send_eof()
-        .map_err(|_| error("WORKSHOP_CHANNEL_FAILED", "无法结束 Workshop 查询"))?;
-    session.set_blocking(false);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut output = Vec::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        if Instant::now() >= deadline {
-            return Err(error("WORKSHOP_QUERY_TIMEOUT", "Workshop 查询超时"));
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let mut response = match client.post(API).form(&form).send() {
+            Ok(response) => response,
+            Err(cause) => {
+                last_error = Some(cause);
+                if attempt == 0 {
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
+                break;
+            }
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(if status.is_server_error() || status.as_u16() == 429 {
+                error(
+                    "WORKSHOP_SERVICE_UNAVAILABLE",
+                    "Steam Workshop 暂时无法提供元数据",
+                )
+            } else {
+                error("WORKSHOP_RESPONSE_INVALID", "Steam Workshop 返回了无效响应")
+            });
         }
-        match channel.read(&mut buffer) {
-            Ok(0) if channel.eof() => break,
-            Ok(0) => std::thread::sleep(Duration::from_millis(20)),
-            Ok(count) if output.len() + count <= 2 * 1024 * 1024 => {
-                output.extend_from_slice(&buffer[..count])
-            }
-            Err(cause) if cause.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            _ => {
-                return Err(error(
-                    "WORKSHOP_CHANNEL_FAILED",
-                    "无法读取 Workshop 查询结果",
-                ))
-            }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(error(
+                "WORKSHOP_RESPONSE_TOO_LARGE",
+                "Steam Workshop 响应超过大小限制",
+            ));
         }
-    }
-    session.set_blocking(true);
-    channel
-        .wait_close()
-        .map_err(|_| error("WORKSHOP_CHANNEL_FAILED", "Workshop 查询通道未正常结束"))?;
-    let envelope: Value = serde_json::from_slice(&output)
-        .map_err(|_| error("WORKSHOP_PROTOCOL_INVALID", "Workshop 查询响应不是 JSON"))?;
-    if envelope.get("ok") != Some(&Value::Bool(true)) {
-        return Err(
-            match envelope
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("WORKSHOP_QUERY_FAILED")
-            {
-                "WORKSHOP_METADATA_UNAVAILABLE" => error(
-                    "WORKSHOP_METADATA_UNAVAILABLE",
-                    "无法连接 Steam Workshop 元数据服务",
-                ),
-                "WORKSHOP_INPUT_INVALID" => error("WORKSHOP_INPUT_INVALID", "Workshop ID 无效"),
-                _ => error("WORKSHOP_QUERY_FAILED", "读取 Workshop 元数据失败"),
-            },
-        );
-    }
-    serde_json::from_value(
-        envelope
-            .get("items")
+        let mut bytes = Vec::new();
+        response
+            .by_ref()
+            .take(MAX_RESPONSE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| error("WORKSHOP_RESPONSE_INVALID", "无法读取 Steam Workshop 响应"))?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(error(
+                "WORKSHOP_RESPONSE_TOO_LARGE",
+                "Steam Workshop 响应超过大小限制",
+            ));
+        }
+        let envelope: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| error("WORKSHOP_RESPONSE_INVALID", "Steam Workshop 响应格式无效"))?;
+        let details = envelope
+            .get("response")
+            .and_then(|value| value.get("publishedfiledetails"))
+            .ok_or_else(|| error("WORKSHOP_RESPONSE_INVALID", "Steam Workshop 响应缺少条目"))?;
+        let details = details.as_array().ok_or_else(|| {
+            error(
+                "WORKSHOP_RESPONSE_INVALID",
+                "Steam Workshop 条目列表格式无效",
+            )
+        })?;
+        if details.len() > MAX_IDS {
+            return Err(error(
+                "WORKSHOP_RESPONSE_INVALID",
+                "Steam Workshop 返回条目超过上限",
+            ));
+        }
+        let items = details
+            .iter()
             .cloned()
-            .ok_or_else(|| error("WORKSHOP_PROTOCOL_INVALID", "Workshop 响应缺少条目"))?,
-    )
-    .map_err(|_| error("WORKSHOP_PROTOCOL_INVALID", "Workshop 条目字段无效"))
+            .map(RemoteItem::parse)
+            .collect::<CommandResult<Vec<_>>>()?;
+        let requested: std::collections::HashSet<&str> =
+            request.workshop_ids.iter().map(String::as_str).collect();
+        let mut returned = std::collections::HashSet::new();
+        if items.iter().any(|item| {
+            !requested.contains(item.workshop_id.as_str())
+                || !returned.insert(item.workshop_id.as_str())
+        }) {
+            return Err(error(
+                "WORKSHOP_RESPONSE_INVALID",
+                "Steam Workshop 返回了重复或非请求条目",
+            ));
+        }
+        return Ok(items);
+    }
+    let cause = last_error;
+    let code = cause
+        .as_ref()
+        .map(reqwest::Error::is_timeout)
+        .unwrap_or(false);
+    Err(if code {
+        error(
+            "WORKSHOP_QUERY_TIMEOUT",
+            "连接 Steam Workshop 超时，请检查本机网络",
+        )
+    } else {
+        error(
+            "WORKSHOP_METADATA_UNAVAILABLE",
+            "无法连接 Steam Workshop，请检查本机网络或 DNS",
+        )
+    })
 }
 
 pub fn get(database: &Path, request: Request) -> CommandResult<Response> {
@@ -182,29 +285,72 @@ pub fn get(database: &Path, request: Request) -> CommandResult<Response> {
         server_id: request.server_id.clone(),
         expected_record_version: request.expected_record_version,
     };
-    with_verified_session(database, &connection, |session, _| {
-        let items = invoke(session, &request)?;
-        Ok(Response {
-            schema_version: 1,
-            request_id: request.request_id.clone(),
-            server_id: request.server_id.clone(),
-            record_version: request.expected_record_version,
-            items: items
-                .into_iter()
-                .map(|item| Item {
-                    workshop_id: item.workshop_id,
-                    result: item.result,
-                    title: item.title,
-                    description: item.description,
-                    creator_app_id: item.creator_app_id,
-                    consumer_app_id: item.consumer_app_id,
-                    time_created: item.time_created,
-                    time_updated: item.time_updated,
-                    file_size: item.file_size,
-                    preview_url: safe_preview_url(item.preview_url),
-                    content_handle: item.content_handle,
-                })
-                .collect(),
-        })
+    connection.validate(OP)?;
+    let database_connection = persistence::open(database).map_err(|_| CommandError::storage(OP))?;
+    let server = persistence::get_server(&database_connection, &request.server_id, OP)?;
+    if server.record_version != request.expected_record_version {
+        return Err(CommandError::conflict(OP, server.record_version));
+    }
+    let items = invoke(&request)?;
+    Ok(Response {
+        schema_version: 1,
+        request_id: request.request_id.clone(),
+        server_id: request.server_id.clone(),
+        record_version: request.expected_record_version,
+        items: items
+            .into_iter()
+            .map(|item| Item {
+                workshop_id: item.workshop_id,
+                result: item.result,
+                title: item.title,
+                description: item.description,
+                creator_app_id: item.creator_app_id,
+                consumer_app_id: item.consumer_app_id,
+                time_created: item.time_created,
+                time_updated: item.time_updated,
+                file_size: item.file_size,
+                preview_url: safe_preview_url(item.preview_url),
+                content_handle: item.content_handle,
+            })
+            .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteItem;
+    use serde_json::json;
+
+    #[test]
+    fn parses_numeric_and_string_encoded_steam_fields() {
+        let item = RemoteItem::parse(json!({
+            "publishedfileid": 2893991859_u64,
+            "result": "1",
+            "title": "Example mod",
+            "short_description": "Description",
+            "creator_appid": "322330",
+            "consumer_appid": 322330,
+            "time_created": "1700000000",
+            "time_updated": 1700000100,
+            "file_size": "1024",
+            "preview_url": "https://example.invalid/preview.png",
+            "hcontent_file": 12345
+        }))
+        .expect("valid Steam item");
+        assert_eq!(item.workshop_id, "2893991859");
+        assert_eq!(item.result, Some(1));
+        assert_eq!(item.creator_app_id, Some(322330));
+        assert_eq!(item.time_created, Some(1700000000));
+        assert_eq!(item.file_size, Some(1024));
+        assert_eq!(item.content_handle.as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn rejects_malformed_workshop_ids_without_rejecting_optional_unknown_fields() {
+        assert!(RemoteItem::parse(json!({"publishedfileid": "../bad", "title": "x"})).is_err());
+        let item =
+            RemoteItem::parse(json!({"publishedfileid": "123", "time_updated": {"unknown": true}}))
+                .expect("unknown optional value is ignored");
+        assert_eq!(item.time_updated, None);
+    }
 }

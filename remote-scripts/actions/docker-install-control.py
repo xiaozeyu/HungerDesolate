@@ -303,7 +303,8 @@ def start(request, worker_source, preflight_source):
             if config.get("snapshotDigest") != request.get("snapshotDigest") or config.get("planId") != plan_id:
                 reject("OPERATION_ID_REUSED")
             return state
-        current = inspect()
+        # Revalidate identity, packages and APT state without another transient network gate.
+        current = inspect(check_repository_access=False)
         expires = request.get("expiresAtUnixSeconds")
         if type(expires) is not int or expires <= int(time.time()) or expires > int(time.time()) + 600:
             reject("PLAN_EXPIRED")

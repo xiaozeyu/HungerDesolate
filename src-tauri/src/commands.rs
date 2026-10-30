@@ -330,6 +330,62 @@ pub async fn list_instance_mod_tasks(
 }
 
 #[tauri::command]
+pub async fn preview_apply_instance_mods(
+    state: State<'_, AppState>,
+    request: crate::mods::ApplyRequest,
+) -> CommandResult<crate::mods::ApplyPreviewResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "previewApplyInstanceMods",
+        safe_request_id(&request.request_id),
+        move || crate::mods::preview_apply(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn apply_instance_mods(
+    state: State<'_, AppState>,
+    request: crate::mods::ApplyStartRequest,
+) -> CommandResult<crate::mods::DownloadTaskResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "applyInstanceMods",
+        safe_request_id(&request.request_id),
+        move || crate::mods::apply_start(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_instance_mod_apply_task(
+    state: State<'_, AppState>,
+    request: crate::mods::ApplyTaskRequest,
+) -> CommandResult<crate::mods::DownloadTaskResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getInstanceModApplyTask",
+        safe_request_id(&request.request_id),
+        move || crate::mods::apply_status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_instance_mod_apply_tasks(
+    state: State<'_, AppState>,
+    request: crate::mods::ListRequest,
+) -> CommandResult<crate::mods::DownloadTaskListResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listInstanceModApplyTasks",
+        safe_request_id(&request.request_id),
+        move || crate::mods::apply_tasks(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn list_instance_backups(
     state: State<'_, AppState>,
     request: crate::backups::ListRequest,

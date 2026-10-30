@@ -88,6 +88,14 @@ Caves/server.ini
 
 ## 故障排查
 
+### 确认正在运行的安装脚本与完整任务日志
+
+软件内构建使用 `src-tauri/src/image_build.rs` 通过 `include_str!` 编译嵌入的构建脚本、共享 `Dockerfile` 与基础镜像准备脚本，每次接纳新构建时通过 SSH 下发到 `/opt/famine-hub/scripts/image-build/<releaseId>/actions`。新目录以无覆盖的 `mkdir` 取得，重复 Release ID 在上传前失败，不改写已有任务脚本。因此仅修改仓库文件不会更新已经运行的桌面后端。开发环境修改后需要重新编译并启动 Rust/Tauri 后端（`npm run desktop:dev`）；仅重启 Vite 前端不够。已开始或结束的任务日志不会因源码更新而变化。旧版后端仍可能使用固定的 `/opt/famine-hub/scripts/actions` 路径，必须重新启动新版后端才能应用脚本隔离。
+
+新版 bootstrap 阶段标题默认包含 `deadline=3600s`，失败诊断包含 `SteamCMD failure evidence`。如果某份任务日志没有这些字段，应核对该任务开始时实际复制到 `/var/lib/famine-hub/image-build/dst-runtime-build/install-dst.sh` 的脚本，而不能据当前仓库内容推定历史任务使用了修复。
+
+先使用 `tail -n 120 /var/lib/famine-hub/build-<releaseId>.log` 读取指定任务的原始日志末尾，再定位断言。`ILocalize::AddFile() failed to load file "public/steambootstrapper_english.txt"` 后如果仍有下载输出，就不能把这条提示当成该任务最终失败原因。只做 `grep -B/-A` 可能仅匹配这条启动提示并遗漏任务末尾；缺少终态标记时也不能认定所选文件已包含失败结果。
+
 ### 问题：构建镜像时 SteamCMD 下载失败
 
 日志中的 SteamCMD 自更新、Steam 匿名登录和 DST 内容下载是不同阶段。仅凭末尾 `CWorkThreadPool` 清理信息或退出码 8，不能断定具体网络、权限或空间问题。
@@ -107,11 +115,74 @@ curl -I https://steamcdn-a.akamaihd.net
 ./build.sh
 ```
 
+### 问题：`BASE_IMAGE_UNAVAILABLE` 或拉取 `debian:12-slim` 失败
+
+构建不再下载 `moby/buildkit`，直接使用 Docker daemon 自带的 BuildKit。构建前由 `prepare-base-image.sh` 确认本机已有 linux/amd64 的 `debian:12-slim`；没有时依次尝试 DaoCloud、1ms.run、Tencent Cloud 内网镜像和 Docker Hub，拉取成功后打成本地 `debian:12-slim` 标签。
+
+如果日志显示 `BASE_IMAGE_UNAVAILABLE`，说明所有入口都不可达。先在服务器上手动确认：
+
+```bash
+docker pull --platform linux/amd64 docker.m.daocloud.io/library/debian:12-slim
+```
+
+能成功时重新构建即可。构建脚本不修改 `daemon.json`、不重启 Docker、不关闭 TLS 校验，也不输出代理凭据或 Docker 原始认证错误正文。
+
 ### 问题：SteamCMD 报 `Failed to apply update` 或 `Failed to load steamconsole.so`
 
 **原因**: SteamCMD 解压后需要由运行它的 `steam` 用户更新自身文件。若安装目录仍归 root，SteamCMD 自更新会失败。
 
 **解决**: 使用包含 SteamCMD 目录 `chown` 修复的 Dockerfile 重新构建；若仍失败，先确认构建使用了项目内最新的 `docker/runtime/Dockerfile`，并检查完整日志中是否存在权限或网络错误。
+
+### 问题：SteamCMD 报 `libcurl.so: cannot open shared object file`
+
+**原因**: Debian 12 的基础镜像只有 32 位 `libcurl` 运行库时，SteamCMD 仍可能直接加载未版本化的 `libcurl.so`；缺少开发包提供的链接文件会导致 bootstrap 在下载 DST 前退出。
+
+**解决**: 当前 Dockerfile 已在 builder 和最终 runtime 两个阶段加入 `libcurl4-gnutls-dev:i386`。把更新后的 `docker/runtime/Dockerfile` 部署到服务器后重新创建 Release；不要只重试旧的基础镜像或构建缓存。
+
+### 问题：SteamCMD bootstrap 退出码 124
+
+**原因**: 退出码 124 表示 `timeout` 终止了 SteamCMD。bootstrap 需要先完成 SteamCMD 自更新；服务器到 Steam CDN 速度较慢时，10 分钟可能不够。
+
+**解决**: 当前默认 bootstrap 超时为 3600 秒，DST 下载阶段为 1800 秒，每阶段最多尝试 3 次。两条构建路线均通过 `--build-arg` 与 Dockerfile 的 `ARG` 显式传入 `STEAMCMD_BOOTSTRAP_DEADLINE` 和 `STEAMCMD_DOWNLOAD_DEADLINE`；必须使用正整数与 `s`/`m`/`h` 单位，`0s`、无限等待与非法格式会拒绝执行。退出码 124 只能确认触及等待上限，不能据此认定网络慢是唯一原因。
+
+对已经下发脚本的任务，手动运行远端构建脚本时可明确设置预算（环境变量须设置在服务器执行命令中，路径中的 Release ID 与参数保持一致）：
+
+```bash
+STEAMCMD_BOOTSTRAP_DEADLINE=4800s STEAMCMD_DOWNLOAD_DEADLINE=7200s \
+  bash '/opt/famine-hub/scripts/image-build/<releaseId>/actions/build-dst-image.sh' '<同一规范 UUID v4 Release ID>'
+```
+
+在软件中点击构建时仍使用新版脚本默认预算，桌面客户端不会自动继承用户另一个 SSH 终端中的环境变量。超时重试保留同一构建步骤的工作目录，但不保证 SteamCMD 对每个文件断点续传；每个 Release 使用独立构建目录，尚无跨任务 SteamCMD 下载缓存。更长预算不等于已修复服务器到 Steam CDN 的网络问题。
+
+### 构建命令复核（2026-10-30）
+
+- `DOCKER_BUILDKIT=1 docker build --platform linux/amd64 --progress=plain` 使用宿主 Docker daemon 自带的 BuildKit，不再下载或启动独立 BuildKit 容器。
+- 两条构建路线共用 `docker/runtime/Dockerfile`；远端由 Rust 上传同一文件，不再维护内嵌副本。
+- 构建前由 `prepare-base-image.sh` 准备 linux/amd64 的 `debian:12-slim`，用本地标签固定基础镜像；镜像源不可达时返回 `BASE_IMAGE_UNAVAILABLE`，不进入 Dockerfile。
+- 远端构建固定管理面的本机 Docker socket，避免构建使用另一 daemon，而登记验证却查本机。
+- 远端构建在清理共享上下文前获取独占文件锁；已有构建运行时返回 `IMAGE_BUILD_ALREADY_RUNNING`，不删除活动任务文件。
+- 镜像验证/元数据/本地导出使用经过格式校验的本地 image ID；不要求尚未推送的镜像具有 `RepoDigests`。版本读取失败或非数字版本直接失败，不生成 `unknown` 成功结果。
+- 远端后台命令重定向标准输入到 `/dev/null`；构建/日志查询的 Release ID 在建立 SSH 会话前强制校验规范 UUID v4。构建脚本从自身位置定位同一 Release 的配套脚本，后续任务不覆盖旧任务源文件。
+
+回归入口为 `python3 scripts/test-image-build-commands.py`、`python3 scripts/test-steamcmd-install.py`。命令回归使用隔离 CLI fixture，不运行真实 Docker、sudo、APT 或联网下载，不能替代 Linux amd64 完整构建验收。
+
+### 问题：SteamCMD 生成 `assert_*.dmp` 并以退出码 254 退出
+
+**排查**: 退出码 254 和 minidump 上传信息不能单独确定根因。优先核对 Docker Engine：29.4.2 的默认 seccomp 配置会阻断 32 位程序使用的 `socketcall`，Docker 官方已记录 SteamCMD 会因此失败；29.4.3 修复了这个回归。
+
+**解决**: 先检查服务器版本：
+
+```bash
+docker version --format '{{.Server.Version}}'
+```
+
+如果是 `29.4.2`，升级 Docker Engine 至 `29.4.3` 或更新版本并重启 Docker。当前构建脚本会在构建开始前拒绝该版本，并返回 `DOCKER_ENGINE_INCOMPATIBLE`，避免等待 SteamCMD 超时。不要使用 `seccomp=unconfined` 绕过此问题；Docker 官方建议使用已修复版本。
+
+如果不是受影响版本，读取 `/var/lib/famine-hub/build-<releaseId>.log` 中 minidump 首次出现前的断言、Fatal Error 与 bootstrap 日志再判断；不要仅增加超时或把退出码 254 视为成功。安装脚本现在额外输出本轮阶段日志末尾 80 行，桌面构建日志保留末尾 120 行。
+
+服务器报告为 `29.9.2` 时，不能再直接套用 `29.4.2` 的版本回归结论。下载到某个百分比也不等于网络是唯一原因；必须读取退出前的断言。安装脚本失败摘要现在额外摘录原始断言、Fatal Error 和更新失败信息（每个日志最多 4 行、每行最多 512 字符），放在诊断末尾，避免被下载进度或 minidump 上传信息挤出桌面日志范围。该摘要只辅助诊断，不改变原始退出码或成功条件。
+
+官方依据（2026-10-25 核对）：[Docker Engine 29.4.2 已知问题](https://docs.docker.com/engine/release-notes/29/#2942)、[29.4.3 修复记录](https://docs.docker.com/engine/release-notes/29/#2943)。
 
 ### 问题：传输文件失败
 

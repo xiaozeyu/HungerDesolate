@@ -4,6 +4,34 @@ import type { InstanceModsResponse } from "../types/mods";
 import type { TaskSnapshot } from "../types/contracts";
 import type { BackupListResponse } from "./instances";
 
+export interface ModApplyPreviewResponse {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; configRevision: number;
+  desiredDigest: string; modsReleaseId: string | null; runtimeStatus: "running" | "stopped";
+  shards: Array<"master" | "caves">; changes: { workshopId: string; action: "add" | "update" | "configure" | "disable" | "remove" }[];
+  blockers: string[]; allowed: boolean;
+}
+export function previewInstanceMods(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; expectedRevision: number;
+}): Promise<ModApplyPreviewResponse> {
+  return call("preview_apply_instance_mods", request);
+}
+export function applyInstanceMods(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
+  expectedRevision: number; desiredDigest: string; operationId: string;
+}): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot }> {
+  return call("apply_instance_mods", request);
+}
+export function getInstanceModApplyTask(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; operationId: string;
+}): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot }> {
+  return call("get_instance_mod_apply_task", request);
+}
+export function listInstanceModApplyTasks(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
+}): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; items: TaskSnapshot[] }> {
+  return call("list_instance_mod_apply_tasks", request);
+}
+
 export function listInstanceMods(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
 }): Promise<InstanceModsResponse> {
@@ -27,7 +55,8 @@ export function saveInstanceMods(request: {
 
 export function prepareInstanceMods(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
-  expectedRevision: number; operationId: string; workshopIds: string[]; sourceHandles?: Record<string, string>;
+  expectedRevision: number; operationId: string; workshopIds: string[];
+  sourceHandles?: Record<string, string>; candidateWorkshopIds?: string[];
 }): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot }> {
   return call("prepare_instance_mods", request);
 }

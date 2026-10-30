@@ -18,6 +18,20 @@ export interface ModApplyPreview {
   canApply: boolean;
 }
 
+const serverBlockerLabels: Record<string, string> = {
+  MOD_RESTORE_ACCEPTANCE_REQUIRED: "MOD 发布恢复验收尚未通过此 Linux 主机验收",
+  MOD_PROTECTION_BACKUP_REQUIRED: "缺少有效的冷保护备份，不能开始发布",
+  MOD_ARTIFACT_REQUIRED: "启用的 MOD 缺少固定内容，请先准备内容",
+};
+
+export function mergeModApplyBlockers(preview: ModApplyPreview, serverBlockers: string[]): string[] {
+  const blockers = preview.blockers.filter(blocker =>
+    !(serverBlockers.includes("MOD_RESTORE_ACCEPTANCE_REQUIRED")
+      && blocker === "MOD 发布恢复流程尚未通过此 Linux 主机验收"));
+  for (const code of serverBlockers) blockers.push(serverBlockerLabels[code] ?? `服务端阻断发布：${code}`);
+  return [...new Set(blockers)];
+}
+
 export function buildModApplyPreview(input: {
   mods: InstanceModSummary[];
   backups: BackupSummary[];

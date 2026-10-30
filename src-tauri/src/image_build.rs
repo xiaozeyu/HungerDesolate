@@ -11,8 +11,8 @@ use std::{
 };
 
 const BUILD_SCRIPT: &str = include_str!("../../remote-scripts/actions/build-dst-image.sh");
-const BUILD_MIRROR_SCRIPT: &str =
-    include_str!("../../remote-scripts/actions/configure-buildkit-mirrors.py");
+const DOCKERFILE: &str = include_str!("../../docker/runtime/Dockerfile");
+const BASE_IMAGE_SCRIPT: &str = include_str!("../../docker/runtime/prepare-base-image.sh");
 const INSTALL_SCRIPT: &str = include_str!("../../docker/runtime/install-dst.sh");
 const FETCH_WORKSHOP_SCRIPT: &str = include_str!("../../docker/runtime/fetch-workshop.sh");
 const REGISTER_RELEASE_SCRIPT: &str =
@@ -106,8 +106,45 @@ fn make_error(
     })
 }
 
+fn upload_script(
+    session: &Session,
+    path: &str,
+    content: &str,
+    mode: i32,
+    label: &'static str,
+) -> CommandResult<()> {
+    let mut remote_file = session
+        .scp_send(Path::new(path), mode, content.len() as u64, None)
+        .map_err(|e| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "无法上传构建脚本",
+                json!({"script": label, "error": e.to_string()}),
+            )
+        })?;
+    remote_file
+        .write_all(content.as_bytes())
+        .and_then(|_| remote_file.send_eof().map_err(std::io::Error::other))
+        .and_then(|_| remote_file.wait_eof().map_err(std::io::Error::other))
+        .and_then(|_| remote_file.close().map_err(std::io::Error::other))
+        .and_then(|_| remote_file.wait_close().map_err(std::io::Error::other))
+        .map_err(|e| {
+            make_error(
+                "SCRIPT_UPLOAD_FAILED",
+                "构建脚本传输异常",
+                json!({"script": label, "error": e.to_string()}),
+            )
+        })?;
+    Ok(())
+}
+
 fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
-    // 确保脚本目录存在
+    // Claim a new immutable script snapshot; never overwrite another build's scripts.
+    let script_root = format!("/opt/famine-hub/scripts/image-build/{release_id}");
+    let script_dir = format!("{script_root}/actions");
+    let prepare_scripts = format!(
+        "mkdir -p /opt/famine-hub/scripts/image-build && mkdir {script_root} && mkdir {script_dir}"
+    );
     let mut channel = session.channel_session().map_err(|e| {
         make_error(
             "SSH_CHANNEL_FAILED",
@@ -116,15 +153,13 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
         )
     })?;
 
-    channel
-        .exec("mkdir -p /opt/famine-hub/scripts/actions")
-        .map_err(|e| {
-            make_error(
-                "MKDIR_FAILED",
-                "无法创建脚本目录",
-                json!({"error": e.to_string()}),
-            )
-        })?;
+    channel.exec(&prepare_scripts).map_err(|e| {
+        make_error(
+            "MKDIR_FAILED",
+            "无法创建脚本目录",
+            json!({"error": e.to_string()}),
+        )
+    })?;
 
     let mut output = String::new();
     channel.read_to_string(&mut output).ok();
@@ -155,197 +190,54 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
 
     drop(channel);
 
-    // 上传构建脚本
-    let script_path = "/opt/famine-hub/scripts/actions/build-dst-image.sh";
-    let mut remote_file = session
-        .scp_send(
-            std::path::Path::new(script_path),
-            0o755,
-            BUILD_SCRIPT.len() as u64,
-            None,
-        )
-        .map_err(|e| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "无法上传构建脚本",
-                json!({"error": e.to_string()}),
-            )
-        })?;
-
-    remote_file
-        .write_all(BUILD_SCRIPT.as_bytes())
-        .map_err(|e| {
-            make_error(
-                "SCRIPT_WRITE_FAILED",
-                "无法写入构建脚本",
-                json!({"error": e.to_string()}),
-            )
-        })?;
-
-    remote_file.send_eof().map_err(|e| {
-        make_error(
-            "SCRIPT_EOF_FAILED",
-            "脚本传输异常",
-            json!({"error": e.to_string()}),
-        )
-    })?;
-
-    remote_file.wait_eof().map_err(|e| {
-        make_error(
-            "SCRIPT_WAIT_EOF_FAILED",
-            "等待脚本传输完成失败",
-            json!({"error": e.to_string()}),
-        )
-    })?;
-
-    remote_file.close().map_err(|e| {
-        make_error(
-            "SCRIPT_CLOSE_FAILED",
-            "关闭脚本文件失败",
-            json!({"error": e.to_string()}),
-        )
-    })?;
-
-    drop(remote_file);
-
-    let register_path = "/opt/famine-hub/scripts/actions/register-built-release.py";
-    let mut remote_file = session
-        .scp_send(
-            Path::new(register_path),
-            0o644,
-            REGISTER_RELEASE_SCRIPT.len() as u64,
-            None,
-        )
-        .map_err(|e| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "无法上传 Release 登记脚本",
-                json!({"error": e.to_string()}),
-            )
-        })?;
-    remote_file
-        .write_all(REGISTER_RELEASE_SCRIPT.as_bytes())
-        .map_err(|e| {
-            make_error(
-                "SCRIPT_WRITE_FAILED",
-                "无法写入 Release 登记脚本",
-                json!({"error": e.to_string()}),
-            )
-        })?;
-    remote_file
-        .send_eof()
-        .and_then(|_| remote_file.wait_eof())
-        .and_then(|_| remote_file.close())
-        .map_err(|e| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "Release 登记脚本传输异常",
-                json!({"error": e.to_string()}),
-            )
-        })?;
-    drop(remote_file);
-
-    let mirror_config_path = "/opt/famine-hub/scripts/actions/configure-buildkit-mirrors.py";
-    let mut remote_file = session
-        .scp_send(
-            Path::new(mirror_config_path),
-            0o644,
-            BUILD_MIRROR_SCRIPT.len() as u64,
-            None,
-        )
-        .map_err(|_| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "无法上传 BuildKit 镜像源配置脚本",
-                json!({}),
-            )
-        })?;
-    remote_file
-        .write_all(BUILD_MIRROR_SCRIPT.as_bytes())
-        .map_err(|_| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "无法写入 BuildKit 镜像源配置脚本",
-                json!({}),
-            )
-        })?;
-    remote_file
-        .send_eof()
-        .and_then(|_| remote_file.wait_eof())
-        .and_then(|_| remote_file.close())
-        .and_then(|_| remote_file.wait_close())
-        .map_err(|_| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "BuildKit 镜像源配置脚本传输异常",
-                json!({}),
-            )
-        })?;
-    drop(remote_file);
-
-    // 上传与本地构建共用的 SteamCMD 安装脚本。
-    let mut installer = session
-        .scp_send(
-            Path::new("/opt/famine-hub/scripts/actions/install-dst.sh"),
-            0o644,
-            INSTALL_SCRIPT.len() as u64,
-            None,
-        )
-        .map_err(|_| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "无法上传 SteamCMD 安装脚本",
-                json!({}),
-            )
-        })?;
-    installer
-        .write_all(INSTALL_SCRIPT.as_bytes())
-        .and_then(|_| installer.send_eof().map_err(std::io::Error::other))
-        .and_then(|_| installer.wait_eof().map_err(std::io::Error::other))
-        .and_then(|_| installer.close().map_err(std::io::Error::other))
-        .and_then(|_| installer.wait_close().map_err(std::io::Error::other))
-        .map_err(|_| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "SteamCMD 安装脚本传输异常",
-                json!({}),
-            )
-        })?;
-    drop(installer);
-
-    // Bundle the pinned-image Workshop fetch wrapper in releases built on managed hosts.
-    let mut fetcher = session
-        .scp_send(
-            Path::new("/opt/famine-hub/scripts/actions/fetch-workshop.sh"),
-            0o644,
-            FETCH_WORKSHOP_SCRIPT.len() as u64,
-            None,
-        )
-        .map_err(|_| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "无法上传 Workshop 下载脚本",
-                json!({}),
-            )
-        })?;
-    fetcher
-        .write_all(FETCH_WORKSHOP_SCRIPT.as_bytes())
-        .and_then(|_| fetcher.send_eof().map_err(std::io::Error::other))
-        .and_then(|_| fetcher.wait_eof().map_err(std::io::Error::other))
-        .and_then(|_| fetcher.close().map_err(std::io::Error::other))
-        .and_then(|_| fetcher.wait_close().map_err(std::io::Error::other))
-        .map_err(|_| {
-            make_error(
-                "SCRIPT_UPLOAD_FAILED",
-                "Workshop 下载脚本传输异常",
-                json!({}),
-            )
-        })?;
-    drop(fetcher);
+    // 上传构建脚本、共享 Dockerfile 与基础镜像准备脚本。
+    let script_path = format!("{script_dir}/build-dst-image.sh");
+    upload_script(
+        session,
+        &script_path,
+        BUILD_SCRIPT,
+        0o755,
+        "build-dst-image.sh",
+    )?;
+    upload_script(
+        session,
+        &format!("{script_dir}/Dockerfile"),
+        DOCKERFILE,
+        0o644,
+        "Dockerfile",
+    )?;
+    upload_script(
+        session,
+        &format!("{script_dir}/prepare-base-image.sh"),
+        BASE_IMAGE_SCRIPT,
+        0o644,
+        "prepare-base-image.sh",
+    )?;
+    upload_script(
+        session,
+        &format!("{script_dir}/install-dst.sh"),
+        INSTALL_SCRIPT,
+        0o644,
+        "install-dst.sh",
+    )?;
+    upload_script(
+        session,
+        &format!("{script_dir}/fetch-workshop.sh"),
+        FETCH_WORKSHOP_SCRIPT,
+        0o644,
+        "fetch-workshop.sh",
+    )?;
+    upload_script(
+        session,
+        &format!("{script_dir}/register-built-release.py"),
+        REGISTER_RELEASE_SCRIPT,
+        0o644,
+        "register-built-release.py",
+    )?;
 
     // 执行构建（后台运行）。
     let build_command = format!(
-        "nohup bash {} {} > /var/lib/famine-hub/build-{}.log 2>&1 &",
+        "nohup bash {} {} < /dev/null > /var/lib/famine-hub/build-{}.log 2>&1 &",
         script_path, release_id, release_id
     );
 
@@ -397,7 +289,8 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
 
 fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress>, Vec<String>) {
     let lines: Vec<String> = log_content.lines().map(|s| s.to_string()).collect();
-    let tail: Vec<String> = lines.iter().rev().take(20).rev().cloned().collect();
+    // Keep enough context for SteamCMD assertions preceding minidump and disk diagnostics.
+    let tail: Vec<String> = lines.iter().rev().take(120).rev().cloned().collect();
 
     let structured = lines.iter().any(|line| line == "FAMINE_BUILD_STARTED");
     // Intermediate SteamCMD errors may be retried; only the host script marks a terminal result.
@@ -450,8 +343,8 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
         Some(("初始化 SteamCMD".to_string(), 30))
     } else if log_content.contains("==> 开始构建 Docker 镜像") {
         Some(("正在构建镜像".to_string(), 50))
-    } else if log_content.contains("==> 创建 Dockerfile") {
-        Some(("准备 Dockerfile".to_string(), 20))
+    } else if log_content.contains("==> 准备 Debian 基础镜像") {
+        Some(("准备 Debian 基础镜像".to_string(), 20))
     } else if log_content.contains("==> 准备构建目录") {
         Some(("准备构建环境".to_string(), 10))
     } else {
@@ -555,6 +448,8 @@ pub fn build_dst_image(
     let release_id = request
         .release_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Validate before interpolating the ID into remote commands and log paths.
+    crate::server_input::validate_id(&release_id, OP, "releaseId")?;
 
     let connection = ConnectionRequest {
         schema_version: 1,
@@ -601,6 +496,7 @@ pub fn get_build_status(
             "使用最新版本的应用",
         ));
     }
+    crate::server_input::validate_id(&request.release_id, "getBuildStatus", "releaseId")?;
 
     let connection = ConnectionRequest {
         schema_version: 1,
@@ -635,7 +531,96 @@ pub fn get_build_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_build_progress, BuildStatus};
+    use super::{
+        build_dst_image, get_build_status, parse_build_progress, BuildImageRequest, BuildStatus,
+        GetBuildStatusRequest, HostTarget,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn base_image_stage_precedes_docker_build_and_failure_is_terminal() {
+        let (_, progress, _) =
+            parse_build_progress("FAMINE_BUILD_STARTED\n==> 准备 Debian 基础镜像\n");
+        assert_eq!(
+            progress.map(|item| item.current_step),
+            Some("准备 Debian 基础镜像".into())
+        );
+        let (status, progress, _) =
+            parse_build_progress("FAMINE_BUILD_STARTED\n==> 开始构建 Docker 镜像\n");
+        assert!(matches!(status, BuildStatus::Building));
+        assert_eq!(
+            progress.map(|item| item.current_step),
+            Some("正在构建镜像".into())
+        );
+        let (status, _, _) = parse_build_progress(
+            "FAMINE_BUILD_STARTED\nBASE_IMAGE_UNAVAILABLE\nFAMINE_BUILD_FAILED:1\n",
+        );
+        assert!(matches!(status, BuildStatus::Failed));
+    }
+
+    #[test]
+    fn command_and_log_release_ids_are_validated_before_accessing_connections() {
+        for release_id in [
+            "../outside",
+            "$(id)",
+            "bad; echo injected",
+            "11111111-1111-4111-8111-111111111111\n",
+            "11111111-1111-1111-8111-111111111111",
+        ] {
+            let target = || HostTarget {
+                server_id: "22222222-2222-4222-8222-222222222222".into(),
+                host_id: "33333333-3333-4333-8333-333333333333".into(),
+            };
+            let database = Path::new("/nonexistent-image-build-test.sqlite");
+            let build = build_dst_image(
+                database,
+                BuildImageRequest {
+                    schema_version: 1,
+                    request_id: "44444444-4444-4444-8444-444444444444".into(),
+                    target: target(),
+                    expected_record_version: 1,
+                    release_id: Some(release_id.into()),
+                },
+            )
+            .expect_err("invalid release ID must not reach the database or SSH");
+            assert_eq!(build.code, "INPUT_INVALID");
+            assert_eq!(build.details["field"], "releaseId");
+            let status = get_build_status(
+                database,
+                GetBuildStatusRequest {
+                    schema_version: 1,
+                    request_id: "44444444-4444-4444-8444-444444444444".into(),
+                    target: target(),
+                    expected_record_version: 1,
+                    release_id: release_id.into(),
+                },
+            )
+            .expect_err("invalid log ID must not reach the database or SSH");
+            assert_eq!(status.code, "INPUT_INVALID");
+            assert_eq!(status.details["field"], "releaseId");
+        }
+    }
+
+    #[test]
+    fn failure_tail_keeps_steamcmd_context_and_remains_bounded() {
+        let mut log = "FAMINE_BUILD_STARTED\n".to_string();
+        for _ in 0..150 {
+            log.push_str("Downloading update...\n");
+        }
+        log.push_str("Assertion Failed: mock SteamCMD diagnostic\n");
+        for _ in 0..40 {
+            log.push_str("minidump upload and filesystem diagnostics\n");
+        }
+        log.push_str("FAMINE_BUILD_FAILED:1\n");
+        let (status, _, tail) = parse_build_progress(&log);
+        assert!(matches!(status, BuildStatus::Failed));
+        assert_eq!(tail.len(), 120);
+        assert!(tail.iter().any(|line| line.contains("Assertion Failed")));
+        assert_eq!(
+            tail.last().map(String::as_str),
+            Some("FAMINE_BUILD_FAILED:1")
+        );
+    }
 
     #[test]
     fn retry_diagnostics_do_not_terminate_the_build() {

@@ -255,7 +255,8 @@ def main(task_path):
         plan = json.loads((task_dir / "plan.json").read_text(encoding="utf-8"))
         if plan.get("taskId") != task_dir.name:
             raise RuntimeError("INSTALL_PLAN_STALE")
-        preflight = runpy.run_path(str(task_dir / "preflight.py"))["inspect"]()
+        # Actual key/APT operations enforce connectivity and verification in their own phases.
+        preflight = runpy.run_path(str(task_dir / "preflight.py"))["inspect"](check_repository_access=False)
         if (preflight["status"] != "ready" or preflight["snapshotDigest"] != plan["snapshotDigest"]
                 or preflight.get("hostId") != plan["hostId"]):
             raise RuntimeError("INSTALL_PLAN_STALE")

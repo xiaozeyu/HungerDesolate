@@ -128,8 +128,17 @@ def repair_runtime_layout(instance, manifest, release, project, shards):
         previous = (instance / "compose.yaml").read_text(encoding="utf-8")
     except (OSError, ValueError, RELEASE_HELPERS["ReleaseRejected"]):
         reject("INSTANCE_START_STATE_INVALID")
-    legacy = desired.replace("    working_dir: '/srv/dst/bin64'", "    working_dir: '/srv'")
-    if previous not in (desired, legacy):
+    variants = {desired, desired.replace("    working_dir: '/srv/dst/bin64'", "    working_dir: '/srv'")}
+    if manifest.get("modsReleaseId"):
+        legacy_manifest = dict(manifest)
+        legacy_manifest.pop("modsReleaseId", None)
+        try:
+            legacy_compose = RELEASE_HELPERS["render_compose"](legacy_manifest, release, str(instance))
+            variants.add(legacy_compose)
+            variants.add(legacy_compose.replace("    working_dir: '/srv/dst/bin64'", "    working_dir: '/srv'"))
+        except (ValueError, RELEASE_HELPERS["ReleaseRejected"]):
+            pass
+    if previous not in variants:
         reject("INSTANCE_START_COMPOSE_DRIFT")
     if previous != desired:
         # Preserve the original file before replacing the generated working directory.
@@ -152,7 +161,8 @@ def repair_runtime_layout(instance, manifest, release, project, shards):
         finally:
             temporary.unlink(missing_ok=True)
     try:
-        RELEASE_HELPERS["prepare_runtime_paths"](str(instance), release["releaseId"], manifest["cavesEnabled"])
+        RELEASE_HELPERS["prepare_runtime_paths"](
+            str(instance), manifest.get("modsReleaseId") or release["releaseId"], manifest["cavesEnabled"])
     except (OSError, RELEASE_HELPERS["ReleaseRejected"]):
         reject("INSTANCE_START_RUNTIME_PATH_INVALID")
     if previous != desired:

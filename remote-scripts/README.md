@@ -16,6 +16,8 @@ Docker 安装预检只读 `/etc/os-release`、管理身份、dpkg/source 配置�
 
 仓库检查保留单次请求及 `urlopen(timeout=5)`，不后台重试或自动切换源。连接/读取超时、DNS、TLS 证书、TLS 连接、其他连接错误、HTTP 状态与非预期响应分别返回固定阻断码；页面仍显示最近一次预检快照。修改脚本后重新编译并启动桌面后端，下一次预检自动通过 SSH 下发新代码。不能通过本机仓库连通性推断服务器的实际结果。
 
+2026-10-25 修复确认安装时的重复网络门禁：交互预检继续探测仓库，失败仍阻断确认；确认接纳和 worker 启动仅用 `inspect(check_repository_access=False)` 复核本地主机身份、权限、APT/包状态、源/密钥路径和磁盘条件，不再次探测 `InRelease`。`snapshotDigest` 仅绑定本地主机状态，不包含瞬时的 `repositoryReachable`。内部跳过探测时该字段为 `None`，不伪造成功；对外 preview 响应仍为布尔值。签名密钥下载、TLS 校验、APT 操作及安装后运行验证保持执行，真实失败仍记录对应阶段和错误码；不存在网络失联即判安装成功的回退。
+
 安装 worker 在新软件源发布之前下载签名密钥并检查完整 PEM 包络与大小；不覆盖已有文件。下载网络超时、DNS/连接错误、HTTP 408/429/5xx 最多尝试三次，间隔 1、2 秒；证书、TLS、格式错误直接失败，仍使用系统 TLS 校验和固定官方地址。失败状态保留实际阶段及安全错误码。运行和已结束的旧任务继续使用创建时的脚本；更新桌面后重新预检并创建新任务才能应用修复，旧 `INSTALL_FAILED` 不能补推原始异常。
 
 `probes/instance-create-preview.py` 为只读创建规划：当前固定公网路线，核验完整主机身份与注册表版本，保守合并 registry/manifest 端口、Linux socket 和 Docker 发布配置；不写文件/创建容器/分配实例。端口与目录是未预留建议，部署兼容性门禁未通过前返回固定阻断。测试入口 `python3 scripts/test-instance-create-preview.py`；实际游戏联网和容量仍需阶段 0。

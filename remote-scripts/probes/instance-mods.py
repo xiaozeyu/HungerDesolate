@@ -59,24 +59,25 @@ def read_json(path, default):
         os.close(fd)
 
 
-def safe_directory(path):
+def safe_directory(path, runtime=False):
     try:
         info = path.lstat()
     except FileNotFoundError:
         return False
+    owners = (0, os.geteuid(), 1000) if runtime else (0, os.geteuid())
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022):
+            or info.st_uid not in owners or info.st_mode & 0o022):
         reject("MOD_ARTIFACT_INVALID")
     return True
 
 
-def safe_artifact_path(root, path):
+def safe_artifact_path(root, path, runtime=False):
     if not safe_directory(root):
         return False
     current = root
     for part in path.relative_to(root).parts:
         current = current / part
-        if not safe_directory(current):
+        if not safe_directory(current, runtime=runtime):
             return False
     return True
 
@@ -189,15 +190,18 @@ def candidate_paths(instance_id, workshop_id, release_id, artifact_digest=None):
 def read_modinfo(instance_id, workshop_id, release_id, artifact_digest=None):
     for path in candidate_paths(instance_id, workshop_id, release_id, artifact_digest):
         artifact_root = ROOT / "instances" / instance_id / "mods"
-        if not safe_artifact_path(artifact_root, path.parent):
+        release_root = artifact_root / "releases"
+        runtime_owned = release_root in path.parents
+        if not safe_artifact_path(artifact_root, path.parent, runtime=runtime_owned):
             continue
+        owners = (0, os.geteuid(), 1000) if runtime_owned else (0, os.geteuid())
         try:
             info = path.lstat()
         except FileNotFoundError:
             continue
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or info.st_size > MAX_MODINFO or info.st_mode & 0o022
-                or info.st_uid not in (0, os.geteuid())):
+                or info.st_uid not in owners):
             reject("MOD_ARTIFACT_INVALID")
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
@@ -205,7 +209,7 @@ def read_modinfo(instance_id, workshop_id, release_id, artifact_digest=None):
             if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
                     or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
                     or opened.st_size > MAX_MODINFO or opened.st_mode & 0o022
-                    or opened.st_uid not in (0, os.geteuid())):
+                    or opened.st_uid not in owners):
                 reject("MOD_ARTIFACT_INVALID")
             with os.fdopen(fd, "rb", closefd=False) as source_file:
                 source = source_file.read(MAX_MODINFO + 1)
@@ -290,7 +294,7 @@ def read_candidate_artifact(instance_id, workshop_id, desired_digest):
             or pointer.get("workshopId") != workshop_id):
         return None
     digest = pointer.get("contentDigest")
-    if not isinstance(digest, str) or digest == desired_digest:
+    if not isinstance(digest, str):
         return None
     artifact = read_prepared_artifact(instance_id, workshop_id, digest)
     if artifact is None:

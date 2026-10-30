@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BackupSummary } from "../api/instances.ts";
 import type { InstanceModSummary } from "../types/mods.ts";
-import { buildModApplyPreview } from "./modApplyPreview.ts";
+import { buildModApplyPreview, mergeModApplyBlockers } from "./modApplyPreview.ts";
 
 const backup: BackupSummary = {
   schemaVersion: 1, backupId: "11111111-1111-4111-8111-111111111111", hostId: "22222222-2222-4222-8222-222222222222",
@@ -69,5 +69,14 @@ test("does not report changes for a matching deployed snapshot", () => {
     deployedArtifactDigest: "a".repeat(64) })], backups: [backup], runtimeStatus: "running",
     cavesEnabled: false, restoreAcceptancePassed: true });
   assert.deepEqual(preview.changes, []);
+  assert.equal(preview.canApply, false);
+});
+
+test("merges local and authoritative restore acceptance blockers into one message", () => {
+  const preview = buildModApplyPreview({ mods: [mod({ deployedEnabled: null })], backups: [backup],
+    runtimeStatus: "running", cavesEnabled: false, restoreAcceptancePassed: false });
+  const blockers = mergeModApplyBlockers(preview, ["MOD_RESTORE_ACCEPTANCE_REQUIRED"]);
+
+  assert.deepEqual(blockers, ["MOD 发布恢复验收尚未通过此 Linux 主机验收"]);
   assert.equal(preview.canApply, false);
 });

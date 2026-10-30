@@ -140,6 +140,38 @@ class PreviewTests(unittest.TestCase):
         self.assertIn("DOCKER_REPOSITORY_TIMEOUT", first["blockers"])
         self.assertNotIn("DOCKER_REPOSITORY_TIMEOUT", second["blockers"])
 
+    def test_transient_network_result_does_not_change_local_snapshot(self):
+        available = MODULE.inspect()
+        with patch.object(MODULE.urllib.request, "urlopen", side_effect=ConnectionResetError("private network text")):
+            unavailable = MODULE.inspect()
+        with patch.object(MODULE.urllib.request, "urlopen", side_effect=AssertionError("unexpected network recheck")) as request:
+            local = MODULE.inspect(check_repository_access=False)
+        request.assert_not_called()
+        self.assertTrue(available["repositoryReachable"])
+        self.assertFalse(unavailable["repositoryReachable"])
+        self.assertIsNone(local["repositoryReachable"])
+        self.assertEqual(available["snapshotDigest"], unavailable["snapshotDigest"])
+        self.assertEqual(available["snapshotDigest"], local["snapshotDigest"])
+        self.assertIn("DOCKER_REPOSITORY_CONNECTION_FAILED", unavailable["blockers"])
+        self.assertFalse(any(code.startswith("DOCKER_REPOSITORY_") for code in local["blockers"]))
+        self.assertNotIn("private network text", json.dumps(unavailable))
+
+    def test_local_recheck_still_blocks_changed_repository_configuration(self):
+        MODULE.SOURCE_FILE.write_text("Types: deb\nURIs: https://other.invalid/\n")
+        with patch.object(MODULE.urllib.request, "urlopen", side_effect=AssertionError("unexpected network recheck")) as request:
+            current = MODULE.inspect(check_repository_access=False)
+        request.assert_not_called()
+        self.assertEqual(current["status"], "blocked")
+        self.assertIn("DOCKER_SOURCE_CONFLICT", current["blockers"])
+        # Matching a digest alone must never waive the blockers check.
+        self.assertIsNone(current["repositoryReachable"])
+
+    def test_local_recheck_detects_package_state_changes_in_snapshot(self):
+        before = MODULE.inspect()
+        with patch.object(MODULE, "installed_docker_packages", return_value={"docker-ce": "changed-version"}):
+            changed = MODULE.inspect(check_repository_access=False)
+        self.assertNotEqual(before["snapshotDigest"], changed["snapshotDigest"])
+
     def test_remote_controller_bundle_compiles_with_fixed_worker_sources(self):
         control=(PROJECT/"remote-scripts/actions/docker-install-control.py").read_text()
         worker=(PROJECT/"remote-scripts/actions/docker-install-worker.py").read_text()

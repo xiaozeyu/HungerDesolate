@@ -7,52 +7,60 @@ IMAGE_NAME="${IMAGE_NAME:-hungerdesolate/dst-runtime}"
 RELEASE_ID="${RELEASE_ID:-$(uuidgen | tr '[:upper:]' '[:lower:]')}"
 BUILD_TAG="${BUILD_TAG:-release-${RELEASE_ID}}"
 PLATFORM="${PLATFORM:-linux/amd64}"
-BUILDER_NAME="famine-release-${RELEASE_ID//-/}"
-BUILDER_CREATED=0
+STEAMCMD_BOOTSTRAP_DEADLINE="${STEAMCMD_BOOTSTRAP_DEADLINE:-3600s}"
+STEAMCMD_DOWNLOAD_DEADLINE="${STEAMCMD_DOWNLOAD_DEADLINE:-1800s}"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-cleanup_builder() {
-  if [ "$BUILDER_CREATED" -eq 1 ]; then
-    docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup_builder EXIT
+# Docker Engine 29.4.2 的默认 seccomp profile 会阻断 SteamCMD 使用的 32 位 socketcall。
+DOCKER_SERVER_VERSION=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)
+case "$DOCKER_SERVER_VERSION" in
+    29.4.2|29.4.2-*|29.4.2+*)
+        echo "DOCKER_ENGINE_INCOMPATIBLE: Docker Engine ${DOCKER_SERVER_VERSION} breaks 32-bit SteamCMD; upgrade to 29.4.3 or newer" >&2
+        exit 1
+        ;;
+    '')
+        echo 'DOCKER_SERVER_VERSION_UNAVAILABLE: cannot query Docker Engine server version' >&2
+        exit 1
+        ;;
+esac
+printf '==> Docker Engine server=%s\n' "$DOCKER_SERVER_VERSION"
 
 echo "==> 构建 DST runtime 镜像"
 echo "    镜像名称: ${IMAGE_NAME}:${BUILD_TAG}"
 echo "    平台: ${PLATFORM}"
 
-# 构建镜像。使用 Release 专属 builder，任务结束时连同 BuildKit 缓存一并移除。
-docker buildx rm --force "$BUILDER_NAME" >/dev/null 2>&1 || true
-docker buildx create --name "$BUILDER_NAME" --driver docker-container >/dev/null
-BUILDER_CREATED=1
-docker buildx build \
-    --builder "$BUILDER_NAME" \
+echo '==> 准备 Debian 基础镜像'
+bash "$SCRIPT_DIR/prepare-base-image.sh"
+
+echo '==> 开始构建 Docker 镜像'
+DOCKER_BUILDKIT=1 docker build \
     --platform "${PLATFORM}" \
+    --build-arg "STEAMCMD_BOOTSTRAP_DEADLINE=${STEAMCMD_BOOTSTRAP_DEADLINE}" \
+    --build-arg "STEAMCMD_DOWNLOAD_DEADLINE=${STEAMCMD_DOWNLOAD_DEADLINE}" \
     --tag "${IMAGE_NAME}:${BUILD_TAG}" \
     --progress=plain \
-    --load \
     .
 
 # 获取镜像 digest
-IMAGE_DIGEST=$(docker inspect "${IMAGE_NAME}:${BUILD_TAG}" \
-    --format='{{index .RepoDigests 0}}' | cut -d'@' -f2)
-
-if [ -z "${IMAGE_DIGEST}" ]; then
-    echo "警告: 无法获取镜像 digest，使用镜像 ID"
-    IMAGE_ID=$(docker inspect "${IMAGE_NAME}:${BUILD_TAG}" --format='{{.Id}}')
-    IMAGE_DIGEST="sha256:${IMAGE_ID#sha256:}"
+IMAGE_DIGEST=$(docker image inspect "${IMAGE_NAME}:${BUILD_TAG}" --format='{{.Id}}')
+if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo 'BUILD_IMAGE_ID_INVALID: Docker returned an invalid local image ID' >&2
+    exit 1
 fi
 
 echo "==> 镜像构建完成"
 echo "    Digest: ${IMAGE_DIGEST}"
-docker buildx prune --builder "$BUILDER_NAME" --all --force >/dev/null
 
 # 提取 DST build 版本
 echo "==> 提取 DST build 版本"
-DST_BUILD=$(docker run --rm "${IMAGE_NAME}:${BUILD_TAG}" \
-    cat /srv/dst/version.txt 2>/dev/null || echo "unknown")
+DST_BUILD=$(docker run --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
+    -ec 'cat /srv/dst/version.txt')
+if ! [[ "$DST_BUILD" =~ ^[0-9]+$ ]]; then
+    echo 'DST_BUILD_INVALID: version.txt must contain a numeric DST build' >&2
+    exit 1
+fi
 
-docker run --rm --network none --entrypoint /bin/sh "${IMAGE_NAME}:${BUILD_TAG}" \
+docker run --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
     -ec 'test -x /usr/local/bin/famine-workshop-fetch && grep -Fxq steamcmd-workshop-v1 /srv/capabilities/workshop-fetch'
 
 echo "    DST Build: ${DST_BUILD}"
@@ -99,7 +107,7 @@ echo "    Release ID: ${RELEASE_ID}"
 # 保存镜像为 tar 文件（用于离线传输）
 ARTIFACT_FILE="dst-runtime-${DST_BUILD}-${PLATFORM/\//-}.tar"
 echo "==> 导出镜像到: ${ARTIFACT_FILE}"
-docker save "${IMAGE_NAME}:${BUILD_TAG}" -o "${ARTIFACT_FILE}"
+docker save "$IMAGE_DIGEST" -o "${ARTIFACT_FILE}"
 
 echo "==> 计算 artifact checksum"
 ARTIFACT_SHA256=$(sha256sum "${ARTIFACT_FILE}" | cut -d' ' -f1)

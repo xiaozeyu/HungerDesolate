@@ -31,6 +31,7 @@ const releases = computed(() => data.value?.releases ?? []);
 const creationReadyCount = computed(() => releases.value.filter(item => item.verified).length);
 const building = ref(false);
 const buildError = ref("");
+const buildObservationError = ref("");
 const buildMessage = ref("");
 const buildStatus = ref<BuildStatusResponse | null>(null);
 const currentBuildId = ref("");
@@ -48,6 +49,7 @@ const deleteBusy = ref(false);
 const deleteError = ref("");
 const bundleInputs = new Map<string, HTMLInputElement>();
 let statusInterval: number | null = null;
+let buildPollBusy = false;
 let actionSequence = 0;
 let buildTarget: { serverId: string; hostId: string; recordVersion: number } | null = null;
 
@@ -295,7 +297,8 @@ async function verifyRuntime(release: InstanceReleaseSummary) {
 
 async function pollBuildStatus() {
   const target = buildTarget;
-  if (!target || !currentBuildId.value || !isCurrent(target)) return;
+  if (!target || !currentBuildId.value || !isCurrent(target) || buildPollBusy) return;
+  buildPollBusy = true;
   try {
     const response = await getBuildStatus({
       schemaVersion: 1,
@@ -306,8 +309,10 @@ async function pollBuildStatus() {
     });
     if (!isCurrent(target)) return;
     buildStatus.value = response;
+    buildObservationError.value = "";
     if (response.status === "completed") {
       stopPolling();
+      buildError.value = "";
       buildMessage.value = "镜像构建完成，Release 已登记";
       await refresh();
     } else if (response.status === "failed") {
@@ -315,7 +320,11 @@ async function pollBuildStatus() {
       buildError.value = response.logTail.at(-1) || "构建失败，请查看主机构建日志";
     }
   } catch (cause) {
-    if (isCurrent(target)) buildError.value = describeError(cause).message;
+    if (isCurrent(target)) {
+      buildObservationError.value = "状态查询暂不可用，继续重试：" + describeError(cause).message;
+    }
+  } finally {
+    buildPollBusy = false;
   }
 }
 
@@ -338,6 +347,7 @@ async function startBuild() {
   buildTarget = target;
   building.value = true;
   buildError.value = "";
+  buildObservationError.value = "";
   buildMessage.value = "";
   buildStatus.value = null;
   try {
@@ -378,6 +388,7 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
     currentBuildId.value = "";
     buildStatus.value = null;
     buildError.value = "";
+    buildObservationError.value = "";
     buildMessage.value = "";
   }
 });
@@ -385,6 +396,7 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
 onUnmounted(() => {
   actionSequence++;
   stopPolling();
+  buildObservationError.value = "";
   clearBundle();
 });
 </script>
@@ -412,6 +424,7 @@ onUnmounted(() => {
           <strong v-else-if="buildMessage && !buildError">{{ buildMessage }}</strong>
           <strong v-else>构建失败</strong>
           <span v-if="building && buildStatus?.progress?.percent != null">{{ buildStatus.progress.percent }}%</span>
+          <span v-if="building && buildObservationError">{{ buildObservationError }}</span>
           <span v-else-if="buildError">{{ buildError }}</span>
         </div>
         <progress v-if="building && buildStatus?.progress?.percent != null" :value="buildStatus.progress.percent" max="100" />

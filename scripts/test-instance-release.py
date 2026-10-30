@@ -67,6 +67,18 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotIn("\n  caves:", result)
         self.assertNotIn("11001:11001/udp", result)
 
+    def test_mod_release_uses_its_own_ugc_and_setup_file_without_moving_dst_identity(self):
+        mod_release_id = "77777777-7777-4777-8777-777777777777"
+        instance_root = "/var/lib/famine-hub/instances/" + INSTANCE_ID
+        result = MODULE.render_compose({**manifest(), "modsReleaseId": mod_release_id}, release(), instance_root)
+        self.assertEqual(result.count("- '-ugc_directory'"), 2)
+        self.assertEqual(result.count("- '/srv/ugc'"), 2)
+        self.assertIn(instance_root + "/mods/releases/" + mod_release_id + "/Master:/srv/ugc:rw", result)
+        self.assertIn(instance_root + "/mods/releases/" + mod_release_id
+                      + "/dedicated_server_mods_setup.lua:/srv/dst/mods/dedicated_server_mods_setup.lua:ro", result)
+        self.assertIn("releaseId: '" + RELEASE_ID + "'", result)
+        self.assertIn("modsReleaseId: '" + mod_release_id + "'", result)
+
     def test_rejects_absolute_or_traversal_paths(self):
         for path in ("instances/" + INSTANCE_ID,
                      "/var/lib/famine-hub/instances/../" + INSTANCE_ID,

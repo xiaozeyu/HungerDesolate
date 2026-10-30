@@ -204,7 +204,8 @@ def task_result(request, prepared):
     return {"preparedHost": None, "verifiedRevision": None, "verification": "notVerified",
             "remoteChanged": bool(prepared), "backupId": None, "deploymentId": None,
             "invalidate": [{"hostId": request["hostId"], "instanceId": request["instanceId"], "domains": ["mods"]}],
-            "recoveryActions": [], "requestedWorkshopIds": request["workshopIds"], "preparedMods": prepared}
+            "recoveryActions": [], "requestedWorkshopIds": request["workshopIds"],
+            "expectedRevision": request["expectedRevision"], "preparedMods": prepared}
 
 
 def valid_request(request):
@@ -222,6 +223,11 @@ def valid_request(request):
     if (not isinstance(sources, dict) or set(sources) - set(ids)
             or any(not isinstance(value, str) or not value.isdigit() or len(value) > 64
                    for value in sources.values())):
+        reject("MOD_TASK_INPUT_INVALID")
+    candidate_ids = request.get("candidateWorkshopIds", [])
+    if (not isinstance(candidate_ids, list) or len(candidate_ids) > len(ids)
+            or any(value not in sources for value in candidate_ids)
+            or len(set(candidate_ids)) != len(candidate_ids)):
         reject("MOD_TASK_INPUT_INVALID")
 
 
@@ -426,7 +432,34 @@ def worker(task_id):
         instance_path = ROOT / "instances" / request["instanceId"]
         safe_dir(instance_path); safe_dir(instance_path / "locks")
         maintenance = lock(instance_path / "locks" / "world-config.lock")
-        instance, manifest, image_ref, target_release_id = verify_scope(request, context.get("image"))
+        instance_lock = lock(instance_path / "locks" / "instance.lock")
+        try:
+            instance, manifest, image_ref, target_release_id = verify_scope(request, context.get("image"))
+            desired_state = read_json(instance / "desired" / "mods.json", 2 * 1024 * 1024, missing=None)
+            if desired_state is None:
+                desired_mods = []
+            elif (not isinstance(desired_state, dict) or desired_state.get("schemaVersion") != 1
+                    or desired_state.get("instanceId") != request["instanceId"]
+                    or type(desired_state.get("revision")) is not int
+                    or desired_state["revision"] > request["expectedRevision"]
+                    or not isinstance(desired_state.get("mods"), list)):
+                reject("MOD_STATE_INVALID")
+            else:
+                desired_mods = desired_state["mods"]
+            previous_artifacts = {}
+            for item in desired_mods:
+                if not isinstance(item, dict):
+                    reject("MOD_STATE_INVALID")
+                workshop_id = str(item.get("workshopId", ""))
+                artifact = item.get("artifactDigest")
+                if artifact is not None and (not isinstance(artifact, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", artifact) is None):
+                    reject("MOD_STATE_INVALID")
+                if workshop_id in request["workshopIds"]:
+                    previous_artifacts[workshop_id] = artifact
+        finally:
+            fcntl.flock(instance_lock, fcntl.LOCK_UN)
+            os.close(instance_lock)
         if image_ref != context.get("image"):
             reject("MOD_RELEASE_CHANGED")
         if target_release_id != context.get("dstReleaseId"):
@@ -442,6 +475,7 @@ def worker(task_id):
             environment.pop(key, None)
         environment.update({"LC_ALL": "C", "DOCKER_HOST": "unix:///var/run/docker.sock"})
         source_handles = request.get("sourceHandles", {})
+        candidate_ids = set(request.get("candidateWorkshopIds", []))
         for index, workshop_id in enumerate(request["workshopIds"]):
             CURRENT_STAGE = "download"
             set_status(directory, "running", "download", completed="prepare",
@@ -511,7 +545,7 @@ def worker(task_id):
                         os.chmod(path, 0o444)
                 os.chmod(candidate / "manifest.json", 0o600)
                 os.rename(candidate, final)
-            if workshop_id in source_handles:
+            if workshop_id in candidate_ids:
                 candidate_root = instance / "mods" / "candidates"
                 safe_dir(instance / "mods", create=True)
                 safe_dir(candidate_root, create=True)
@@ -524,7 +558,8 @@ def worker(task_id):
                 })
             result["preparedMods"].append({"workshopId": workshop_id, "contentDigest": content_digest,
                 "dstReleaseId": context["dstReleaseId"], "fetcherImage": context["image"], "sizeBytes": size_bytes,
-                "sourceHandle": source_handles.get(workshop_id), "updateCandidate": workshop_id in source_handles})
+                "sourceHandle": source_handles.get(workshop_id), "updateCandidate": workshop_id in candidate_ids,
+                "previousArtifactDigest": previous_artifacts.get(workshop_id)})
             result["remoteChanged"] = True
             set_status(directory, "running", "verify", completed="download",
                 progress={"kind": "determinate", "completed": index + 1, "total": len(request["workshopIds"])}, result=result)

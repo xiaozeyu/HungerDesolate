@@ -269,7 +269,7 @@ pub(crate) fn with_verified_session<T>(
     let (session, observed) = handshake(&stored.server)?;
     require_trust(stored.trust.as_ref(), &observed)?;
     // Recheck the connection after handshake and before reading or transmitting a credential.
-    let _guard = ssh_state::mutation_guard(database)?;
+    let guard = ssh_state::mutation_guard(database)?;
     let current = ssh_state::load(database, request, "connectServer")?;
     require_trust(current.trust.as_ref(), &observed)?;
     let reference = current.credential_ref.ok_or_else(|| {
@@ -291,6 +291,9 @@ pub(crate) fn with_verified_session<T>(
     )?;
     let host_id = read_host_identity(&session)?;
     ssh_state::bind_host(database, request, host_id.as_deref())?;
+    // Authentication and host binding are complete; do not hold the credential mutation
+    // lock while a long-running remote read or task occupies the SSH session.
+    drop(guard);
     work(&session, host_id)
 }
 pub fn connect(database: &Path, request: ConnectionRequest) -> CommandResult<HostConnection> {

@@ -1,9 +1,11 @@
 """Test backup list and capture-mode preview against isolated instance data."""
 import importlib.util
 import hashlib
+import io
 import json
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -55,11 +57,58 @@ class InstanceBackupsTests(unittest.TestCase):
         self.root_patch.stop()
         self.temp.cleanup()
 
+    def test_legacy_backup_without_active_release_only_restores_when_no_mod_release_is_active(self):
+        archive = self.root / "legacy.tar.gz"
+        with tarfile.open(archive, "w:gz"):
+            pass
+        manifest = {"files": []}
+
+        self.assertIsNone(MODULE.mod_release_snapshot_blocker(archive, manifest, {"modsReleaseId": None}))
+        self.assertEqual(MODULE.mod_release_snapshot_blocker(
+            archive, manifest, {"modsReleaseId": "55555555-5555-4555-8555-555555555555"}),
+            "MOD_RELEASE_UNAVAILABLE")
+
+    def test_archived_active_mod_release_requires_its_release_manifest(self):
+        archive = self.root / "active.tar.gz"
+        snapshot = json.dumps({"schemaVersion": 1, "modsReleaseId": "55555555-5555-4555-8555-555555555555"}).encode()
+        with tarfile.open(archive, "w:gz") as bundle:
+            member = tarfile.TarInfo("data/active-release.json")
+            member.size = len(snapshot)
+            bundle.addfile(member, io.BytesIO(snapshot))
+        manifest = {"files": [{"path": "active-release.json"}]}
+
+        self.assertEqual(MODULE.mod_release_snapshot_blocker(archive, manifest, {}), "MOD_RELEASE_UNAVAILABLE")
+
     def test_empty_list_is_real_and_bound_to_target(self):
         result = MODULE.list_backups(dict(self.request))
         self.assertEqual(result["items"], [])
         self.assertEqual(result["target"]["instanceId"], INSTANCE)
         self.assertFalse(result["restoreAcceptancePassed"])
+
+    def test_existing_backup_without_dst_build_resolves_it_from_catalog(self):
+        release_id = "55555555-5555-4555-8555-555555555555"
+        backup_id = "77777777-7777-4777-8777-777777777777"
+        catalog_dir = self.root / "releases"
+        catalog_dir.mkdir(mode=0o700)
+        catalog = catalog_dir / "catalog.json"
+        catalog.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "releases": [
+            {"releaseId": release_id, "verified": True, "dstBuild": "760944"}]}))
+        catalog.chmod(0o600)
+        backup = self.root / "backups" / INSTANCE / backup_id
+        backup.mkdir(parents=True, mode=0o700)
+        metadata = backup / "metadata.json"
+        metadata.write_text(json.dumps({"schemaVersion": 1, "backupId": backup_id,
+            "hostId": HOST, "instanceId": INSTANCE, "createdAt": "2026-10-19T10:00:00Z",
+            "reason": "MOD 应用前保护点", "captureMode": "cold",
+            "captureSemantics": "stoppedBeforeRead", "runtimeStatusAtCapture": "stopped",
+            "sizeBytes": 1, "checksum": "a" * 64, "verification": "verified",
+            "restorability": "incompatible", "dstBuild": None, "dstReleaseId": release_id,
+            "modsReleaseId": None, "configRevision": 3, "containsSecrets": False}))
+        metadata.chmod(0o600)
+        for path in (self.root / "backups", self.root / "backups" / INSTANCE, backup):
+            path.chmod(0o700)
+        result = MODULE.list_backups(dict(self.request))
+        self.assertEqual(result["items"][0]["dstBuild"], "760944")
 
     def test_restore_acceptance_reads_host_scoped_evidence(self):
         evidence = self.root / "restore-acceptance.json"
@@ -160,7 +209,33 @@ class InstanceBackupsTests(unittest.TestCase):
             self.root / "unused-legacy-archive.tar.gz", {"configRevision": 3, "files": []}, instance, INSTANCE),
             "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING")
 
-    def test_backup_delete_requires_checksum_and_preserves_restore_protection_points(self):
+    def test_world_snapshot_allows_saved_desired_newer_than_applied_deployed(self):
+        instance = self.root / "instances" / INSTANCE
+        desired_settings = {"gameMode": "survival", "saved": True}
+        deployed_settings = {"gameMode": "endless"}
+        deployed_digest = "sha256:" + hashlib.sha256(json.dumps(deployed_settings,
+            sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+        token_ref = "44444444-4444-4444-8444-444444444444"
+        desired = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 9,
+                   "settings": desired_settings, "secrets": {"tokenRef": token_ref}}
+        deployed = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 8,
+                    "settings": deployed_settings, "digest": deployed_digest}
+        secrets = instance / "desired-secrets"
+        secrets.mkdir(mode=0o700)
+        (secrets / (token_ref + ".token")).write_bytes(b"token\n")
+        (secrets / (token_ref + ".token")).chmod(0o600)
+        archive = self.root / "world-snapshot.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            for relative, value in (("desired/world.json", desired), ("deployed-world.json", deployed)):
+                payload = json.dumps(value).encode()
+                info = tarfile.TarInfo("data/" + relative)
+                info.size = len(payload)
+                bundle.addfile(info, io.BytesIO(payload))
+        manifest = {"configRevision": 9, "files": [
+            {"path": "desired/world.json"}, {"path": "deployed-world.json"}]}
+        self.assertIsNone(MODULE.world_config_snapshot_blocker(archive, manifest, instance, INSTANCE))
+
+    def test_backup_delete_allows_restore_protection_points(self):
         backup_id = "77777777-7777-4777-8777-777777777777"
         checksum = "a" * 64
         catalog = self.root / "backups" / INSTANCE / backup_id
@@ -195,13 +270,12 @@ class InstanceBackupsTests(unittest.TestCase):
         (newest / "archive.tar.gz").write_bytes(b"newer archive")
         (newest / "archive.tar.gz").chmod(0o600)
         with patch.object(MODULE, "identity", return_value=(HOST, INSTANCE, self.root / "instances" / INSTANCE, self.manifest)):
-            with self.assertRaises(MODULE.Rejected) as failure:
-                MODULE.delete_backup({**self.request, "backupId": newest_id, "expectedChecksum": checksum})
-        self.assertEqual(str(failure.exception), "BACKUP_PROTECTION_POINT")
+            result = MODULE.delete_backup({**self.request, "backupId": newest_id, "expectedChecksum": checksum})
+        self.assertTrue(result["deleted"])
+        self.assertFalse(newest.exists())
         with patch.object(MODULE, "identity", return_value=(HOST, INSTANCE, self.root / "instances" / INSTANCE, self.manifest)):
             result = MODULE.delete_backup({**self.request, "backupId": backup_id, "expectedChecksum": checksum})
         self.assertTrue(result["deleted"])
-        self.assertTrue(newest.exists())
 
 
 if __name__ == "__main__":

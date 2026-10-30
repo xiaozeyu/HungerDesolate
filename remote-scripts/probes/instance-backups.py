@@ -163,6 +163,11 @@ def list_backups(request):
                 "target": {"serverId": request["serverId"], "hostId": host_id,
                            "instanceId": instance_id},
                 "restoreAcceptancePassed": restore_acceptance(host_id), "items": []}
+    try:
+        release_catalog = read_json(ROOT / "releases" / "catalog.json", 1024 * 1024)
+        catalog_releases = release_catalog.get("releases", []) if isinstance(release_catalog, dict) else []
+    except (FileNotFoundError, Rejected):
+        catalog_releases = []
     items = []
     for child in catalog.iterdir():
         if not valid_uuid(child.name):
@@ -178,6 +183,11 @@ def list_backups(request):
                 or metadata.get("instanceId") != instance_id or metadata.get("backupId") != child.name):
             reject("BACKUP_TARGET_MISMATCH")
         metadata = dict(metadata)
+        if metadata.get("dstBuild") is None and isinstance(metadata.get("dstReleaseId"), str):
+            release = next((item for item in catalog_releases if isinstance(item, dict)
+                            and item.get("releaseId") == metadata["dstReleaseId"]), None)
+            if release is not None:
+                metadata["dstBuild"] = release.get("dstBuild")
         if metadata.get("verification") == "verified":
             metadata["restorability"] = assess_restorability(child, metadata, instance, manifest, host_id, instance_id)
         items.append(metadata)
@@ -227,6 +237,23 @@ def assess_restorability(backup, metadata, instance, manifest, host_id, instance
                                text=True, timeout=10, check=False, env=environment)
         if image.returncode != 0 or image.stdout.strip() != release["imageDigest"]:
             return "missingArtifacts"
+        mods_release_id = metadata.get("modsReleaseId")
+        if mods_release_id is not None:
+            if not valid_uuid(mods_release_id):
+                return "incompatible"
+            archived_paths = {item.get("path") for item in inspected["manifest"].get("files", [])
+                              if isinstance(item, dict)}
+            mods_root = "mods/releases/" + mods_release_id
+            if mods_root + "/manifest.json" not in archived_paths:
+                return "missingArtifacts"
+            with tarfile.open(archive, "r:gz") as bundle:
+                member = bundle.getmember("data/" + mods_root + "/manifest.json")
+                stream = bundle.extractfile(member)
+                mods_manifest = json.loads(stream.read(4 * 1024 * 1024 + 1)) if stream else None
+            if (mods_manifest.get("schemaVersion") != 1
+                    or mods_manifest.get("modsReleaseId") != mods_release_id
+                    or mods_manifest.get("instanceId") != instance_id):
+                return "missingArtifacts"
         return "restorable"
     except FileNotFoundError:
         return "missingArtifacts"
@@ -322,13 +349,15 @@ def world_config_snapshot_blocker(archive_path, archive_manifest, instance, expe
                 return "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING"
         settings = desired.get("settings") if isinstance(desired, dict) else None
         deployed_settings = deployed.get("settings") if isinstance(deployed, dict) else None
-        digest = "sha256:" + hashlib.sha256(json.dumps(settings, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
-        if (desired.get("schemaVersion") != 1 or desired.get("instanceId") != expected_instance_id
-                or desired.get("revision") != revision or not isinstance(settings, dict)
+        deployed_digest = "sha256:" + hashlib.sha256(json.dumps(deployed_settings, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+        if (not isinstance(desired, dict) or not isinstance(deployed, dict)
+                or desired.get("schemaVersion") != 1 or desired.get("instanceId") != expected_instance_id
+                or type(desired.get("revision")) is not int or desired.get("revision") < 0
+                or not isinstance(settings, dict)
                 or not isinstance(desired.get("secrets"), dict)
                 or deployed.get("schemaVersion") != 1 or deployed.get("instanceId") != expected_instance_id
-                or deployed.get("revision") != revision or deployed.get("digest") != digest
-                or deployed_settings != settings):
+                or type(deployed.get("revision")) is not int or deployed.get("revision") < 0
+                or not isinstance(deployed_settings, dict) or deployed.get("digest") != deployed_digest):
             return "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID"
         token_ref = desired["secrets"].get("tokenRef")
         if not valid_uuid(token_ref):
@@ -344,6 +373,29 @@ def world_config_snapshot_blocker(archive_path, archive_manifest, instance, expe
         return "WORLD_TOKEN_MISSING" if has_desired else "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING"
     except (OSError, ValueError, TypeError, KeyError, AttributeError, tarfile.TarError):
         return "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING" if not has_desired else "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID"
+
+
+def mod_release_snapshot_blocker(archive_path, archive_manifest, current_active):
+    archived = {item.get("path") for item in archive_manifest.get("files", []) if isinstance(item, dict)}
+    if "active-release.json" not in archived:
+        return "MOD_RELEASE_UNAVAILABLE" if current_active.get("modsReleaseId") else None
+    try:
+        with tarfile.open(archive_path, "r:gz") as bundle:
+            member = bundle.getmember("data/active-release.json")
+            if not member.isfile() or member.size > 65536:
+                return "MOD_RELEASE_UNAVAILABLE"
+            stream = bundle.extractfile(member)
+            snapshot = json.loads(stream.read(65537)) if stream else None
+        if not isinstance(snapshot, dict):
+            return "MOD_RELEASE_UNAVAILABLE"
+        mods_release_id = snapshot.get("modsReleaseId")
+        if mods_release_id is not None:
+            release_manifest = "mods/releases/" + str(mods_release_id) + "/manifest.json"
+            if release_manifest not in archived:
+                return "MOD_RELEASE_UNAVAILABLE"
+        return None
+    except (OSError, ValueError, TypeError, KeyError, tarfile.TarError):
+        return "MOD_RELEASE_UNAVAILABLE"
 
 
 def restore_preflight(request):
@@ -382,11 +434,15 @@ def restore_preflight(request):
     if available < archive_info.st_size * 2:
         blockers.append("BACKUP_SPACE_INSUFFICIENT")
     current_release = None
+    current_active = {}
     try:
-        active = read_json(instance / "active-release.json", 65536)
-        current_release = active.get("dstReleaseId")
+        current_active = read_json(instance / "active-release.json", 65536)
+        current_release = current_active.get("dstReleaseId")
     except FileNotFoundError:
         pass
+    mod_snapshot_blocker = mod_release_snapshot_blocker(archive, archive_manifest, current_active)
+    if mod_snapshot_blocker:
+        blockers.append(mod_snapshot_blocker)
     backup_release = metadata.get("dstReleaseId")
     if backup_release and current_release and backup_release != current_release:
         blockers.append("DST_RELEASE_MISMATCH")
@@ -458,22 +514,6 @@ def delete_backup(request):
             reject("BACKUP_TARGET_MISMATCH")
         if metadata.get("checksum") != checksum:
             reject("BACKUP_CHANGED")
-        protection_points = []
-        for sibling in parent.iterdir():
-            if not valid_uuid(sibling.name):
-                reject("BACKUP_PATH_UNSAFE")
-            safe_directory(sibling)
-            sibling_metadata = read_json(sibling / "metadata.json", 262144)
-            if (sibling_metadata.get("backupId") != sibling.name
-                    or sibling_metadata.get("hostId") != host_id
-                    or sibling_metadata.get("instanceId") != instance_id
-                    or not isinstance(sibling_metadata.get("createdAt"), str)):
-                reject("BACKUP_TARGET_MISMATCH")
-            if sibling_metadata.get("reason") == "恢复前保护点":
-                protection_points.append((sibling_metadata["createdAt"], sibling.name))
-        newest_protection = max(protection_points, default=(None, None))[1]
-        if metadata.get("reason") == "恢复前保护点" and backup_id == newest_protection:
-            reject("BACKUP_PROTECTION_POINT")
         entries = list(backup.iterdir())
         if {entry.name for entry in entries} != {"metadata.json", "archive.tar.gz"}:
             reject("BACKUP_PATH_UNSAFE")

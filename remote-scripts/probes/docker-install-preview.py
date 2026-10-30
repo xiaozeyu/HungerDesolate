@@ -180,7 +180,9 @@ def check_repository():
         return "DOCKER_REPOSITORY_RESPONSE_INVALID"
 
 
-def inspect():
+def inspect(*, check_repository_access=True):
+    # Preview probes the network; admission/worker recheck local state only.
+    # A skipped probe is unknown, never a fabricated successful connection.
     release_info = release(RELEASE_FILE)
     distribution_id = release_info.get("ID", "").lower()
     version = release_info.get("VERSION_ID", "")
@@ -220,8 +222,8 @@ def inspect():
             info = BOOTSTRAP.stat()
             if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
                 blockers.append("BOOTSTRAP_OWNER_OR_MODE_INVALID")
-    repository_error = check_repository()
-    repository_reachable = repository_error is None
+    repository_error = check_repository() if check_repository_access else None
+    repository_reachable = repository_error is None if check_repository_access else None
     if repository_error:
         blockers.append(repository_error)
     source_state = "missing"
@@ -277,7 +279,6 @@ def inspect():
         "uid": uid,
         "conflictingPackages": conflicts,
         "sourceState": source_state,
-        "repositoryReachable": repository_reachable,
         "dockerClientPresent": bool(docker_client),
         "installedDockerPackages": installed_packages,
         "aptRunning": apt_running,

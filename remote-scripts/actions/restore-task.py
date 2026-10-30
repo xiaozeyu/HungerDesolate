@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -16,6 +17,8 @@ TASKS = ROOT / "restore-tasks"
 RESTORE_ACCEPTANCE = ROOT / "restore-acceptance.json"
 MAX_REVISION = 9007199254740991
 DST_RUNTIME_UID = 1000
+RUNTIME_READY_SECONDS = 120
+MISSING = object()
 
 
 class Rejected(Exception):
@@ -57,8 +60,13 @@ def safe_dir(path, create=False):
     return info
 
 
-def read_json(path, limit=262144):
-    info = path.lstat()
+def read_json(path, limit=262144, missing=MISSING):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if missing is not MISSING:
+            return missing
+        raise
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077:
         reject("BACKUP_TASK_STATE_INVALID")
     with path.open("rb") as source:
@@ -140,11 +148,15 @@ def set_status(directory, status, stage, completed=None, result=None, error=None
     return state
 
 
-def error_payload(code, request, task_id, remote_changed=True):
+def error_payload(code, request, task_id, remote_changed=True, details=None):
+    protected = request.get("createProtectionBackup", True)
+    message = "恢复任务未能完成，已保留现场和保护点" if protected else "恢复任务未能完成，已保留现场"
+    recovery_steps = ["核对保护点和恢复现场后重试"] if protected else ["核对恢复现场后重试"]
     return {"schemaVersion": 1, "code": code, "category": "backupRestore", "operation": "backupRestore",
             "requestId": None, "target": {"hostId": request.get("hostId"), "instanceId": request.get("instanceId")},
-            "message": "恢复任务未能完成，已保留现场和保护点", "retryable": True,
-            "remoteChanged": remote_changed, "taskId": task_id, "recoverySteps": ["核对保护点和恢复现场后重试"], "details": {}}
+            "message": message, "retryable": True,
+            "remoteChanged": remote_changed, "taskId": task_id, "recoverySteps": recovery_steps,
+            "details": details if isinstance(details, dict) else {}}
 
 
 def docker_env():
@@ -197,20 +209,31 @@ def runtime(instance_id, manifest):
     return "degraded", roles
 
 
-def verify_runtime_processes(instance, instance_id, manifest, roles):
+def verify_runtime_processes(instance, instance_id, manifest, roles, evidence=None):
+    def fail(check, shard=None, missing_ports=None):
+        if isinstance(evidence, dict):
+            evidence.clear()
+            evidence.update({"check": check})
+            if shard in ("master", "caves"):
+                evidence["shard"] = shard
+            if isinstance(missing_ports, list):
+                evidence["missingPorts"] = sorted(port for port in missing_ports
+                    if type(port) is int and 1 <= port <= 65535)[:16]
+        return False
+
     result = subprocess.run(["docker", "container", "ls", "--all", "--quiet", "--no-trunc",
                              "--filter", "label=com.hungerdesolate.instanceId=" + instance_id],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                             timeout=15, check=False, env=docker_env())
     container_ids = result.stdout.splitlines()
     if result.returncode != 0 or len(container_ids) != len(roles):
-        return False
+        return fail("containerInventory")
     inspected = subprocess.run(["docker", "container", "inspect", "--format",
                                 "{{json .Config.Labels}}\t{{.State.Status}}", *container_ids],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                timeout=15, check=False, env=docker_env())
     if inspected.returncode != 0:
-        return False
+        return fail("containerInspection")
     by_role = {}
     try:
         for row in inspected.stdout.splitlines():
@@ -220,12 +243,12 @@ def verify_runtime_processes(instance, instance_id, manifest, roles):
             if (not separator or labels.get("com.hungerdesolate.hostId") != manifest["hostId"]
                     or labels.get("com.hungerdesolate.instanceId") != instance_id
                     or role not in roles or role in by_role or state != "running"):
-                return False
+                return fail("containerIdentityOrState", role)
             by_role[role] = container_ids[len(by_role)]
     except (ValueError, KeyError, TypeError):
-        return False
+        return fail("containerLabels")
     if set(by_role) != set(roles):
-        return False
+        return fail("shardSet")
 
     config_root = instance / "config" / "Cluster_1"
     expected = {}
@@ -240,10 +263,10 @@ def verify_runtime_processes(instance, instance_id, manifest, roles):
                 cluster.read(config_root / "cluster.ini", encoding="utf-8")
                 ports.add(cluster.getint("SHARD", "master_port"))
             if not ports or any(port < 1 or port > 65535 for port in ports):
-                return False
+                return fail("configuredPorts", role)
             expected[role] = ports
     except (OSError, configparser.Error, UnicodeError, ValueError):
-        return False
+        return fail("serverConfiguration")
 
     for role, container_id in by_role.items():
         process_probe = ('for p in /proc/[0-9]*/exe; do x=$(readlink "$p" 2>/dev/null) || continue; '
@@ -257,7 +280,7 @@ def verify_runtime_processes(instance, instance_id, manifest, roles):
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                  timeout=10, check=False, env=docker_env())
         if process.returncode != 0 or process.stdout.strip() != "DST_RUNNING" or sockets.returncode != 0:
-            return False
+            return fail("dstProcessOrUdpProbe", role)
         observed = set()
         for line in sockets.stdout.splitlines()[1:]:
             fields = line.split()
@@ -266,10 +289,25 @@ def verify_runtime_processes(instance, instance_id, manifest, roles):
             try:
                 observed.add(int(fields[1].rsplit(":", 1)[1], 16))
             except ValueError:
-                return False
-        if not expected[role].issubset(observed):
-            return False
+                return fail("udpSocketData", role)
+        missing_ports = expected[role] - observed
+        if missing_ports:
+            return fail("udpListeners", role, list(missing_ports))
+    if isinstance(evidence, dict):
+        evidence.clear()
+        evidence.update({"check": "passed"})
     return True
+
+
+def wait_for_runtime_processes(instance, instance_id, manifest, roles, evidence=None,
+                               timeout=RUNTIME_READY_SECONDS):
+    deadline = time.monotonic() + timeout
+    while True:
+        if verify_runtime_processes(instance, instance_id, manifest, roles, evidence):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2)
 
 
 def remove_path(path):
@@ -277,6 +315,89 @@ def remove_path(path):
         path.unlink()
     elif path.exists():
         shutil.rmtree(path)
+
+
+def restore_changed_live_state(stop_attempted, stopped, moved):
+    return stop_attempted or stopped or bool(moved)
+
+
+def same_runtime_degradation(left, right):
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    if left.get("check") != right.get("check"):
+        return False
+    if left.get("shard") != right.get("shard"):
+        return False
+    left_ports = left.get("missingPorts")
+    right_ports = right.get("missingPorts")
+    if isinstance(left_ports, list) or isinstance(right_ports, list):
+        return sorted(left_ports or []) == sorted(right_ports or [])
+    left_state = left.get("state")
+    right_state = right.get("state")
+    return left_state == right_state
+
+
+def restore_transaction_snapshot(instance, recovery, transaction):
+    rollback_paths = transaction.get("rollbackPaths")
+    original_paths = transaction.get("originalPaths")
+    if (not isinstance(rollback_paths, list) or not isinstance(original_paths, list)
+            or any(not isinstance(path, str) for path in rollback_paths + original_paths)):
+        reject("BACKUP_RECOVERY_REQUIRED")
+    original_set = set(original_paths)
+    for relative in reversed(rollback_paths):
+        old = recovery / relative
+        current = instance / relative
+        if old.exists() or old.is_symlink():
+            if current.exists() or current.is_symlink():
+                remove_path(current)
+            current.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.replace(old, current)
+        elif relative not in original_set and (current.exists() or current.is_symlink()):
+            remove_path(current)
+    atomic_json(instance / "active-release.json", transaction["activeRelease"])
+    atomic_json(instance / "manifest.json", transaction["manifest"])
+    atomic_json(instance / "desired" / "world.json", transaction["desiredWorld"])
+    atomic_json(instance / "deployed-world.json", transaction["deployedWorld"])
+    if transaction.get("desiredMods") is None:
+        (instance / "desired" / "mods.json").unlink(missing_ok=True)
+    else:
+        atomic_json(instance / "desired" / "mods.json", transaction["desiredMods"])
+    if transaction.get("deployedMods") is None:
+        (instance / "deployed-mods.json").unlink(missing_ok=True)
+    else:
+        atomic_json(instance / "deployed-mods.json", transaction["deployedMods"])
+    atomic_bytes(instance / "compose.yaml", transaction["compose"].encode("utf-8"), 0o600)
+
+
+def restored_active_snapshot(staging, current_active):
+    path = staging / "active-release.json"
+    return read_json(path, 65536) if path.exists() else current_active
+
+
+def preserve_player_lists(instance):
+    config_root = instance / "config" / "Cluster_1"
+    preserved = {}
+    for name in ("adminlist.txt", "blocklist.txt", "whitelist.txt"):
+        path = config_root / name
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_size > 1024 * 1024 or info.st_mode & 0o022):
+            reject("BACKUP_CONFIG_LIST_INVALID")
+        preserved[name] = path.read_bytes()
+    return preserved
+
+
+def write_player_lists(staging, preserved):
+    if not preserved:
+        return
+    config_root = staging / "config" / "Cluster_1"
+    config_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config_root.chmod(0o700)
+    for name, payload in preserved.items():
+        atomic_bytes(config_root / name, payload, 0o600)
 
 
 def restore_cluster_token(instance, staging, desired):
@@ -335,25 +456,70 @@ def assign_runtime_ownership(root):
             os.chmod(child, 0o600, follow_symlinks=False)
 
 
-def rebase_world_config(desired, deployed, instance_id, backup_revision, new_revision):
+def rebase_world_config(desired, deployed, instance_id, new_revision):
     settings = desired.get("settings") if isinstance(desired, dict) else None
     deployed_settings = deployed.get("settings") if isinstance(deployed, dict) else None
-    settings_digest = "sha256:" + __import__("hashlib").sha256(canonical(settings)).hexdigest()
-    if (desired.get("schemaVersion") != 1 or desired.get("instanceId") != instance_id
-            or type(desired.get("revision")) is not int or desired.get("revision") > backup_revision
-            or not isinstance(settings, dict)
-            or not isinstance(desired.get("secrets"), dict)
+    deployed_digest = "sha256:" + __import__("hashlib").sha256(canonical(deployed_settings)).hexdigest()
+    if (not isinstance(desired, dict) or not isinstance(deployed, dict)
+            or desired.get("schemaVersion") != 1 or desired.get("instanceId") != instance_id
+            or type(desired.get("revision")) is not int or desired.get("revision") < 0
+            or not isinstance(settings, dict) or not isinstance(desired.get("secrets"), dict)
             or deployed.get("schemaVersion") != 1 or deployed.get("instanceId") != instance_id
-            or deployed.get("revision") != desired.get("revision") or deployed.get("digest") != settings_digest
-            or deployed_settings != settings):
+            or type(deployed.get("revision")) is not int or deployed.get("revision") < 0
+            or not isinstance(deployed_settings, dict) or deployed.get("digest") != deployed_digest):
         reject("BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID")
     desired["revision"] = new_revision
     deployed["revision"] = new_revision
     return desired, deployed
 
 
-def compose(instance, manifest, action, roles):
-    result = subprocess.run(["docker", "compose", "-p", manifest["composeProject"], "-f", str(instance / "compose.yaml"), action, *roles],
+def preserve_current_secret_refs(restored_desired, current_desired):
+    restored_secrets = restored_desired.get("secrets") if isinstance(restored_desired, dict) else None
+    current_secrets = current_desired.get("secrets") if isinstance(current_desired, dict) else None
+    if not isinstance(restored_secrets, dict) or not isinstance(current_secrets, dict):
+        reject("BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID")
+    secrets = dict(restored_secrets)
+    for key in ("tokenRef", "serverPasswordRef"):
+        reference = current_secrets.get(key)
+        if reference is not None:
+            if not valid_uuid(reference):
+                reject("WORLD_CONFIG_STATE_INVALID")
+            secrets[key] = reference
+    desired = dict(restored_desired)
+    desired["secrets"] = secrets
+    return desired
+
+
+def read_mod_snapshot(staging, has_desired_mods):
+    if not has_desired_mods:
+        return None, None
+    return (read_json(staging / "desired" / "mods.json", 2 * 1024 * 1024),
+            read_json(staging / "deployed-mods.json", 2 * 1024 * 1024, missing=None))
+
+
+def rebase_mod_states(desired, deployed, instance_id, new_revision):
+    if desired is not None:
+        if (not isinstance(desired, dict) or desired.get("schemaVersion") != 1
+                or desired.get("instanceId") != instance_id or type(desired.get("revision")) is not int
+                or not isinstance(desired.get("mods"), list)):
+            reject("BACKUP_MODS_SNAPSHOT_INVALID")
+        desired = dict(desired)
+        desired["revision"] = new_revision
+    if deployed is not None:
+        if (not isinstance(deployed, dict) or deployed.get("schemaVersion") != 1
+                or deployed.get("instanceId") != instance_id or type(deployed.get("revision")) is not int
+                or not isinstance(deployed.get("mods"), list)):
+            reject("BACKUP_MODS_SNAPSHOT_INVALID")
+        deployed = dict(deployed)
+        deployed["revision"] = new_revision
+    return desired, deployed
+
+
+def compose(instance, manifest, action, *arguments):
+    args = []
+    for argument in arguments:
+        args.extend(argument if isinstance(argument, (list, tuple)) else [argument])
+    result = subprocess.run(["docker", "compose", "-p", manifest["composeProject"], "-f", str(instance / "compose.yaml"), action, *args],
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90, check=False, env=docker_env())
     if result.returncode != 0:
         reject("BACKUP_STOP_FAILED" if action == "stop" else "BACKUP_RESTART_FAILED")
@@ -365,37 +531,52 @@ def _worker_impl(task_id):
     if state["status"] in ("succeeded", "failed", "interrupted"):
         return state
     request = read_json(directory / "request.json")
+    set_status(directory, "running", "preflight")
     archive = (directory / "archive-source.py").read_text()
     module = {}
     exec(compile(archive, "<backup-archive>", "exec"), module)
+    release_namespace = {"__name__": "instance_release"}
+    try:
+        release_source = (directory / "release-source.py").read_text(encoding="utf-8")
+    except OSError:
+        reject("BACKUP_RELEASE_HELPER_MISSING")
+    exec(compile(release_source, "<instance-release>", "exec"), release_namespace)
     instance, manifest = verify_instance(request)
     runtime_before, roles = runtime(request["instanceId"], manifest)
     heavy = open(ROOT / "locks" / "heavy.lock", "a+b")
     maintenance = open(instance / "locks" / "world-config.lock", "a+b")
+    instance_lock = open(instance / "locks" / "instance.lock", "a+b")
     fcntl.flock(heavy.fileno(), fcntl.LOCK_EX)
     fcntl.flock(maintenance.fileno(), fcntl.LOCK_EX)
+    fcntl.flock(instance_lock.fileno(), fcntl.LOCK_EX)
     protection_id = str(uuid.uuid4())
     recovery = instance / (".restore-recovery-" + task_id)
     staging = instance / (".restore-staging-" + task_id)
     moved = []
     stopped = False
     runtime_verified = False
+    restore_runtime_evidence = {}
+    rollback_runtime_evidence = {}
     original_manifest = dict(manifest)
     active_path = instance / "active-release.json"
     original_active = read_json(active_path, 65536)
+    failure_step = "verifyTarget"
+    stop_attempted = False
     try:
-        set_status(directory, "running", "preflight")
         instance, manifest = verify_instance(request)
         runtime_before, roles = runtime(request["instanceId"], manifest)
         original_manifest = dict(manifest)
         original_active = read_json(active_path, 65536)
+        current_desired_world = read_json(instance / "desired" / "world.json", 262144)
         backup_dir = ROOT / "backups" / request["instanceId"] / request["backupId"]
+        failure_step = "readBackupMetadata"
         metadata = read_json(backup_dir / "metadata.json")
         if (metadata.get("schemaVersion") != 1 or metadata.get("backupId") != request["backupId"]
                 or metadata.get("hostId") != request["hostId"] or metadata.get("instanceId") != request["instanceId"]
                 or metadata.get("verification") != "verified"):
             reject("BACKUP_TARGET_MISMATCH")
         checksum = metadata.get("checksum")
+        failure_step = "inspectBackupArchive"
         inspected = module["inspect_archive"](backup_dir / "archive.tar.gz", request["hostId"], request["instanceId"], checksum)
         backup_revision = inspected["manifest"].get("configRevision")
         archive_paths = {item.get("path") for item in inspected["manifest"].get("files", []) if isinstance(item, dict)}
@@ -403,8 +584,14 @@ def _worker_impl(task_id):
         has_deployed = "deployed-world.json" in archive_paths
         if has_desired != has_deployed:
             reject("BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID")
+        has_desired_mods = "desired/mods.json" in archive_paths
+        has_deployed_mods = "deployed-mods.json" in archive_paths
+        if has_deployed_mods and not has_desired_mods:
+            reject("BACKUP_MODS_SNAPSHOT_INVALID")
         set_status(directory, "running", "stagingVerify", completed="preflight")
+        failure_step = "extractBackupArchive"
         module["extract_to_staging"](backup_dir / "archive.tar.gz", staging, request["hostId"], request["instanceId"], checksum)
+        failure_step = "readWorldSnapshot"
         if has_desired:
             restore_desired = read_json(staging / "desired" / "world.json", 262144)
             restore_deployed = read_json(staging / "deployed-world.json", 262144)
@@ -415,12 +602,41 @@ def _worker_impl(task_id):
                     or restore_desired.get("revision") != restore_deployed.get("revision")
                     or restore_desired.get("revision") > backup_revision):
                 reject("BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING")
+        failure_step = "readModSnapshot"
+        restore_desired_mods, restore_deployed_mods = read_mod_snapshot(staging, has_desired_mods)
         new_revision = request["expectedRevision"] + 1
+        failure_step = "rebaseSnapshots"
         restore_desired, restore_deployed = rebase_world_config(
-            restore_desired, restore_deployed, request["instanceId"], backup_revision, new_revision)
+            restore_desired, restore_deployed, request["instanceId"], new_revision)
+        restore_desired = preserve_current_secret_refs(restore_desired, current_desired_world)
+        restore_desired_mods, restore_deployed_mods = rebase_mod_states(
+            restore_desired_mods, restore_deployed_mods, request["instanceId"], new_revision)
+        failure_step = "restoreCredentials"
+        preserved_lists = preserve_player_lists(instance)
+        write_player_lists(staging, preserved_lists)
         restore_cluster_token(instance, staging, restore_desired)
+        failure_step = "assignRuntimeOwnership"
         for relative in ("data/Master", "data/Caves", "config/Cluster_1"):
             assign_runtime_ownership(staging / relative)
+        failure_step = "validateModReleaseSnapshot"
+        restored_active = restored_active_snapshot(staging, original_active)
+        restored_mods_release = restored_active.get("modsReleaseId") if isinstance(restored_active, dict) else None
+        if restored_mods_release is not None:
+            if (not valid_uuid(restored_mods_release)
+                    or "mods/releases/" + restored_mods_release + "/manifest.json" not in archive_paths):
+                reject("MOD_RELEASE_UNAVAILABLE")
+            release_root = staging / "mods" / "releases" / restored_mods_release
+            release_metadata = read_json(release_root / "manifest.json", 4 * 1024 * 1024)
+            if (release_metadata.get("modsReleaseId") != restored_mods_release
+                    or release_metadata.get("instanceId") != request["instanceId"]):
+                reject("MOD_RELEASE_UNAVAILABLE")
+            assign_runtime_ownership(release_root)
+            os.chown(release_root, 0, 0)
+            os.chmod(release_root, 0o755)
+            release_manifest = release_root / "manifest.json"
+            os.chown(release_manifest, 0, 0)
+            os.chmod(release_manifest, 0o600)
+        failure_step = "validateDstRelease"
         active_release = read_json(active_path, 65536)
         restored_release = inspected["manifest"].get("dstReleaseId")
         if restored_release != active_release.get("dstReleaseId"):
@@ -435,42 +651,95 @@ def _worker_impl(task_id):
         release_metadata.pop("schemaVersion", None)
         if release_metadata != release:
             reject("DST_RELEASE_UNAVAILABLE")
+        failure_step = "writeRestoreTransaction"
+        rollback_paths = ["data/Master", "data/Caves", "config/Cluster_1", "desired/world.json",
+                          "deployed-world.json", "desired/mods.json", "deployed-mods.json",
+                          "active-release.json", "manifest.json", "compose.yaml"]
+        current_mod_release = original_active.get("modsReleaseId")
+        for release_id in (current_mod_release, restored_mods_release):
+            relative = "mods/releases/" + release_id if isinstance(release_id, str) else None
+            if relative and relative not in rollback_paths:
+                rollback_paths.append(relative)
+        original_paths = [relative for relative in rollback_paths
+                          if (instance / relative).exists() or (instance / relative).is_symlink()]
+        runtime_before_evidence = {}
+        if runtime_before == "running":
+            try:
+                if not verify_runtime_processes(instance, request["instanceId"], original_manifest, roles,
+                                                runtime_before_evidence):
+                    runtime_before_evidence = dict(runtime_before_evidence)
+            except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+                runtime_before_evidence = {"check": "baselineProbeUnavailable"}
         atomic_json(directory / "transaction.json", {"schemaVersion": 1, "operationId": task_id,
             "runtimeBefore": runtime_before, "manifest": original_manifest, "activeRelease": original_active,
-            "desiredWorld": read_json(instance / "desired" / "world.json", 262144),
+            "desiredWorld": current_desired_world,
             "deployedWorld": read_json(instance / "deployed-world.json", 262144),
+            "desiredMods": read_json(instance / "desired" / "mods.json", 2 * 1024 * 1024, missing=None),
+            "deployedMods": read_json(instance / "deployed-mods.json", 2 * 1024 * 1024, missing=None),
+            "compose": (instance / "compose.yaml").read_text(encoding="utf-8"),
+            "rollbackPaths": rollback_paths, "originalPaths": original_paths,
+            "runtimeBeforeEvidence": runtime_before_evidence,
             "recoveryPath": str(recovery), "stagingPath": str(staging), "protectionBackupId": None})
         if runtime_before in ("running", "degraded"):
+            failure_step = "stopCurrentRuntime"
+            stop_attempted = True
             compose(instance, manifest, "stop", roles)
             stopped = True
             runtime_after, _ = runtime(request["instanceId"], manifest)
             if runtime_after != "stopped":
                 reject("BACKUP_STOP_FAILED")
         set_status(directory, "running", "stop", completed="stagingVerify")
-        protection_dir = ROOT / "backups" / request["instanceId"] / protection_id
-        protection_dir.mkdir(mode=0o700, parents=False)
-        protection_archive = protection_dir / "archive.tar.gz"
-        identity = {"schemaVersion": 1, "hostId": request["hostId"], "instanceId": request["instanceId"], "backupId": protection_id,
-                    "captureMode": "cold", "runtimeStatus": "stopped", "runtimeVerified": True, "configRevision": request["expectedRevision"], "dstReleaseId": active_release.get("dstReleaseId")}
-        protection_roots = ["data/Master", "config/Cluster_1"] + (["data/Caves"] if manifest.get("cavesEnabled") else [])
-        for relative in ("desired/world.json", "deployed-world.json"):
-            if (instance / relative).exists():
-                protection_roots.append(relative)
-        created = module["create_archive"](instance, protection_archive, identity, protection_roots)
-        catalog = read_json(ROOT / "releases" / "catalog.json", 1024 * 1024)
-        release = next((item for item in catalog.get("releases", []) if item.get("releaseId") == active_release.get("dstReleaseId") and item.get("verified") is True), None)
-        atomic_json(protection_dir / "metadata.json", {"schemaVersion": 1, "backupId": protection_id, "hostId": request["hostId"], "instanceId": request["instanceId"],
-            "createdAt": now(), "reason": "恢复前保护点", "captureMode": "cold", "captureSemantics": "stoppedBeforeRead", "runtimeStatusAtCapture": "stopped",
-            "sizeBytes": created["archiveSizeBytes"], "checksum": created["checksum"], "verification": "verified", "restorability": "restorable" if release else "incompatible",
-            "dstBuild": release.get("dstBuild") if release else None, "dstReleaseId": active_release.get("dstReleaseId"), "modsReleaseId": active_release.get("modsReleaseId"),
-            "configRevision": request["expectedRevision"], "containsSecrets": False})
-        transaction = read_json(directory / "transaction.json")
-        transaction["protectionBackupId"] = protection_id
-        atomic_json(directory / "transaction.json", transaction)
-        set_status(directory, "running", "backup", completed="stop", result={"protectionBackupId": protection_id})
-        set_status(directory, "running", "restoreCommit", completed="backup")
+        mod_release_id = restored_mods_release
+        new_manifest = dict(manifest)
+        new_manifest["modsReleaseId"] = mod_release_id
+        failure_step = "renderRestoredCompose"
+        try:
+            release_ns = {"__name__": "instance_release"}
+            exec(compile(release_source, "<instance-release>", "exec"), release_ns)
+            compose_text = release_ns["render_compose"](new_manifest, dict(release, schemaVersion=1), str(instance))
+        except (KeyError, ValueError, release_ns.get("ReleaseRejected", Exception)):
+            reject("MOD_RELEASE_UNAVAILABLE" if mod_release_id else "BACKUP_RESTORE_COMPOSE_FAILED")
+        protection_created = request.get("createProtectionBackup", True)
+        if protection_created:
+            failure_step = "createProtectionPoint"
+            protection_dir = ROOT / "backups" / request["instanceId"] / protection_id
+            protection_dir.mkdir(mode=0o700, parents=False)
+            protection_archive = protection_dir / "archive.tar.gz"
+            identity = {"schemaVersion": 1, "hostId": request["hostId"], "instanceId": request["instanceId"], "backupId": protection_id,
+                        "captureMode": "cold", "runtimeStatus": "stopped", "runtimeVerified": True, "configRevision": request["expectedRevision"], "dstReleaseId": active_release.get("dstReleaseId")}
+            protection_roots = ["data/Master", "config/Cluster_1"] + (["data/Caves"] if manifest.get("cavesEnabled") else [])
+            for relative in ("desired/world.json", "deployed-world.json", "desired/mods.json", "deployed-mods.json",
+                             "active-release.json", "manifest.json", "compose.yaml"):
+                if (instance / relative).exists():
+                    protection_roots.append(relative)
+            if active_release.get("modsReleaseId"):
+                protection_roots.append("mods/releases/" + active_release["modsReleaseId"])
+            created = module["create_archive"](instance, protection_archive, identity, protection_roots)
+            catalog = read_json(ROOT / "releases" / "catalog.json", 1024 * 1024)
+            release = next((item for item in catalog.get("releases", []) if item.get("releaseId") == active_release.get("dstReleaseId") and item.get("verified") is True), None)
+            atomic_json(protection_dir / "metadata.json", {"schemaVersion": 1, "backupId": protection_id, "hostId": request["hostId"], "instanceId": request["instanceId"],
+                "createdAt": now(), "reason": "恢复前保护点", "captureMode": "cold", "captureSemantics": "stoppedBeforeRead", "runtimeStatusAtCapture": "stopped",
+                "sizeBytes": created["archiveSizeBytes"], "checksum": created["checksum"], "verification": "verified", "restorability": "restorable" if release else "incompatible",
+                "dstBuild": release.get("dstBuild") if release else None, "dstReleaseId": active_release.get("dstReleaseId"), "modsReleaseId": active_release.get("modsReleaseId"),
+                "configRevision": request["expectedRevision"], "containsSecrets": False})
+            transaction = read_json(directory / "transaction.json")
+            transaction["protectionBackupId"] = protection_id
+            atomic_json(directory / "transaction.json", transaction)
+            set_status(directory, "running", "backup", completed="stop", result={"protectionBackupId": protection_id})
+            set_status(directory, "running", "restoreCommit", completed="backup")
+        else:
+            set_status(directory, "running", "restoreCommit", completed="stop")
         recovery.mkdir(mode=0o700)
-        for relative in ("data/Master", "data/Caves", "config/Cluster_1", "desired/world.json", "deployed-world.json"):
+        relative_paths = ["data/Master", "data/Caves", "config/Cluster_1", "desired/world.json",
+                          "deployed-world.json", "desired/mods.json", "deployed-mods.json",
+                          "active-release.json", "manifest.json", "compose.yaml"]
+        previous_mod_release = active_release.get("modsReleaseId")
+        if previous_mod_release:
+            relative_paths.append("mods/releases/" + previous_mod_release)
+        if restored_mods_release and restored_mods_release != previous_mod_release:
+            relative_paths.append("mods/releases/" + restored_mods_release)
+        failure_step = "commitRestoredFiles"
+        for relative in relative_paths:
             source = instance / relative
             if source.exists():
                 destination = recovery / relative
@@ -483,19 +752,36 @@ def _worker_impl(task_id):
                 os.replace(restored, source)
         atomic_json(instance / "desired" / "world.json", restore_desired)
         atomic_json(instance / "deployed-world.json", restore_deployed)
+        if restore_desired_mods is not None:
+            atomic_json(instance / "desired" / "mods.json", restore_desired_mods)
+        else:
+            (instance / "desired" / "mods.json").unlink(missing_ok=True)
+        if restore_deployed_mods is not None:
+            atomic_json(instance / "deployed-mods.json", restore_deployed_mods)
+        else:
+            (instance / "deployed-mods.json").unlink(missing_ok=True)
         manifest["configRevision"] = new_revision
         new_deployment = str(uuid.uuid4())
-        manifest.update({"deploymentId": new_deployment, "dstReleaseId": restored_release})
+        manifest.update({"deploymentId": new_deployment, "dstReleaseId": restored_release, "modsReleaseId": mod_release_id})
         active_release = {"schemaVersion": 1, "deploymentId": new_deployment, "dstReleaseId": restored_release,
-                          "modsReleaseId": inspected["manifest"].get("modsReleaseId"), "composeProject": manifest["composeProject"], "verifiedAt": now()}
+                          "modsReleaseId": mod_release_id, "composeProject": manifest["composeProject"], "verifiedAt": now()}
         atomic_json(active_path, active_release)
         atomic_json(instance / "manifest.json", manifest)
+        atomic_bytes(instance / "compose.yaml", compose_text.encode("utf-8"), 0o600)
+        if runtime_before == "running":
+            failure_step = "createRestoredContainers"
+            compose(instance, manifest, "create", "--force-recreate", *roles)
         if runtime_before == "running":
             set_status(directory, "running", "start", completed="restoreCommit")
+            failure_step = "startRestoredContainers"
             compose(instance, manifest, "start", roles)
-            running_after, _ = runtime(request["instanceId"], manifest)
-            if (running_after != "running"
-                    or not verify_runtime_processes(instance, request["instanceId"], manifest, roles)):
+            failure_step = "verifyRestoredRuntime"
+            if not wait_for_runtime_processes(instance, request["instanceId"], manifest, roles,
+                                              restore_runtime_evidence):
+                running_after, _ = runtime(request["instanceId"], manifest)
+                if running_after != "running":
+                    restore_runtime_evidence.clear()
+                    restore_runtime_evidence.update({"check": "containerRuntimeState", "state": running_after})
                 reject("BACKUP_RESTART_FAILED")
             runtime_verified = True
         elif stopped:
@@ -503,10 +789,10 @@ def _worker_impl(task_id):
             if stopped_after != "stopped":
                 reject("BACKUP_STOP_FAILED")
         set_status(directory, "running", "verify", completed="start" if runtime_before == "running" else "restoreCommit")
+        result_payload = {"protectionBackupId": protection_id if protection_created else None, "configRevision": manifest["configRevision"], "verification": "passed", "runtimeVerified": runtime_verified, "restoreAcceptanceRecorded": False}
+        result = set_status(directory, "succeeded", "finalize", completed="verify", result=result_payload)
         shutil.rmtree(recovery, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
-        result_payload = {"protectionBackupId": protection_id, "configRevision": manifest["configRevision"], "verification": "passed", "runtimeVerified": runtime_verified, "restoreAcceptanceRecorded": False}
-        result = set_status(directory, "succeeded", "finalize", completed="verify", result=result_payload)
         if not runtime_verified:
             return result
         try:
@@ -527,30 +813,68 @@ def _worker_impl(task_id):
             return result
     except Exception as failure:
         code = getattr(failure, "code", "BACKUP_RESTORE_FAILED")
+        failure_cause = code if isinstance(code, str) and re.fullmatch(r"[A-Z0-9_]{1,80}", code) \
+            else type(failure).__name__
+        failed_state = load(task_id)
+        failure_stage = failed_state.get("stage", "preflight")
+        if not restore_changed_live_state(stop_attempted, stopped, moved):
+            return set_status(directory, "failed", failure_stage,
+                error=error_payload(code, request, task_id, False,
+                    {"failureStep": failure_step, "failureCause": failure_cause}))
+        rollback_stage = "readRestoreTransaction"
+        rollback_failure = None
+        rollback_health = None
         try:
-            for relative in reversed(moved):
-                current = instance / relative
-                old = recovery / relative
-                if current.exists() or current.is_symlink(): remove_path(current)
-                if old.exists():
-                    current.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    os.replace(old, current)
-            atomic_json(active_path, original_active)
-            atomic_json(instance / "manifest.json", original_manifest)
             transaction = read_json(directory / "transaction.json")
-            atomic_json(instance / "desired" / "world.json", transaction["desiredWorld"])
-            atomic_json(instance / "deployed-world.json", transaction["deployedWorld"])
+            rollback_stage = "restoreFiles"
+            restore_transaction_snapshot(instance, recovery, transaction)
             if runtime_before == "running":
-                compose(instance, manifest, "start", roles)
+                rollback_stage = "recreateOriginalContainers"
+                compose(instance, original_manifest, "create", "--force-recreate", *roles)
+                rollback_stage = "restartOriginalContainers"
+                compose(instance, original_manifest, "start", roles)
+                rollback_stage = "verifyOriginalRuntime"
+                if not wait_for_runtime_processes(instance, request["instanceId"], original_manifest, roles,
+                                                  rollback_runtime_evidence):
+                    original_runtime, _ = runtime(request["instanceId"], original_manifest)
+                    if original_runtime != "running":
+                        rollback_runtime_evidence.clear()
+                        rollback_runtime_evidence.update({"check": "containerRuntimeState", "state": original_runtime})
+                        reject("BACKUP_RESTART_FAILED")
+                    baseline = transaction.get("runtimeBeforeEvidence")
+                    if (isinstance(baseline, dict) and baseline.get("check") != "passed"
+                            and same_runtime_degradation(baseline, rollback_runtime_evidence)):
+                        rollback_health = "sameDegradedStateAsBeforeRestore"
+                    elif (not isinstance(baseline, dict) or baseline.get("check") != "passed"):
+                        rollback_health = "degradedStateBaselineUnavailable"
+                    else:
+                        reject("BACKUP_RESTART_FAILED")
             elif stopped:
+                rollback_stage = "verifyOriginalStoppedState"
                 stopped_after, _ = runtime(request["instanceId"], original_manifest)
                 if stopped_after != "stopped":
                     reject("BACKUP_STOP_FAILED")
-        except Exception:
+            rollback_stage = "complete"
+        except Exception as rollback_error:
             code = "BACKUP_ROLLBACK_FAILED"
-        return set_status(directory, "failed", "rollback", error=error_payload(code, request, task_id, True))
+            rollback_failure = getattr(rollback_error, "code", None)
+            if not isinstance(rollback_failure, str) or re.fullmatch(r"[A-Z0-9_]{1,80}", rollback_failure) is None:
+                rollback_failure = type(rollback_error).__name__
+        details = {"rollbackStage": rollback_stage} if rollback_failure is None else {
+            "rollbackStage": rollback_stage, "rollbackFailure": rollback_failure}
+        details.update({"failureStep": failure_step, "failureCause": failure_cause,
+                        "rollbackSucceeded": rollback_failure is None})
+        if rollback_health:
+            details["rollbackHealth"] = rollback_health
+        if restore_runtime_evidence:
+            details["restoreRuntimeCheck"] = restore_runtime_evidence
+        if rollback_runtime_evidence:
+            details["rollbackRuntimeCheck"] = rollback_runtime_evidence
+        return set_status(directory, "failed", "rollback",
+                          error=error_payload(code, request, task_id, True, details))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+        fcntl.flock(instance_lock.fileno(), fcntl.LOCK_UN); instance_lock.close()
         fcntl.flock(maintenance.fileno(), fcntl.LOCK_UN); maintenance.close()
         fcntl.flock(heavy.fileno(), fcntl.LOCK_UN); heavy.close()
 
@@ -572,8 +896,16 @@ def worker(task_id):
         return state
 
 
+def write_worker_bundle(directory, worker_source, archive_source, release_source):
+    if not all(isinstance(value, str) for value in (worker_source, archive_source, release_source)):
+        reject("BACKUP_CONTROLLER_BUNDLE_INVALID")
+    atomic_bytes(directory / "worker.py", worker_source.encode("utf-8"), 0o700)
+    atomic_bytes(directory / "archive-source.py", archive_source.encode("utf-8"), 0o600)
+    atomic_bytes(directory / "release-source.py", release_source.encode("utf-8"), 0o600)
+
+
 def start(request):
-    if os.geteuid() != 0 or request.get("schemaVersion") != 1 or request.get("action") != "restoreStart" or not valid_uuid(request.get("requestId")) or not valid_uuid(request.get("operationId")) or not valid_uuid(request.get("backupId")) or not valid_uuid(request.get("hostId")) or not valid_uuid(request.get("instanceId")) or type(request.get("expectedRevision")) is not int or request["expectedRevision"] < 0 or request["expectedRevision"] > MAX_REVISION:
+    if os.geteuid() != 0 or request.get("schemaVersion") != 1 or request.get("action") != "restoreStart" or not valid_uuid(request.get("requestId")) or not valid_uuid(request.get("operationId")) or not valid_uuid(request.get("backupId")) or not valid_uuid(request.get("hostId")) or not valid_uuid(request.get("instanceId")) or type(request.get("expectedRevision")) is not int or request["expectedRevision"] < 0 or request["expectedRevision"] > MAX_REVISION or type(request.get("createProtectionBackup")) is not bool:
         reject("BACKUP_TASK_INPUT_INVALID")
     safe_dir(ROOT); safe_dir(TASKS, create=True)
     directory = TASKS / request["operationId"]
@@ -594,10 +926,8 @@ def start(request):
     worker_path = directory / "worker.py"
     worker_source = globals().get("RESTORE_SOURCE")
     archive_source = globals().get("ARCHIVE_SOURCE")
-    if not isinstance(worker_source, str) or not isinstance(archive_source, str):
-        reject("BACKUP_CONTROLLER_BUNDLE_INVALID")
-    atomic_bytes(worker_path, worker_source.encode("utf-8"), 0o700)
-    atomic_bytes(directory / "archive-source.py", archive_source.encode("utf-8"), 0o600)
+    release_source = globals().get("RELEASE_SOURCE")
+    write_worker_bundle(directory, worker_source, archive_source, release_source)
     launch = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect", "--unit", unit, "--property=Type=exec", "/usr/bin/python3", "-I", str(worker_path), "worker", request["operationId"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
     if launch.returncode != 0:
         return set_status(directory, "failed", "queued", error=error_payload("BACKUP_CONTROLLER_START_FAILED", request, request["operationId"], False))
@@ -627,9 +957,16 @@ def reconcile_interrupted(request, state):
         return set_status(directory, "interrupted", state["stage"], error=error_payload("BACKUP_RESTORE_INTERRUPTED", request, task_id, False), fields={"observation": "reconciling", "runtimeRecovery": "notRequired"})
     if transaction.get("schemaVersion") != 1 or transaction.get("operationId") != task_id:
         return set_status(directory, "interrupted", state["stage"], error=error_payload("BACKUP_RECOVERY_REQUIRED", request, task_id, True), fields={"observation": "reconciling", "runtimeRecovery": "required"})
+    has_recovery_contract = isinstance(transaction.get("rollbackPaths"), list) \
+        and isinstance(transaction.get("originalPaths"), list)
+    if not has_recovery_contract and state.get("stage") in ("restoreCommit", "start", "verify", "rollback"):
+        return set_status(directory, "interrupted", state["stage"],
+            error=error_payload("BACKUP_RECOVERY_REQUIRED", request, task_id, True),
+            fields={"observation": "reconciling", "runtimeRecovery": "required"})
     instance = ROOT / "instances" / request["instanceId"]
     heavy = None
     maintenance = None
+    instance_lock = None
     try:
         safe_dir(ROOT / "locks")
         heavy = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -637,6 +974,8 @@ def reconcile_interrupted(request, state):
         safe_dir(instance / "locks")
         maintenance = os.open(instance / "locks" / "world-config.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         fcntl.flock(maintenance, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        instance_lock = os.open(instance / "locks" / "instance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         recovery = instance / (".restore-recovery-" + task_id)
         manifest = transaction["manifest"]
         current_state, roles = runtime(request["instanceId"], manifest)
@@ -645,35 +984,44 @@ def reconcile_interrupted(request, state):
             current_state, _ = runtime(request["instanceId"], manifest)
             if current_state != "stopped":
                 reject("BACKUP_STOP_FAILED")
-        for relative in ("data/Master", "data/Caves", "config/Cluster_1", "desired/world.json", "deployed-world.json"):
-            old = recovery / relative
-            current = instance / relative
-            if old.exists():
-                if current.exists() or current.is_symlink(): remove_path(current)
-                current.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                os.replace(old, current)
-        atomic_json(instance / "active-release.json", transaction["activeRelease"])
-        atomic_json(instance / "desired" / "world.json", transaction["desiredWorld"])
-        atomic_json(instance / "deployed-world.json", transaction["deployedWorld"])
-        atomic_json(instance / "manifest.json", manifest)
+        if has_recovery_contract:
+            restore_transaction_snapshot(instance, recovery, transaction)
+        else:
+            atomic_json(instance / "active-release.json", transaction["activeRelease"])
+            atomic_json(instance / "manifest.json", manifest)
+            atomic_json(instance / "desired" / "world.json", transaction["desiredWorld"])
+            atomic_json(instance / "deployed-world.json", transaction["deployedWorld"])
         runtime_before = transaction.get("runtimeBefore")
+        runtime_health = None
         if runtime_before == "running":
+            compose(instance, manifest, "create", "--force-recreate", *roles)
             compose(instance, manifest, "start", roles)
-            running, _ = runtime(request["instanceId"], manifest)
-            if running != "running":
-                reject("BACKUP_RESTART_FAILED")
+            recovered_evidence = {}
+            if not wait_for_runtime_processes(instance, request["instanceId"], manifest, roles, recovered_evidence):
+                baseline = transaction.get("runtimeBeforeEvidence")
+                if (isinstance(baseline, dict) and baseline.get("check") != "passed"
+                        and same_runtime_degradation(baseline, recovered_evidence)):
+                    runtime_health = "sameDegradedStateAsBeforeRestore"
+                else:
+                    reject("BACKUP_RESTART_FAILED")
         elif runtime_before in ("stopped", "degraded"):
             stopped, _ = runtime(request["instanceId"], manifest)
             if stopped != "stopped":
                 reject("BACKUP_STOP_FAILED")
         else:
             reject("BACKUP_RUNTIME_INVALID")
+        details = {"runtimeHealth": runtime_health} if runtime_health else {}
+        recovered = set_status(directory, "interrupted", state["stage"],
+            error=error_payload("BACKUP_RESTORE_INTERRUPTED_RECOVERED", request, task_id, True, details),
+            fields={"observation": "reconciling", "runtimeRecovery": "restored"})
         shutil.rmtree(recovery, ignore_errors=True)
         shutil.rmtree(instance / (".restore-staging-" + task_id), ignore_errors=True)
-        return set_status(directory, "interrupted", state["stage"], error=error_payload("BACKUP_RESTORE_INTERRUPTED_RECOVERED", request, task_id, True), fields={"observation": "reconciling", "runtimeRecovery": "restored"})
+        return recovered
     except Exception:
         return set_status(directory, "interrupted", state["stage"], error=error_payload("BACKUP_RECOVERY_REQUIRED", request, task_id, True), fields={"observation": "reconciling", "runtimeRecovery": "required"})
     finally:
+        if instance_lock is not None:
+            fcntl.flock(instance_lock, fcntl.LOCK_UN); os.close(instance_lock)
         if maintenance is not None:
             fcntl.flock(maintenance, fcntl.LOCK_UN); os.close(maintenance)
         if heavy is not None:

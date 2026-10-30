@@ -70,9 +70,10 @@ def prepare_runtime_paths(instance_root, release_id, caves_enabled):
     instance = Path(instance_root)
     if not instance.is_absolute() or not valid_uuid(instance.name) or instance.parent.name != "instances":
         reject("CREATE_PATH_INVALID")
-    relative_roots = ["data", "mods", "mods/releases", "mods/releases/" + release_id]
+    mods_release_id = release_id
+    relative_roots = ["data", "mods", "mods/releases", "mods/releases/" + mods_release_id]
     for shard in ("Master", "Caves") if caves_enabled else ("Master",):
-        relative_roots.extend(["data/" + shard, "mods/releases/" + release_id + "/" + shard])
+        relative_roots.extend(["data/" + shard, "mods/releases/" + mods_release_id + "/" + shard])
     for relative in [".", *relative_roots]:
         path = instance / relative
         if relative != ".":
@@ -117,10 +118,15 @@ def render_compose(manifest, release, instance_root):
             or root_path.parent.name != "instances"):
         reject("CREATE_PATH_INVALID")
     caves = manifest.get("cavesEnabled") is True
+    mods_release_id = manifest.get("modsReleaseId") or release["releaseId"]
+    if not valid_uuid(mods_release_id):
+        reject("CREATE_MANIFEST_INVALID")
     services = ["master"] + (["caves"] if caves else [])
     lines = ["services:"]
     for shard in services:
         command_value = release["commands"][shard]
+        if manifest.get("modsReleaseId"):
+            command_value = command_value + ["-ugc_directory", "/srv/ugc"]
         lines.extend(["  " + shard + ":", "    image: " + quote(release["image"] + "@" + release["imageDigest"]),
                       "    init: true", "    restart: " + quote("unless-stopped" if manifest.get("autostart") else "no"),
                       "    command:"])
@@ -128,7 +134,9 @@ def render_compose(manifest, release, instance_root):
         lines.extend(["    working_dir: '/srv/dst/bin64'", "    volumes:",
                       "      - " + quote(instance_root + "/data/" + ("Caves" if shard == "caves" else "Master") + ":/srv/data:rw"),
                       "      - " + quote(instance_root + "/config:/srv/data/config:rw"),
-                      "      - " + quote(instance_root + "/mods/releases/" + release["releaseId"] + "/" + ("Caves" if shard == "caves" else "Master") + ":/srv/ugc:rw")])
+                      "      - " + quote(instance_root + "/mods/releases/" + mods_release_id + "/" + ("Caves" if shard == "caves" else "Master") + ":/srv/ugc:rw")])
+        if manifest.get("modsReleaseId"):
+            lines.append("      - " + quote(instance_root + "/mods/releases/" + mods_release_id + "/dedicated_server_mods_setup.lua:/srv/dst/mods/dedicated_server_mods_setup.lua:ro"))
         ports = port_lines(manifest, shard)
         if ports:
             lines.append("    ports:")
@@ -142,5 +150,6 @@ def render_compose(manifest, release, instance_root):
             lines.extend(["    depends_on:", "      - master"])
     lines.extend(["networks:", "  instance:", "    driver: bridge", "x-hunger-desolate:",
                   "  schemaVersion: 1", "  instanceId: " + quote(instance_id),
-                  "  releaseId: " + quote(release["releaseId"])])
+                  "  releaseId: " + quote(release["releaseId"]),
+                  "  modsReleaseId: " + quote(mods_release_id)])
     return "\n".join(lines) + "\n"

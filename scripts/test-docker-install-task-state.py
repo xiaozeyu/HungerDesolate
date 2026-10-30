@@ -99,7 +99,9 @@ class TaskStateTests(unittest.TestCase):
              patch.object(CONTROL.subprocess, "run", side_effect=launch) as runner:
             accepted = CONTROL.start(request, "# fixed worker", "# fixed preflight")
             self.assertEqual(accepted["sequence"], 1)
+            inspect.assert_called_once_with(check_repository_access=False)
             self.assertEqual(CONTROL.start(request, "# fixed worker", "# fixed preflight"), accepted)
+            inspect.assert_called_once()
             self.assertEqual(runner.call_count, 1)
             retry = {**request, "operationId":"44444444-4444-4444-8444-444444444444"}
             cases = [

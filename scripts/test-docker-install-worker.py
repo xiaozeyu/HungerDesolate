@@ -42,7 +42,12 @@ class WorkerTests(unittest.TestCase):
         host_id = "33333333-3333-4333-8333-333333333333"
         (self.task / "plan.json").write_text(json.dumps({"taskId":self.task.name, "hostId":host_id, "snapshotDigest":"a"*64}))
         (self.task / "status.json").write_text(json.dumps({"hostId":host_id, "sequence":1, "startedAtUnixSeconds":1700000000}))
-        (self.task / "preflight.py").write_text("def inspect():\n    return " + repr({"status":"ready", "hostId":host_id, "snapshotDigest":"a"*64}) + "\n")
+        (self.task / "preflight.py").write_text(
+            "def inspect(*, check_repository_access=True):\n"
+            "    if check_repository_access:\n"
+            "        raise AssertionError('unexpected network gate before actual download')\n"
+            "    return " + repr({"status":"ready", "hostId":host_id, "snapshotDigest":"a"*64,
+                                   "repositoryReachable":None}) + "\n")
         original_stat, original_lstat, original_fstat = Path.stat, Path.lstat, os.fstat
         def root_owned(info):
             fields = list(info)

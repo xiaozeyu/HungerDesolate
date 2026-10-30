@@ -50,7 +50,8 @@ class InstanceRuntimeStartTests(unittest.TestCase):
                      "hostPort": port, "containerPort": port}
                     for shard, offset in (("master", 0), ("caves", 1))
                     for purpose, port in (("game", 11000 + offset), ("steamAuth", 8766 + offset), ("steamMaster", 27016 + offset))]},
-            instance / "desired" / "world.json": {"revision": 4, "settings": settings},
+            instance / "desired" / "world.json": {"schemaVersion": 1, "instanceId": INSTANCE,
+                "revision": 4, "settings": settings},
             instance / "deployed-world.json": {"instanceId": INSTANCE, "revision": 4, "digest": digest, "settings": settings},
             instance / "active-release.json": {"dstReleaseId": RELEASE},
             self.root / "releases" / "catalog.json": {"hostId": HOST,
@@ -304,6 +305,17 @@ class InstanceRuntimeStartTests(unittest.TestCase):
         self.assertEqual(failure.exception.code, "INSTANCE_START_COMPOSE_DRIFT")
         self.assertEqual(path.read_bytes(), previous)
         compose.assert_not_called()
+
+    def test_previous_generated_compose_without_mod_release_is_migrated(self):
+        current_manifest = dict(self.manifest, modsReleaseId="66666666-6666-4666-8666-666666666666")
+        previous = HELPERS["render_compose"](self.manifest, self.release, str(self.instance))
+        (self.instance / "compose.yaml").write_text(previous)
+        with patch.object(MODULE, "compose") as compose:
+            MODULE.repair_runtime_layout(self.instance, current_manifest, self.release,
+                current_manifest["composeProject"], ["master", "caves"])
+        desired = HELPERS["render_compose"](current_manifest, self.release, str(self.instance))
+        self.assertEqual((self.instance / "compose.yaml").read_text(), desired)
+        self.assertEqual(compose.call_args_list[-1].args[2], ["create", "--force-recreate", "master", "caves"])
 
     def containers(self, state="running"):
         return [{"id": ("a" if role == "master" else "b") * 64, "imageId": "sha256:" + "a" * 64,

@@ -244,6 +244,23 @@ def backup_restorability(instance, request, release_id):
                                text=True, timeout=10, check=False, env=docker_env())
         if image.returncode != 0 or image.stdout.strip() != release["imageDigest"]:
             return "missingArtifacts", None
+        active_path = instance / "active-release.json"
+        active = read_json(active_path, 65536) if active_path.exists() else {}
+        mods_release_id = active.get("modsReleaseId") if isinstance(active, dict) else None
+        if mods_release_id is not None:
+            if not isinstance(mods_release_id, str) or not re.fullmatch(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", mods_release_id):
+                return "incompatible", None
+            mods_root = instance / "mods" / "releases" / mods_release_id
+            try:
+                safe_dir(mods_root)
+                mods_manifest = read_json(mods_root / "manifest.json", 4 * 1024 * 1024)
+                if (mods_manifest.get("schemaVersion") != 1 or mods_manifest.get("modsReleaseId") != mods_release_id
+                        or mods_manifest.get("instanceId") != request["instanceId"]
+                        or not isinstance(mods_manifest.get("mods"), list)):
+                    return "missingArtifacts", None
+            except (OSError, Rejected):
+                return "missingArtifacts", None
         return "restorable", release
     except (OSError, Rejected, KeyError, TypeError, subprocess.SubprocessError):
         return "missingArtifacts", None
@@ -342,6 +359,7 @@ def _worker_impl(task_id):
     backup_created = False
     heavy_fd = None
     lock_fd = None
+    instance_lock_fd = None
     try:
         allow_unknown = request["captureMode"] == "quasiHot"
         allow_degraded = request["captureMode"] == "cold"
@@ -361,7 +379,11 @@ def _worker_impl(task_id):
         safe_dir(instance / "locks")
         lock_path = instance / "locks" / "world-config.lock"
         lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        instance_lock_fd = os.open(instance / "locks" / "instance.lock",
+                                   os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except Rejected as failure:
+        if instance_lock_fd is not None:
+            os.close(instance_lock_fd)
         if lock_fd is not None:
             os.close(lock_fd)
         if heavy_fd is not None:
@@ -370,6 +392,8 @@ def _worker_impl(task_id):
         return set_status(directory, "failed", current["stage"], error=task_error(
             failure.code, task_id, request))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        if instance_lock_fd is not None:
+            os.close(instance_lock_fd)
         if lock_fd is not None:
             os.close(lock_fd)
         if heavy_fd is not None:
@@ -385,11 +409,24 @@ def _worker_impl(task_id):
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             reject("INSTANCE_BUSY")
+        try:
+            fcntl.flock(instance_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            reject("INSTANCE_BUSY")
         instance, manifest, roles, runtime_before = verify_instance(request, allow_unknown, allow_degraded)
         if request["captureMode"] == "cold" and runtime_before not in ("running", "stopped", "degraded"):
             reject("BACKUP_RUNTIME_INVALID")
         set_status(directory, "running", "preflight")
         roots = ["data/Master", "config/Cluster_1"]
+        active_path = instance / "active-release.json"
+        active_snapshot = read_json(active_path, 65536) if active_path.exists() else {}
+        active_mods_release = active_snapshot.get("modsReleaseId") if isinstance(active_snapshot, dict) else None
+        for relative in ("active-release.json", "manifest.json", "compose.yaml"):
+            if (instance / relative).exists(): roots.append(relative)
+        for relative in ("desired/mods.json", "deployed-mods.json"):
+            if (instance / relative).exists(): roots.append(relative)
+        if active_mods_release:
+            roots.append("mods/releases/" + active_mods_release)
         if manifest.get("cavesEnabled") is True:
             roots.append("data/Caves")
         for relative in ("desired/world.json", "deployed-world.json"):
@@ -458,7 +495,7 @@ def _worker_impl(task_id):
                 "captureMode": request["captureMode"], "runtimeStatus": capture_runtime,
                 "runtimeVerified": capture_runtime in ("running", "stopped"),
                 "configRevision": request["expectedRevision"],
-                "dstReleaseId": release_id, "reason": request["reason"]}
+                "dstReleaseId": release_id, "modsReleaseId": active.get("modsReleaseId"), "reason": request["reason"]}
             archive_path = backup_stage / "archive.tar.gz"
             created = archive_module["create_archive"](instance, archive_path, backup_identity, roots)
             verified = archive_module["inspect_archive"](archive_path, request["hostId"],
@@ -517,6 +554,8 @@ def _worker_impl(task_id):
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+        fcntl.flock(instance_lock_fd, fcntl.LOCK_UN)
+        os.close(instance_lock_fd)
         fcntl.flock(heavy_fd, fcntl.LOCK_UN)
         os.close(heavy_fd)
 
@@ -562,6 +601,7 @@ def recover_interrupted(request, directory):
         return True, "BACKUP_WORKER_INTERRUPTED"
     heavy_fd = None
     maintenance_fd = None
+    instance_fd = None
     try:
         instance, manifest, roles, _ = verify_instance(request, allow_unknown=True)
         safe_dir(ROOT / "locks")
@@ -570,6 +610,8 @@ def recover_interrupted(request, directory):
         safe_dir(instance / "locks")
         maintenance_fd = os.open(instance / "locks" / "world-config.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         fcntl.flock(maintenance_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        instance_fd = os.open(instance / "locks" / "instance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(instance_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         restore_runtime(request, manifest, roles, execution["runtimeBefore"] == "running")
         execution["runtimeRestored"] = True
         atomic_json(execution_path, execution)
@@ -577,6 +619,9 @@ def recover_interrupted(request, directory):
     except Exception:
         return False, "BACKUP_RECOVERY_REQUIRED"
     finally:
+        if instance_fd is not None:
+            fcntl.flock(instance_fd, fcntl.LOCK_UN)
+            os.close(instance_fd)
         if maintenance_fd is not None:
             fcntl.flock(maintenance_fd, fcntl.LOCK_UN)
             os.close(maintenance_fd)

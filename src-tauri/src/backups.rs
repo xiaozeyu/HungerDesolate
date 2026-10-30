@@ -21,6 +21,7 @@ const SCRIPT: &str = include_str!("../../remote-scripts/probes/instance-backups.
 const TASK_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-task.py");
 const ARCHIVE_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-archive.py");
 const RESTORE_SCRIPT: &str = include_str!("../../remote-scripts/actions/restore-task.py");
+const RELEASE_SCRIPT: &str = include_str!("../../remote-scripts/actions/instance-release.py");
 const MAX_OUTPUT: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +112,7 @@ pub struct RestoreRequest {
     pub expected_revision: u64,
     pub backup_id: String,
     pub operation_id: String,
+    pub create_protection_backup: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -295,7 +297,6 @@ fn invoke(session: &Session, payload: &Value) -> CommandResult<Value> {
             "REVISION_CONFLICT" => error("REVISION_CONFLICT", "专服配置已变化，请刷新后重试"),
             "BACKUP_INPUT_INVALID" => error("BACKUP_INPUT_INVALID", "备份请求参数无效"),
             "BACKUP_CHANGED" => error("BACKUP_CHANGED", "备份已变化，请刷新后重试"),
-            "BACKUP_PROTECTION_POINT" => error("BACKUP_PROTECTION_POINT", "恢复保护点不能删除"),
             "BACKUP_DELETE_FAILED" | "BACKUP_DELETE_INCOMPLETE" => {
                 error("BACKUP_DELETE_FAILED", "备份删除未完成，请刷新核对现场")
             }
@@ -327,8 +328,9 @@ fn invoke_task(session: &Session, payload: &Value) -> CommandResult<Value> {
     let task_source = STANDARD.encode(TASK_SCRIPT.as_bytes());
     let archive_source = STANDARD.encode(ARCHIVE_SCRIPT.as_bytes());
     let restore_source = STANDARD.encode(RESTORE_SCRIPT.as_bytes());
+    let release_source = STANDARD.encode(RELEASE_SCRIPT.as_bytes());
     let source = format!(
-        "import base64,json\nARCHIVE_SOURCE=base64.b64decode('{archive_source}').decode('utf-8')\nWORKER_SOURCE=base64.b64decode('{task_source}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{restore_source}').decode('utf-8')\nrequest=json.loads(base64.b64decode('{request}').decode('utf-8'))\nif request.get('action','').startswith('restore'):\n    namespace={{'__name__':'restore_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'RESTORE_SOURCE':RESTORE_SOURCE}}\n    exec(compile(RESTORE_SOURCE,'<restore-task>','exec'),namespace)\n    namespace['main'](request)\nelse:\n    namespace={{'__name__':'backup_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'WORKER_SOURCE':WORKER_SOURCE}}\n    exec(compile(WORKER_SOURCE,'<backup-task>','exec'),namespace)\n    namespace['main'](request)\n"
+        "import base64,json\nARCHIVE_SOURCE=base64.b64decode('{archive_source}').decode('utf-8')\nWORKER_SOURCE=base64.b64decode('{task_source}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{restore_source}').decode('utf-8')\nRELEASE_SOURCE=base64.b64decode('{release_source}').decode('utf-8')\nrequest=json.loads(base64.b64decode('{request}').decode('utf-8'))\nif request.get('action','').startswith('restore'):\n    namespace={{'__name__':'restore_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'RESTORE_SOURCE':RESTORE_SOURCE,'RELEASE_SOURCE':RELEASE_SOURCE}}\n    exec(compile(RESTORE_SOURCE,'<restore-task>','exec'),namespace)\n    namespace['main'](request)\nelse:\n    namespace={{'__name__':'backup_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'WORKER_SOURCE':WORKER_SOURCE}}\n    exec(compile(WORKER_SOURCE,'<backup-task>','exec'),namespace)\n    namespace['main'](request)\n"
     );
     run_remote(session, &source)
 }
@@ -1289,6 +1291,7 @@ fn check_restore_preflight(
             "CONFIG_REVISION_EXHAUSTED" => error("BACKUP_INPUT_INVALID", "配置版本号已达上限"),
             "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING" => error("BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING", "旧备份未保存已应用配置快照，且当前配置版本已变化；为避免恢复后无法启动，已阻止恢复"),
             "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID" => error("BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID", "备份中的已应用配置快照校验失败，已阻止恢复"),
+            "MOD_RELEASE_UNAVAILABLE" => error("MOD_RELEASE_UNAVAILABLE", "旧备份缺少 MOD 发布快照，当前 MOD 部署无法与备份世界安全匹配"),
             _ => error("RESTORE_PREFLIGHT_BLOCKED", "恢复检测未通过，已禁止恢复"),
         });
     }
@@ -1324,7 +1327,8 @@ pub fn restore(database: &Path, request: RestoreRequest) -> CommandResult<Value>
             session,
             &json!({"schemaVersion":1,"action":"restoreStart","requestId":request.request_id,
             "operationId":request.operation_id,"hostId":request.target.host_id,"instanceId":request.target.instance_id,
-            "expectedRevision":request.expected_revision,"backupId":request.backup_id}),
+            "expectedRevision":request.expected_revision,"backupId":request.backup_id,
+            "createProtectionBackup":request.create_protection_backup}),
         )?;
         restore_task_response(
             remote,

@@ -151,6 +151,9 @@ export interface TaskResult {
     deploymentId: string | null;
     invalidate: {hostId: HostId; instanceId: InstanceId | null; domains: string[]}[];
     recoveryActions: TaskRecoveryAction[];
+    expectedRevision?: number;
+    preparedMods?: {workshopId: string; contentDigest: string; updateCandidate: boolean;
+        previousArtifactDigest?: string | null}[];
 }
 
 export interface MutationResult<T> {

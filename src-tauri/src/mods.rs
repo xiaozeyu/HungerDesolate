@@ -20,6 +20,11 @@ const OP: &str = "listInstanceMods";
 const SCRIPT: &str = include_str!("../../remote-scripts/probes/instance-mods.py");
 const SAVE_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-save.py");
 const DOWNLOAD_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-download.py");
+const APPLY_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-apply.py");
+const ARCHIVE_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-archive.py");
+const RELEASE_SCRIPT: &str = include_str!("../../remote-scripts/actions/instance-release.py");
+const RUNTIME_SCRIPT: &str = include_str!("../../remote-scripts/actions/instance-runtime-start.py");
+const RESTORE_SCRIPT: &str = include_str!("../../remote-scripts/actions/restore-task.py");
 const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +188,8 @@ pub struct PrepareRequest {
     pub workshop_ids: Vec<String>,
     #[serde(default)]
     pub source_handles: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub candidate_workshop_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +218,54 @@ pub struct DownloadTaskListResponse {
     pub request_id: String,
     pub target: InstanceTarget,
     pub items: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub expected_record_version: u64,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyStartRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub expected_record_version: u64,
+    pub expected_revision: u64,
+    pub desired_digest: String,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyTaskRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub expected_record_version: u64,
+    pub operation_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPreviewResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub config_revision: u64,
+    pub desired_digest: String,
+    pub mods_release_id: Option<String>,
+    pub runtime_status: String,
+    pub shards: Vec<String>,
+    pub changes: Vec<Value>,
+    pub blockers: Vec<String>,
+    pub allowed: bool,
 }
 
 fn error(code: &'static str, message: &'static str) -> Box<CommandError> {
@@ -458,6 +513,106 @@ fn invoke_download(session: &Session, payload: &Value) -> CommandResult<Value> {
         .get("data")
         .cloned()
         .ok_or_else(|| error("MOD_TASK_PROTOCOL_INVALID", "MOD 任务响应缺少数据"))
+}
+
+fn invoke_apply(session: &Session, payload: &Value) -> CommandResult<Value> {
+    let encoded_request = STANDARD.encode(
+        serde_json::to_vec(payload)
+            .map_err(|_| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用请求编码失败"))?,
+    );
+    let encoded_sources = [
+        APPLY_SCRIPT,
+        ARCHIVE_SCRIPT,
+        RELEASE_SCRIPT,
+        RUNTIME_SCRIPT,
+        RESTORE_SCRIPT,
+        DOWNLOAD_SCRIPT,
+    ]
+    .map(|source| STANDARD.encode(source.as_bytes()));
+    let source = format!(
+        "import base64,json\nAPPLY_SOURCE=base64.b64decode('{}').decode('utf-8')\nARCHIVE_SOURCE=base64.b64decode('{}').decode('utf-8')\nRELEASE_SOURCE=base64.b64decode('{}').decode('utf-8')\nRUNTIME_SOURCE=base64.b64decode('{}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{}').decode('utf-8')\nDOWNLOAD_SOURCE=base64.b64decode('{}').decode('utf-8')\nnamespace={{'__name__':'mods_apply','__file__':'<mods-apply>','ARCHIVE_SOURCE':ARCHIVE_SOURCE}}\nexec(compile(APPLY_SOURCE,'<mods-apply>','exec'),namespace)\ntry:\n    namespace['main'](json.loads(base64.b64decode('{}').decode('utf-8')),APPLY_SOURCE,ARCHIVE_SOURCE,RELEASE_SOURCE,RUNTIME_SOURCE,RESTORE_SOURCE,DOWNLOAD_SOURCE)\nexcept SystemExit:\n    raise\nexcept Exception:\n    print(json.dumps({{'ok':False,'code':'MOD_APPLY_CONTROLLER_FAILED'}},separators=(',',':')))\n",
+        encoded_sources[0], encoded_sources[1], encoded_sources[2], encoded_sources[3], encoded_sources[4], encoded_sources[5], encoded_request);
+    let mut channel = session
+        .channel_session()
+        .map_err(|_| error("MOD_APPLY_CHANNEL_FAILED", "无法建立 MOD 应用通道"))?;
+    channel
+        .handle_extended_data(ExtendedData::Ignore)
+        .map_err(|_| error("MOD_APPLY_CHANNEL_FAILED", "无法配置 MOD 应用通道"))?;
+    channel
+        .exec("/usr/bin/python3 -I -")
+        .map_err(|_| error("MOD_RUNTIME_REQUIRED", "远端需要 /usr/bin/python3"))?;
+    channel
+        .write_all(source.as_bytes())
+        .map_err(|_| error("MOD_APPLY_CHANNEL_FAILED", "无法提交 MOD 应用请求"))?;
+    channel
+        .send_eof()
+        .map_err(|_| error("MOD_APPLY_CHANNEL_FAILED", "无法结束 MOD 应用请求"))?;
+    session.set_blocking(false);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        if Instant::now() >= deadline {
+            return Err(error("MOD_APPLY_QUERY_TIMEOUT", "MOD 应用请求超时"));
+        }
+        match channel.read(&mut buffer) {
+            Ok(0) if channel.eof() => break,
+            Ok(0) => std::thread::sleep(Duration::from_millis(20)),
+            Ok(count) if output.len() + count <= MAX_OUTPUT => {
+                output.extend_from_slice(&buffer[..count])
+            }
+            Err(cause) if cause.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            _ => return Err(error("MOD_APPLY_CHANNEL_FAILED", "无法读取 MOD 应用响应")),
+        }
+    }
+    session.set_blocking(true);
+    channel
+        .wait_close()
+        .map_err(|_| error("MOD_APPLY_CHANNEL_FAILED", "MOD 应用通道未正常结束"))?;
+    let envelope: Value = serde_json::from_slice(&output)
+        .map_err(|_| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用响应不是 JSON"))?;
+    if envelope.get("ok") == Some(&Value::Bool(false)) {
+        let code = envelope
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("MOD_APPLY_FAILED");
+        return Err(match code {
+            "MOD_RESTORE_ACCEPTANCE_REQUIRED" => error(
+                "MOD_RESTORE_ACCEPTANCE_REQUIRED",
+                "MOD 发布恢复验收尚未通过",
+            ),
+            "MOD_PROTECTION_BACKUP_REQUIRED" => error(
+                "MOD_PROTECTION_BACKUP_REQUIRED",
+                "缺少可用保护备份，无法应用 MOD",
+            ),
+            "MOD_APPLY_BUSY" => error("MOD_APPLY_BUSY", "专服正在执行其他维护任务"),
+            "REVISION_CONFLICT" => error("REVISION_CONFLICT", "MOD 配置已变化，请刷新后重新预览"),
+            "MOD_ARTIFACT_REQUIRED" | "MOD_ARTIFACT_INVALID" => {
+                error("MOD_ARTIFACT_INVALID", "启用的 MOD 缺少有效固定内容")
+            }
+            _ => error("MOD_APPLY_FAILED", "MOD 应用请求未能完成"),
+        });
+    }
+    envelope
+        .get("data")
+        .cloned()
+        .ok_or_else(|| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用响应缺少数据"))
+}
+
+fn apply_connection(
+    target: &InstanceTarget,
+    request_id: &str,
+    record_version: u64,
+) -> CommandResult<ConnectionRequest> {
+    validate_download_target(target, request_id, record_version)?;
+    Ok(ConnectionRequest {
+        schema_version: 1,
+        request_id: request_id.to_string(),
+        server_id: target.server_id.clone(),
+        expected_record_version: record_version,
+    })
 }
 
 fn schema_for(item: &RemoteItem) -> CommandResult<(ModSchema, Option<String>)> {
@@ -976,6 +1131,20 @@ pub fn prepare(database: &Path, request: PrepareRequest) -> CommandResult<Downlo
     {
         return Err(error("MOD_TASK_INPUT_INVALID", "Workshop 候选版本绑定无效"));
     }
+    if request.candidate_workshop_ids.len() > request.source_handles.len()
+        || request
+            .candidate_workshop_ids
+            .iter()
+            .any(|id| !request.source_handles.contains_key(id))
+        || request
+            .candidate_workshop_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != request.candidate_workshop_ids.len()
+    {
+        return Err(error("MOD_TASK_INPUT_INVALID", "Workshop 候选版本目标无效"));
+    }
     let connection = ConnectionRequest {
         schema_version: 1,
         request_id: request.request_id.clone(),
@@ -991,7 +1160,7 @@ pub fn prepare(database: &Path, request: PrepareRequest) -> CommandResult<Downlo
         }
         let value = invoke_download(
             session,
-            &serde_json::json!({"schemaVersion":1,"action":"start","requestId":request.request_id,"operationId":request.operation_id,"serverId":request.target.server_id,"hostId":request.target.host_id,"instanceId":request.target.instance_id,"expectedRecordVersion":request.expected_record_version,"expectedRevision":request.expected_revision,"workshopIds":request.workshop_ids,"sourceHandles":request.source_handles}),
+            &serde_json::json!({"schemaVersion":1,"action":"start","requestId":request.request_id,"operationId":request.operation_id,"serverId":request.target.server_id,"hostId":request.target.host_id,"instanceId":request.target.instance_id,"expectedRecordVersion":request.expected_record_version,"expectedRevision":request.expected_revision,"workshopIds":request.workshop_ids,"sourceHandles":request.source_handles,"candidateWorkshopIds":request.candidate_workshop_ids}),
         )?;
         let task = value
             .get("task")
@@ -1102,6 +1271,211 @@ pub fn download_tasks(
             })
         },
     )
+}
+
+fn validate_apply_envelope(
+    target: &InstanceTarget,
+    request_id: &str,
+    record_version: u64,
+    expected_revision: u64,
+    schema_version: u32,
+) -> CommandResult<ConnectionRequest> {
+    if schema_version != 1 || expected_revision > crate::server_input::MAX_REVISION {
+        return Err(error("MOD_APPLY_INPUT_INVALID", "MOD 应用请求版本无效"));
+    }
+    let connection = apply_connection(target, request_id, record_version)?;
+    Ok(connection)
+}
+
+fn check_apply_identity(host_id: Option<String>, target: &InstanceTarget) -> CommandResult<()> {
+    if host_id.as_deref() != Some(target.host_id.as_str()) {
+        return Err(error(
+            "HOST_IDENTITY_MISMATCH",
+            "MOD 应用目标主机身份不一致",
+        ));
+    }
+    Ok(())
+}
+
+pub fn preview_apply(
+    database: &Path,
+    request: ApplyRequest,
+) -> CommandResult<ApplyPreviewResponse> {
+    let connection = validate_apply_envelope(
+        &request.target,
+        &request.request_id,
+        request.expected_record_version,
+        request.expected_revision,
+        request.schema_version,
+    )?;
+    with_verified_session(database, &connection, |session, host_id| {
+        check_apply_identity(host_id, &request.target)?;
+        let value = invoke_apply(
+            session,
+            &serde_json::json!({
+                "schemaVersion":1,"action":"preview","requestId":request.request_id,
+                "serverId":request.target.server_id,"hostId":request.target.host_id,
+                "instanceId":request.target.instance_id,"expectedRevision":request.expected_revision
+            }),
+        )?;
+        let mut response: ApplyPreviewResponse = serde_json::from_value(value)
+            .map_err(|_| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用预览响应无效"))?;
+        if response.schema_version != 1
+            || response.request_id != request.request_id
+            || response.target.server_id != request.target.server_id
+            || response.target.host_id != request.target.host_id
+            || response.target.instance_id != request.target.instance_id
+            || response.config_revision != request.expected_revision
+            || response.changes.len() > 200
+            || response.blockers.len() > 32
+            || !["running", "stopped"].contains(&response.runtime_status.as_str())
+            || response.shards.is_empty()
+            || response.shards.len() > 2
+            || response
+                .shards
+                .iter()
+                .any(|shard| !["master", "caves"].contains(&shard.as_str()))
+        {
+            return Err(error(
+                "MOD_APPLY_PROTOCOL_INVALID",
+                "MOD 应用预览身份或状态无效",
+            ));
+        }
+        response.allowed = response.allowed && response.blockers.is_empty();
+        Ok(response)
+    })
+}
+
+pub fn apply_start(
+    database: &Path,
+    request: ApplyStartRequest,
+) -> CommandResult<DownloadTaskResponse> {
+    let connection = validate_apply_envelope(
+        &request.target,
+        &request.request_id,
+        request.expected_record_version,
+        request.expected_revision,
+        request.schema_version,
+    )?;
+    crate::server_input::validate_id(&request.operation_id, "applyInstanceMods", "operationId")?;
+    if !is_sha256(&request.desired_digest) {
+        return Err(error("MOD_APPLY_INPUT_INVALID", "MOD 应用摘要无效"));
+    }
+    with_verified_session(database, &connection, |session, host_id| {
+        check_apply_identity(host_id, &request.target)?;
+        let value = invoke_apply(
+            session,
+            &serde_json::json!({
+                "schemaVersion":1,"action":"start","requestId":request.request_id,
+                "operationId":request.operation_id,"serverId":request.target.server_id,
+                "hostId":request.target.host_id,"instanceId":request.target.instance_id,
+                "expectedRevision":request.expected_revision,"desiredDigest":request.desired_digest
+            }),
+        )?;
+        let task = value
+            .get("task")
+            .cloned()
+            .ok_or_else(|| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用响应缺少任务"))?;
+        if task.get("operationId").and_then(Value::as_str) != Some(request.operation_id.as_str())
+            || task.get("operation").and_then(Value::as_str) != Some("modApply")
+            || task
+                .get("target")
+                .and_then(|value| value.get("instanceId"))
+                .and_then(Value::as_str)
+                != Some(request.target.instance_id.as_str())
+        {
+            return Err(error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用任务身份无效"));
+        }
+        Ok(DownloadTaskResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            task,
+        })
+    })
+}
+
+pub fn apply_status(
+    database: &Path,
+    request: ApplyTaskRequest,
+) -> CommandResult<DownloadTaskResponse> {
+    if request.schema_version != 1 {
+        return Err(error("SCHEMA_UNSUPPORTED", "MOD 应用任务请求版本无效"));
+    }
+    let connection = apply_connection(
+        &request.target,
+        &request.request_id,
+        request.expected_record_version,
+    )?;
+    crate::server_input::validate_id(
+        &request.operation_id,
+        "getInstanceModApplyTask",
+        "operationId",
+    )?;
+    with_verified_session(database, &connection, |session, host_id| {
+        check_apply_identity(host_id, &request.target)?;
+        let value = invoke_apply(
+            session,
+            &serde_json::json!({
+                "schemaVersion":1,"action":"status","requestId":request.request_id,
+                "operationId":request.operation_id,"serverId":request.target.server_id,
+                "hostId":request.target.host_id,"instanceId":request.target.instance_id
+            }),
+        )?;
+        let task = value
+            .get("task")
+            .cloned()
+            .ok_or_else(|| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用任务查询缺少任务"))?;
+        Ok(DownloadTaskResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            task,
+        })
+    })
+}
+
+pub fn apply_tasks(
+    database: &Path,
+    request: ListRequest,
+) -> CommandResult<DownloadTaskListResponse> {
+    validate_request(&request)?;
+    let connection = apply_connection(
+        &request.target,
+        &request.request_id,
+        request.expected_record_version,
+    )?;
+    with_verified_session(database, &connection, |session, host_id| {
+        check_apply_identity(host_id, &request.target)?;
+        let value = invoke_apply(
+            session,
+            &serde_json::json!({
+                "schemaVersion":1,"action":"list","requestId":request.request_id,
+                "serverId":request.target.server_id,"hostId":request.target.host_id,
+                "instanceId":request.target.instance_id
+            }),
+        )?;
+        let items = value
+            .as_array()
+            .cloned()
+            .ok_or_else(|| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用任务列表格式无效"))?;
+        if items.len() > 100
+            || items
+                .iter()
+                .any(|task| task.get("operation").and_then(Value::as_str) != Some("modApply"))
+        {
+            return Err(error(
+                "MOD_APPLY_PROTOCOL_INVALID",
+                "MOD 应用任务列表内容无效",
+            ));
+        }
+        Ok(DownloadTaskListResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            items,
+        })
+    })
 }
 
 #[cfg(test)]

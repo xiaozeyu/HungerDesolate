@@ -20,7 +20,7 @@
 
 随后新增 Workshop 元数据查询、实例期望列表保存和启用/禁用/移除控制：元数据查询由桌面端 HTTPS 请求 Steam，保存使用实例锁、全局 configRevision CAS、operationId 重放和 pending journal 恢复，不修改活动 UGC。跨领域 revision 允许世界领域版本落后于全局版本，并按 world desired/deployed digest 判断一致性。
 
-新增 MOD 内容准备任务：固定 Release 镜像携带 SteamCMD fetch wrapper 和 `steamcmd-workshop-v1` 能力标记；准备任务从本地已验证 Release 中选工具镜像，并单独绑定目标实例活动 DST Release。远端持久任务以隔离 Docker 容器下载，校验内容后把产物改为 root 管理、只读目录树（目录 `0555`、文件 `0444`、manifest `0600`）；MOD 探针逐级验证 owner/mode、拒绝符号链接并以 `O_NOFOLLOW` 读取，固定摘要不存在时不回退其他版本。对照原项目后修正 SteamCMD HOME 缓存发现：wrapper 覆盖 SteamCMD 安装目录与 HOME 下常见 Steam 缓存布局，并支持 modinfo 位于条目子目录；对应脚本模拟测试通过。该 wrapper 已打包在 Release 镜像内，需重新构建 Release 才能用于后续准备任务。MOD 页可监视后台任务并在完成后读取配置 schema。没有能力镜像时明确阻断。Release 构建现将 daemon registry mirrors 显式传给专属 BuildKit builder，并原子合并 daemon.json 设置；仍需真实 Linux 主机验证镜像源可达。SteamCMD 匿名下载和真实 Workshop 样本仍须实机验收。
+新增 MOD 内容准备任务：固定 Release 镜像携带 SteamCMD fetch wrapper 和 `steamcmd-workshop-v1` 能力标记；准备任务从本地已验证 Release 中选工具镜像，并单独绑定目标实例活动 DST Release。远端持久任务以隔离 Docker 容器下载，校验内容后把产物改为 root 管理、只读目录树（目录 `0555`、文件 `0444`、manifest `0600`）；MOD 探针逐级验证 owner/mode、拒绝符号链接并以 `O_NOFOLLOW` 读取，固定摘要不存在时不回退其他版本。对照原项目后修正 SteamCMD HOME 缓存发现：wrapper 覆盖 SteamCMD 安装目录与 HOME 下常见 Steam 缓存布局，并支持 modinfo 位于条目子目录；对应脚本模拟测试通过。该 wrapper 已打包在 Release 镜像内，需重新构建 Release 才能用于后续准备任务。MOD 页可监视后台任务并在完成后读取配置 schema。没有能力镜像时明确阻断。Release 构建现使用 daemon 自带 BuildKit，并从可达镜像源预拉取 `debian:12-slim`；仍需真实 Linux 主机验证镜像源可达。SteamCMD 匿名下载和真实 Workshop 样本仍须实机验收。
 
 随后新增 MOD 配置编辑/保存：按 schema 提供枚举、布尔、数字和字符串控件，复杂字段只读；同名字段按游戏的 name 键合并为共享控件，冲突字段组只读且不阻断其余配置；仅提交变更字段，保留未知旧配置。Rust 保存前重新读取目标实例快照并复求 schema，校验 artifactDigest、modinfoSha256、字段和值，再通过现有 CAS/idempotency 保存 desired。成功固定该 MOD 的 contentDigest 并保持“待应用”，不修改活动 UGC。MOD 页新增只读应用预览，合并当前 MOD、运行概览和备份恢复能力；展示差异、目标分片和保护点。恢复任务在运行中实例成功恢复并重新启动核验后写入主机级验收证据，未有证据时预览明确阻断发布。另新增 Workshop 时间戳只读检查：仅检查启用且已准备的 MOD，时间晚于固定产物准备时间时标记“有更新候选”，不宣称内容版本确定，不触发下载或更改 desired。检查结果暂留在当前页面内存，退出页面后不保留。MOD 内容真实下载已由用户在主机上验收；配置编辑代码与本地校验已通过，预览/更新时间检查待真实主机联调。持久应用 worker、发布验证、分片 UGC 一致性和删除仍待实现。
 
@@ -76,7 +76,7 @@ B3 必须先于安装/恢复等长任务成熟。现有 task reducer 和本地�
 | --- | --- | --- |
 | C1 | 世界配置 | 基础/联机字段、Master/Caves DST 选项、期望配置 CAS 保存与应用影响预览已实现；实际 apply 仍由备份与配置发布任务阻断，待实现保护备份、渲染、发布和运行验证。洞穴拓扑只读，拓扑变更需专门迁移并保留存档 |
 | C2 | 备份与恢复（代码闭环已接入，Linux 实机故障验收未通过） | 冷备份/准热备份、SFTP 断点下载、本机 checksum 与原子发布、已应用世界配置快照、恢复前点击门禁、保护点/提交/回滚、中断对账和普通备份删除已接入。列表会复核既有备份的 checksum、配置快照、Release 产物和镜像并更新恢复能力；仅最新恢复前保护点不可删除。旧备份仅当当前已应用配置 revision 与备份 revision 一致时兼容恢复。已加入 UID/GID 1000 权限修复和本机受保护令牌引用重建；实机日志仍显示 `E_INVALID_TOKEN`，需更新 Klei 令牌后复测。拒绝跨实例恢复；磁盘满、checksum 错误、错误实例、停服/重启失败、强制中断、SSH/桌面重启等 Linux amd64 实机验收完成前，不开放现存存档世界配置应用 |
-| C3 | MOD 管理 | Workshop 元数据、实例启用/配置、受限 Lua 解析、检查更新、staging 下载/应用、分片 UGC 一致性 |
+| C3 | MOD 管理（代码闭环已接入，Linux 实机验收阻断） | Workshop 元数据、实例启用/配置、受限 Lua 解析、检查更新、固定产物准备、禁用/移除 desired、应用预览/持久任务/保护备份/失败回滚已接入；真实 UGC 布局与启动加载仍需 Linux amd64 验收 |
 | C4 | DST/MOD 更新 | 固定目标版本、保护备份、发布切换、实际版本验证与完整恢复点回滚 |
 | C5 | 日志与诊断 | 有界分片日志/游标、脱敏、健康摘要、失败任务证据与恢复入口 |
 | C6 | 保护删除专服 | 有效备份、停止并清理受管运行资源、retired 保留，确认残留消失后才释放端口 |

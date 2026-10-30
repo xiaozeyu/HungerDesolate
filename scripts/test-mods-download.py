@@ -84,6 +84,7 @@ class ModsDownloadTests(unittest.TestCase):
 
     def test_worker_publishes_only_verified_prepared_content(self):
         self.request["sourceHandles"] = {"123456": "777777"}
+        self.request["candidateWorkshopIds"] = ["123456"]
         self.write_json(self.task / "request.json", self.request)
         def run(command, **_kwargs):
             if command[1:3] == ["image", "inspect"]:
@@ -115,9 +116,39 @@ class ModsDownloadTests(unittest.TestCase):
         self.assertEqual(manifest["fetcherImage"], "example/fetch@" + FETCH_DIGEST)
         self.assertEqual(manifest["sourceHandle"], "777777")
         self.assertEqual(result["result"]["preparedMods"][0]["sourceHandle"], "777777")
+        self.assertEqual(result["result"]["expectedRevision"], 1)
+        self.assertIsNone(result["result"]["preparedMods"][0]["previousArtifactDigest"])
         candidate = json.loads((self.instance / "mods" / "candidates" / "123456.json").read_text())
         self.assertEqual(candidate["contentDigest"], prepared["contentDigest"])
         self.assertEqual(candidate["sourceHandle"], "777777")
+
+    def test_regular_prepare_records_source_handle_without_creating_candidate_pointer(self):
+        self.request["sourceHandles"] = {"123456": "777777"}
+        prior_digest = "f" * 64
+        desired = json.loads((self.instance / "desired" / "mods.json").read_text())
+        desired["mods"][0]["artifactDigest"] = prior_digest
+        self.write_json(self.instance / "desired" / "mods.json", desired)
+        self.write_json(self.task / "request.json", self.request)
+        def run(command, **_kwargs):
+            if command[1:3] == ["image", "inspect"]:
+                image_digest = command[command.index("inspect") + 3]
+                return subprocess.CompletedProcess(command, 0, image_digest + "\n", "")
+            if "--network" in command and "none" in command:
+                return subprocess.CompletedProcess(command, 1 if "example/dst@" in command else 0, "", "")
+            mount = next(value for value in command if value.startswith("type=bind,src="))
+            source = Path(mount.split("src=", 1)[1].split(",dst=", 1)[0])
+            content = source / "output" / "123456"
+            content.mkdir(parents=True)
+            (content / "modinfo.lua").write_text("version = '1.0'\n")
+            (content / "modinfo.lua").chmod(0o600)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        with patch.object(MODULE.subprocess, "run", side_effect=run):
+            result = MODULE.worker(TASK)
+        self.assertEqual(result["status"], "succeeded")
+        artifact = self.instance / "mods" / "prepared" / "123456" / result["result"]["preparedMods"][0]["contentDigest"]
+        self.assertEqual(json.loads((artifact / "manifest.json").read_text())["sourceHandle"], "777777")
+        self.assertEqual(result["result"]["preparedMods"][0]["previousArtifactDigest"], prior_digest)
+        self.assertFalse((self.instance / "mods" / "candidates" / "123456.json").exists())
         self.assertEqual((artifact / "content").stat().st_mode & 0o777, 0o555)
         self.assertEqual((artifact / "content" / "modinfo.lua").stat().st_mode & 0o777, 0o444)
         self.assertEqual((artifact / "manifest.json").stat().st_mode & 0o777, 0o600)

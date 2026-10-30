@@ -3,6 +3,13 @@
 
 FROM debian:12-slim AS builder
 
+# 使用国内镜像源加速；兼容 deb822 与旧 sources.list 基础镜像
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g; s/security.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g; s/security.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
+    fi
+
 # 安装 SteamCMD 依赖
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
@@ -11,6 +18,7 @@ RUN dpkg --add-architecture i386 && \
         lib32gcc-s1 \
         lib32stdc++6 \
         curl \
+        libcurl4-gnutls-dev:i386 \
         && rm -rf /var/lib/apt/lists/*
 
 # 创建 Steam 用户
@@ -27,11 +35,20 @@ COPY --chown=steam:steam install-dst.sh /home/steam/install-dst.sh
 
 # 下载 DST Dedicated Server (App ID: 343050)
 USER steam
+ARG STEAMCMD_BOOTSTRAP_DEADLINE=3600s
+ARG STEAMCMD_DOWNLOAD_DEADLINE=1800s
 RUN bash ./install-dst.sh bootstrap
 RUN bash ./install-dst.sh download
 
 # Runtime stage
 FROM debian:12-slim
+
+# 使用国内镜像源加速；兼容 deb822 与旧 sources.list 基础镜像
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g; s/security.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g; s/security.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
+    fi
 
 # 安装运行时依赖
 RUN dpkg --add-architecture i386 && \
@@ -42,6 +59,7 @@ RUN dpkg --add-architecture i386 && \
         lib32stdc++6 \
         libcurl3-gnutls \
         libcurl4:i386 \
+        libcurl4-gnutls-dev:i386 \
         && rm -rf /var/lib/apt/lists/*
 
 # 创建非 root 用户

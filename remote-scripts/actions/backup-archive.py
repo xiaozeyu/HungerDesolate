@@ -61,7 +61,7 @@ def checked_files(source_root, include_paths=None):
     def add_file(path, relative):
         nonlocal total
         name = path.name
-        if name in EXCLUDED_NAMES:
+        if name in EXCLUDED_NAMES and ("/" not in relative or relative.startswith("config/Cluster_1/")):
             return
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:

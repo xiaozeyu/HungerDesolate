@@ -2,9 +2,12 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Download, Plus, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
+import FloatingTask from "../components/FloatingTask.vue";
 import AppDialog from "../components/AppDialog.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
+import TaskPanel from "../components/TaskPanel.vue";
 import { listHostMods } from "../api/hostMods";
 import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
@@ -19,11 +22,22 @@ const workspace = useWorkspace();
 const { server, target, instanceName } = usePageTarget();
 const overview = useInstanceOverview({ poll: false });
 const taskStore = useTasks();
-const mode = ref<BackupCaptureMode>("cold");
+const mode = ref<BackupCaptureMode | null>(null);
+const createOpen = ref(false);
+const previews = ref<Record<BackupCaptureMode, BackupPreviewResponse | null>>({ cold: null, quasiHot: null });
 const items = ref<BackupSummary[]>([]);
 const verifiedCount = computed(() => items.value.filter(item => item.verification === "verified").length);
 const totalSize = computed(() => items.value.reduce((total, item) => total + item.sizeBytes, 0));
-const preview = ref<BackupPreviewResponse | null>(null);
+const activeTaskTone = computed<"running"|"success"|"danger"|"warning"|"muted">(() => {
+  const status = activeTask.value?.status;
+  return status === "succeeded" ? "success" : status === "failed" ? "danger" : status === "interrupted" ? "warning" : status === "cancelled" ? "muted" : "running";
+});
+const backupSummary = computed(() => [
+  { label: "备份", value: items.value.length },
+  { label: "已校验", value: verifiedCount.value, tone: "success" as const },
+  { label: "占用空间", value: formatBytes(totalSize.value) },
+]);
+const preview = computed(() => mode.value ? previews.value[mode.value] : null);
 const loading = ref(false);
 const previewLoading = ref(false);
 const error = ref("");
@@ -86,7 +100,7 @@ async function refresh() {
   try {
     if (workspace.preview.value) {
       items.value = [];
-      preview.value = null;
+      previews.value = { cold: null, quasiHot: null };
       return;
     }
     const tasksRequestId = crypto.randomUUID();
@@ -108,7 +122,7 @@ async function refresh() {
       || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
       || response.target.instanceId !== instanceTarget.instanceId) throw new Error("备份列表身份或版本不匹配");
     items.value = response.items;
-    preview.value = null;
+    previews.value = { cold: null, quasiHot: null };
     const restoreTasks = await queueSsh(() => listInstanceRestoreTasks({schemaVersion:1,requestId:crypto.randomUUID(),target:instanceTarget,expectedRecordVersion:connection.recordVersion}));
     if (!isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) return;
     const latest = [...tasks, ...restoreTasks].find(task => taskBelongsHere(task.task, targetKey));
@@ -126,7 +140,7 @@ async function refresh() {
   }
 }
 
-async function inspectMode() {
+async function inspectMode(captureMode: BackupCaptureMode) {
   const connection = server.value;
   const instanceTarget = target.value;
   const expectedRevision = revision.value;
@@ -140,14 +154,14 @@ async function inspectMode() {
   error.value = "";
   try {
     const response = await queueSsh(() => previewInstanceBackup({ schemaVersion: 1, requestId, target: instanceTarget,
-      expectedRecordVersion: connection.recordVersion, expectedRevision, captureMode: mode.value }));
+      expectedRecordVersion: connection.recordVersion, expectedRevision, captureMode }));
     if (!isCurrent("preview", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) return;
     if (response.schemaVersion !== 1 || response.requestId !== requestId || response.configRevision !== expectedRevision
-      || response.captureMode !== mode.value || response.target.serverId !== instanceTarget.serverId
+      || response.captureMode !== captureMode || response.target.serverId !== instanceTarget.serverId
       || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId) {
       throw new Error("备份预览身份或版本不匹配");
     }
-    preview.value = response;
+    previews.value = { ...previews.value, [captureMode]: response };
   } catch (cause) {
     if (isCurrent("preview", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) error.value = describeError(cause).message;
   } finally {
@@ -157,7 +171,9 @@ async function inspectMode() {
 
 async function refreshPage() {
   await refresh();
-  await inspectMode();
+  if (revision.value === null || workspace.preview.value) return;
+  await inspectMode("cold");
+  await inspectMode("quasiHot");
 }
 
 function taskBelongsHere(task: TaskSnapshot, key: string) {
@@ -314,23 +330,46 @@ async function cancelActiveTask() {
   }
 }
 
+function openCreateDialog() {
+  if (workspace.preview.value || createBusy.value) return;
+  createOpen.value = true;
+  if (pendingCreate) {
+    mode.value = pendingCreate.captureMode;
+    return;
+  }
+  mode.value = null;
+}
+
+function chooseMode(captureMode: BackupCaptureMode) {
+  mode.value = captureMode;
+  void inspectMode(captureMode);
+}
+
+function modeStatus(captureMode: BackupCaptureMode) {
+  if (previewLoading.value && mode.value === captureMode) return { label: "校验中", tone: "muted" as const };
+  const current = previews.value[captureMode];
+  if (!current) return { label: "待校验", tone: "muted" as const };
+  return current.allowed ? { label: "可备份", tone: "success" as const } : { label: "不可备份", tone: "danger" as const };
+}
+
 async function createBackup() {
   const connection = server.value;
   const instanceTarget = target.value;
   const currentPreview = preview.value;
   const expectedRevision = pendingCreate?.revision ?? revision.value;
-  if (!connection || !instanceTarget || expectedRevision === null || createBusy.value || workspace.preview.value) return;
+  const requestedMode = pendingCreate?.captureMode ?? mode.value;
+  if (!connection || !instanceTarget || expectedRevision === null || !requestedMode || createBusy.value || workspace.preview.value) return;
   if (!pendingCreate && (!currentPreview || !currentPreview.allowed
-    || currentPreview.configRevision !== expectedRevision || currentPreview.captureMode !== mode.value)) return;
+    || currentPreview.configRevision !== expectedRevision || currentPreview.captureMode !== requestedMode)) return;
   const operationId = pendingOperationId || crypto.randomUUID();
   pendingOperationId = operationId;
   pendingCreate ??= { requestId: crypto.randomUUID(), backupId: crypto.randomUUID(),
-    captureMode: mode.value, revision: expectedRevision };
+    captureMode: requestedMode, revision: expectedRevision };
   const { requestId, backupId, captureMode, revision: requestRevision } = pendingCreate;
   const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
   createBusy.value = true;
   error.value = "";
-  preview.value = null;
+  previews.value = { ...previews.value, [requestedMode]: null };
   try {
     const result = await queueSsh(() => createInstanceBackup({ schemaVersion: 1, requestId, target: instanceTarget,
       expectedRecordVersion: connection.recordVersion, expectedRevision: requestRevision, captureMode,
@@ -344,7 +383,8 @@ async function createBackup() {
       || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey) return;
     pendingCreate = null;
     pendingOperationId = "";
-    preview.value = null;
+    createOpen.value = false;
+    previews.value = { ...previews.value, [captureMode]: null };
   } catch (cause) {
     if (target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) {
       error.value = describeError(cause).message;
@@ -479,7 +519,9 @@ watch([targetKey, () => server.value?.recordVersion, revision, () => workspace.p
   currentPreviewRequest = "";
   items.value = [];
   downloadTasks.value = [];
-  preview.value = null;
+  previews.value = { cold: null, quasiHot: null };
+  mode.value = null;
+  createOpen.value = false;
   restoreTarget.value = null;
   deleteTarget.value = null;
   restoreError.value = "";
@@ -494,7 +536,10 @@ watch([targetKey, () => server.value?.recordVersion, revision, () => workspace.p
     void refreshPage();
   }
 }, { immediate: true });
-watch(mode, () => { preview.value = null; void inspectMode(); });
+function closeCreateDialog(open: boolean) {
+  createOpen.value = open;
+  if (!open && !createBusy.value && !pendingCreate) mode.value = null;
+}
 onBeforeUnmount(() => {
   epoch++;
   listSequence++;
@@ -508,6 +553,10 @@ onBeforeUnmount(() => {
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="备份">
       <template #actions>
+        <button class="button primary" :disabled="createBusy || loading || revision === null || workspace.preview.value" @click="openCreateDialog">
+          <Plus :size="16"/>
+          {{ createBusy ? "备份中…" : pendingCreate ? "重试原请求" : "创建备份" }}
+        </button>
         <button class="button" :disabled="loading || previewLoading || revision === null || workspace.preview.value" @click="refreshPage">
           <RefreshCw :size="16"/>
           {{ loading || previewLoading ? "读取中…" : "刷新" }}
@@ -515,45 +564,8 @@ onBeforeUnmount(() => {
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <section v-if="items.length" class="summary-line">
-      <div><span class="metric-number">{{items.length}}</span><span>份备份</span></div>
-      <span class="summary-divider"/>
-      <div><span class="metric-number">{{verifiedCount}}</span><span>份已校验</span></div>
-      <span class="summary-divider"/>
-      <div><span>{{formatBytes(totalSize)}}</span><span>归档总量</span></div>
-      <StatusLabel v-if="activeTask" tone="warning" :label="activeTaskStatusLabel(activeTask)"/>
-    </section>
+    <SummaryBar v-if="items.length" :items="backupSummary" label="备份摘要"/>
     <div v-if="error" class="error-strip" role="alert">{{ error }}</div>
-    <section class="backup-controls" aria-label="备份预览">
-      <div class="segmented" role="group" aria-label="备份模式">
-        <button :aria-pressed="mode === 'cold'" :disabled="workspace.preview.value || !!pendingCreate" @click="mode = 'cold'">冷备份</button>
-        <button :aria-pressed="mode === 'quasiHot'" :disabled="workspace.preview.value || !!pendingCreate" @click="mode = 'quasiHot'">准热备份</button>
-      </div>
-      <button class="button primary" :disabled="(!pendingCreate && (!preview?.allowed || preview.captureMode !== mode)) || createBusy || workspace.preview.value" @click="createBackup">
-        <Plus :size="16"/>
-        {{ createBusy ? "备份中…" : pendingCreate ? "重试原请求" : "创建备份" }}
-      </button>
-    </section>
-    <section v-if="activeTask" class="backup-task" aria-live="polite">
-      <StatusLabel :tone="activeTask.status === 'succeeded' ? 'success' : activeTask.status === 'failed' ? 'danger' : 'muted'" :label="activeTaskStatusLabel(activeTask)"/>
-      <span>{{ activeTaskStageLabel(activeTask) }}</span>
-      <span v-if="activeTask.result?.backupId" class="mono">{{ activeTask.result.backupId }}</span>
-      <p v-if="activeTask.error" class="backup-warning">{{ taskErrorLabel(activeTask.error.code, activeTask.stage, activeTask.operation, activeTask.error.details) }}</p>
-      <p v-if="activeTask.result?.modsWarnings?.length" class="backup-warning">{{ activeTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}。缺少 MOD 时世界可能崩溃。</p>
-      <p v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</p>
-      <button v-if="['backupCreate','backupRestore'].includes(activeTask.operation) && activeTask.cancelAllowed && ['queued','running'].includes(activeTask.status)" class="button subtle" type="button" :disabled="cancelBusy" @click="cancelActiveTask">{{ cancelBusy ? "提交中…" : activeTask.operation === 'backupRestore' ? "取消恢复" : "取消备份" }}</button>
-    </section>
-    <section v-if="preview" class="backup-preview" aria-live="polite">
-      <div class="backup-preview-heading">
-        <strong>{{ modeLabel(preview.captureMode) }}</strong>
-        <StatusLabel :tone="preview.allowed ? 'success' : 'danger'" :label="preview.allowed ? '条件通过' : '暂不可执行'"/>
-      </div>
-      <dl class="backup-facts">
-        <div><dt>当前运行状态</dt><dd>{{ preview.runtimeStatus === "unknown" ? "未知" : preview.runtimeStatus === "running" ? "运行中" : preview.runtimeStatus === "stopped" ? "已停止" : "异常" }}</dd></div>
-        <div><dt>世界文件</dt><dd>{{ preview.fileCount }} 个，约 {{ formatBytes(preview.estimatedArchiveBytes) }}</dd></div>
-        <div><dt>可用空间</dt><dd>{{ formatBytes(preview.availableBytes) }}</dd></div>
-      </dl>
-    </section>
     <div v-if="loading" class="empty-state" role="status"><h2>正在读取备份</h2></div>
     <div v-else-if="!items.length" class="empty-state"><h2>暂无备份</h2></div>
     <div v-else class="table-wrap">
@@ -587,7 +599,37 @@ onBeforeUnmount(() => {
         <button v-if="task.status === 'interrupted'" class="button" :disabled="workspace.preview.value" @click="retryDownload(task)">继续下载</button>
       </div>
     </section>
-    <AppDialog :open="!!restoreTarget" title="恢复备份" description="确认后会先检查归属、校验和、版本产物及空间；检查通过后开始恢复。" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; restoreModWarnings = []; } }">
+<FloatingTask v-if="activeTask" label="备份任务">
+    <TaskPanel v-if="activeTask" :title="activeTask.operation === 'backupRestore' ? '恢复备份' : '创建备份'"
+      :status-label="activeTaskStatusLabel(activeTask)" :stage-label="activeTaskStageLabel(activeTask)" :tone="activeTaskTone"
+      :queue-position="activeTask.queuePosition" :error="activeTask.error"
+      :cancellable="['backupCreate','backupRestore'].includes(activeTask.operation) && !!activeTask.cancelAllowed && ['queued','running'].includes(activeTask.status)"
+      :cancel-label="activeTask.operation === 'backupRestore' ? '取消恢复' : '取消备份'" :busy="cancelBusy" @cancel="cancelActiveTask">
+      <span v-if="activeTask.result?.backupId" class="mono muted-text">{{ activeTask.result.backupId }}</span>
+      <span v-if="activeTask.error" class="backup-warning">{{ taskErrorLabel(activeTask.error.code, activeTask.stage, activeTask.operation, activeTask.error.details) }}</span>
+      <span v-if="activeTask.result?.modsWarnings?.length" class="backup-warning">{{ activeTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}。缺少 MOD 时世界可能崩溃。</span>
+      <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
+    </TaskPanel>
+</FloatingTask>
+<AppDialog :open="createOpen" title="创建备份" description="选择备份模式，选定后校验当前是否具备备份条件。" @update:open="closeCreateDialog">
+      <div class="backup-mode-options">
+        <button v-for="option in [{ value: 'cold', label: '冷备份' }, { value: 'quasiHot', label: '准热备份' }]" :key="option.value"
+          type="button" class="backup-mode-option" :class="{ selected: mode === option.value }" :aria-pressed="mode === option.value"
+          :disabled="createBusy || workspace.preview.value" @click="chooseMode(option.value as BackupCaptureMode)">
+          <strong>{{ option.label }}</strong>
+          <StatusLabel :tone="modeStatus(option.value as BackupCaptureMode).tone" :label="modeStatus(option.value as BackupCaptureMode).label"/>
+        </button>
+      </div>
+      <p v-if="mode && previewLoading" class="muted-text">正在校验{{ modeLabel(mode) }}条件…</p>
+      <p v-else-if="mode && preview && !preview.allowed" class="environment-error">当前条件不满足{{ modeLabel(mode) }}。</p>
+      <template #footer>
+        <button class="button" type="button" :disabled="createBusy" @click="closeCreateDialog(false)">取消</button>
+        <button class="button primary" type="button" :disabled="createBusy || previewLoading || !mode || !preview?.allowed || workspace.preview.value" @click="createBackup">
+          {{ createBusy ? "提交中…" : "创建备份" }}
+        </button>
+      </template>
+    </AppDialog>
+<AppDialog :open="!!restoreTarget" title="恢复备份" description="确认后会先检查归属、校验和、版本产物及空间；检查通过后开始恢复。" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; restoreModWarnings = []; } }">
       <p v-if="restoreTarget">将恢复 <span class="mono">{{ restoreTarget.backupId }}</span>（{{ formatDate(restoreTarget.createdAt) }}）。</p>
       <p class="muted-text">MOD 使用主机库当前最新版本；主机库缺少 MOD 时会提示，但不会阻止恢复。</p>
       <p v-if="restoreModWarnings.length" class="backup-warning">{{ restoreModWarnings.join("；") }}。缺少 MOD 时继续恢复可能导致世界崩溃。</p>
@@ -608,21 +650,12 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.backup-controls { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) 0; border-bottom: 1px solid var(--border); }
-.segmented { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-control); overflow: hidden; }
-.segmented button { min-height: 36px; padding: 0 var(--space-4); border: 0; background: var(--surface); color: var(--text-secondary); cursor: pointer; }
-.segmented button + button { border-left: 1px solid var(--border); }
-.segmented button[aria-pressed="true"] { background: var(--surface-muted); color: var(--text); font-weight: 600; }
-.segmented button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.backup-preview { max-width: 720px; padding: var(--space-4) 0; border-bottom: 1px solid var(--border); }
-.backup-preview-heading { display: flex; align-items: center; gap: var(--space-3); }
-.backup-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin: var(--space-4) 0 0; }
-.backup-facts div { min-width: 0; }
-.backup-facts dt { color: var(--text-secondary); font-size: 12px; }
-.backup-facts dd { margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
+.backup-mode-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.backup-mode-option { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 56px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 2px; background: transparent; text-align: left; }
+.backup-mode-option:hover { background: var(--surface-hover); }
+.backup-mode-option.selected { border-color: var(--text); background: var(--surface-muted); }
 .backup-warning { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: 13px; }
 .backup-restore-option { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-4) 0 var(--space-2); font-size: 13px; }
 .backup-restore-option input { width: 16px; height: 16px; accent-color: var(--text); }
 .download-task { display:flex; align-items:center; gap:var(--space-3); min-height:44px; border-bottom:1px solid var(--border); }
-@media (max-width: 680px) { .backup-facts { grid-template-columns: 1fr; } }
 </style>

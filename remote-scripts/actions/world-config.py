@@ -396,6 +396,28 @@ def get_config(request):
         os.close(lock_fd)
 
 
+def reveal_secrets(request):
+    host_id, instance_id, manifest = verify_identity(request)
+    lock_fd = lock_instance(instance_id)
+    try:
+        finish_pending_transaction(instance_id)
+        manifest = read_json(ROOT / "instances" / instance_id / "manifest.json", 65536)
+        if manifest.get("hostId") != host_id or manifest.get("instanceId") != instance_id:
+            reject("INSTANCE_IDENTITY_MISMATCH")
+        desired, token_present, password_present = load_desired(instance_id, manifest, option_index())
+        _, _, secrets_dir, _ = transaction_paths(instance_id)
+        token_ref = desired["secrets"].get("tokenRef")
+        password_ref = desired["secrets"].get("serverPasswordRef")
+        token = secret_value(secrets_dir, token_ref, "token").decode("utf-8") if token_present else None
+        password = secret_value(secrets_dir, password_ref, "password").decode("utf-8") if password_present else None
+        return {"schemaVersion": 1, "requestId": request["requestId"],
+                "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
+                "token": token, "serverPassword": password}
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def save_config(request):
     host_id, instance_id, manifest = verify_identity(request)
     expected_revision = request.get("expectedRevision")
@@ -860,6 +882,8 @@ def main(request):
             data = preview_apply(request)
         elif action == "apply":
             data = apply_config(request)
+        elif action == "reveal":
+            data = reveal_secrets(request)
         else:
             reject("WORLD_CONFIG_ACTION_INVALID")
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)

@@ -44,8 +44,20 @@ export interface ApplyWorldConfigResponse {
 
 export type SaveWorldConfigResponse = MutationResult<WorldConfig>;
 
+export interface RevealWorldSecretsResponse {
+  schemaVersion: 1;
+  requestId: string;
+  target: InstanceTarget;
+  token: string | null;
+  serverPassword: string | null;
+}
+
 export function getWorldConfig(request: GetWorldConfigRequest): Promise<QueryResponse<WorldConfig, InstanceTarget>> {
   return call("get_world_config", request);
+}
+
+export function revealWorldSecrets(request: GetWorldConfigRequest): Promise<RevealWorldSecretsResponse> {
+  return call("reveal_world_config_secrets", request);
 }
 
 export function saveWorldConfig(request: SaveWorldConfigRequest): Promise<SaveWorldConfigResponse> {

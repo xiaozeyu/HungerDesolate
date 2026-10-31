@@ -10,9 +10,16 @@ test('MOD apply takes an explicit backup choice instead of always creating one',
   const remote = await readFile(resolve(process.cwd(), 'remote-scripts/actions/mods-apply.py'), 'utf8');
   assert.match(page, /const createProtectionBackup = ref\(false\)/);
   assert.match(page, /应用前创建冷备份/);
+  assert.match(page, /@click="openApplyPreview"/);
+  assert.doesNotMatch(page, /openApplyPreview\(true\)/);
   assert.match(page, /createProtectionBackup: createProtectionBackup\.value/);
-  assert.match(page, /不创建时，应用失败无法自动恢复原部署/);
+  assert.doesNotMatch(page, /不创建时，应用失败无法自动恢复原部署/);
   assert.doesNotMatch(page, /listModApplyProtectionBackups|protectionBackup|MOD_PROTECTION_BACKUP_REQUIRED/);
+  assert.doesNotMatch(page, /class="mod-apply-options"/);
+  const previewStart = page.indexOf('<AppDialog v-model:open="applyPreviewOpen"');
+  const previewEnd = page.indexOf('</AppDialog>', previewStart);
+  assert.ok(previewStart >= 0 && previewEnd > previewStart);
+  assert.match(page.slice(previewStart, previewEnd), /v-model="createProtectionBackup"/);
   assert.doesNotMatch(api, /listModApplyProtectionBackups/);
   assert.match(api, /createProtectionBackup: boolean/);
   assert.match(remote, /if request\["createProtectionBackup"\]:/);

@@ -82,6 +82,19 @@ def read_manifest(path):
     return manifest
 
 
+def modinfo_fields(content):
+    try:
+        text = (content / "modinfo.lua").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values = {}
+    for name in ("name", "author", "version"):
+        match = re.search(r"(?mi)^\s*" + name + r"\s*=\s*\"([^\"]*)\"", text)
+        if match:
+            values[name] = match.group(1).strip()[:200]
+    return values
+
+
 def artifact_key(path):
     return path.parent.name, path.name
 
@@ -160,6 +173,7 @@ def list_items(request):
                 manifest = read_manifest(artifact)
                 if str(manifest.get("workshopId")) != workshop.name or str(manifest.get("contentDigest")) != artifact.name:
                     reject("HOST_MOD_ARTIFACT_INVALID")
+                info = modinfo_fields(artifact / "content")
                 items.append({
                     "workshopId": workshop.name,
                     "contentDigest": artifact.name,
@@ -168,6 +182,10 @@ def list_items(request):
                     "sizeBytes": manifest.get("sizeBytes"),
                     "fileCount": manifest.get("fileCount"),
                     "usedBy": usage(workshop.name, artifact.name),
+                    "name": manifest.get("name") or info.get("name"),
+                    "author": manifest.get("author") or info.get("author"),
+                    "previewUrl": manifest.get("previewUrl"),
+                    "version": manifest.get("version") or info.get("version"),
                 })
     return {"schemaVersion": 1, "items": items, "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
             "requestId": request["requestId"], "recordVersion": request["expectedRecordVersion"]}

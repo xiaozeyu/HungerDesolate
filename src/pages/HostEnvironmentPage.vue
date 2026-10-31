@@ -3,8 +3,10 @@ import { computed, nextTick, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { RefreshCw, CheckCircle2, AlertTriangle, CircleX, ChevronDown } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
+import FloatingTask from "../components/FloatingTask.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useHostEnvironment } from "../composables/useHostEnvironment";
@@ -16,6 +18,13 @@ const {data,loading,error,stale,refresh,plan,planOpen,initializing,outcomeUnknow
 const blockers = computed(() => data.value?.checks.filter(check => check.level === "blocker").length ?? 0);
 const engineLabels = {notInstalled:"未安装",permissionDenied:"权限不足",unavailable:"不可访问",available:"可访问"};
 const checks = computed(() => [...(data.value?.checks ?? [])].sort((a,b)=>({blocker:0,warning:1,passed:2}[a.level]-{blocker:0,warning:1,passed:2}[b.level])));
+const environmentSummary = computed(() => [
+  { label: "检查", value: blockers.value ? `${blockers.value} 项阻断` : "通过", tone: blockers.value ? "danger" as const : "success" as const },
+  { label: "检查项", value: data.value?.checks.length ?? 0 },
+  { label: "系统", value: data.value?.os ?? data.value?.kernel ?? "未知" },
+  { label: "架构", value: data.value?.architecture ?? "未知" },
+  { label: "Docker", value: engineLabels[data.value?.docker.engineState ?? "unavailable"] ?? "未知" },
+]);
 const refreshButton = ref<HTMLButtonElement | null>(null);
 const dockerPlanInvalid = computed(() => ["PLAN_STALE","PLAN_EXPIRED","INSTALL_HOST_CHANGED","INSTALL_SNAPSHOT_CHANGED","INSTALL_PREFLIGHT_BLOCKED"].includes(dockerTaskError.value?.code ?? ""));
 async function confirm() {
@@ -38,21 +47,15 @@ async function retryDockerInstall() {
     <div v-if="dockerTaskError" class="environment-error" role="alert">{{dockerTaskError.message}}</div>
     <div v-if="loading && !data" class="empty-state" role="status">检查中…</div>
     <template v-else-if="data">
-      <section class="summary-line" aria-live="polite">
-        <div><span class="metric-number">{{blockers}}</span><span>项阻断</span></div>
-        <span class="summary-divider"/>
-        <div><span class="metric-number">{{data.checks.length}}</span><span>项检查</span></div>
-        <span class="summary-divider"/>
-        <div><span>{{data.os ?? data.kernel ?? '未知系统'}}</span><span class="mono">{{data.architecture ?? '未知架构'}}</span></div>
-        <StatusLabel :tone="stale ? 'warning' : blockers ? 'danger' : 'success'" :label="stale ? '结果已过期' : blockers ? `${blockers} 项阻断` : '检查通过'"/>
-        <span class="muted-text">{{new Date(data.checkedAtUnixSeconds*1000).toLocaleString()}}</span>
-      </section>
-      <div v-if="dockerTask && ['queued','running'].includes(dockerTask.status)" class="environment-summary" role="status"><StatusLabel tone="warning" :label="dockerInstallStatusLabel(dockerTask.status)"/><span>{{dockerInstallPhaseLabel(dockerTask.phase)}}</span><span class="muted-text">{{dockerTaskLoading ? '同步中…' : ''}}</span></div>
+      <SummaryBar :items="environmentSummary" label="主机环境摘要"/>
       <div class="overview-grid">
         <section class="section-block"><div class="section-heading"><div><h2>系统与资源</h2><p class="muted-text">主机身份、内存与磁盘</p></div></div><dl class="environment-facts"><div><dt>系统</dt><dd>{{data.os ?? data.kernel ?? '未知'}}</dd></div><div><dt>架构</dt><dd class="mono">{{data.architecture ?? '未知'}}</dd></div><div><dt>用户 UID</dt><dd class="mono">{{data.uid ?? '未知'}}</dd></div><div><dt>可用 / 总内存</dt><dd>{{formatBytes(data.memory?.availableBytes)}} / {{formatBytes(data.memory?.totalBytes)}}</dd></div><div><dt>可用 / 总磁盘</dt><dd>{{formatBytes(data.disk?.availableBytes)}} / {{formatBytes(data.disk?.totalBytes)}}</dd></div><div><dt>磁盘检查路径</dt><dd class="mono">{{data.disk?.path ?? '未知'}}</dd></div><div><dt>主机身份</dt><dd class="mono">{{data.hostId ?? '未初始化'}}</dd></div></dl></section>
         <section class="section-block"><div class="section-heading"><div><h2>Docker</h2><p class="muted-text">引擎、Compose 与数据目录</p></div></div><dl class="environment-facts"><div><dt>客户端</dt><dd>{{data.docker.clientVersion ?? '未知'}}</dd></div><div><dt>引擎</dt><dd>{{engineLabels[data.docker.engineState]}}</dd></div><div><dt>服务端版本</dt><dd class="mono">{{data.docker.serverVersion ?? '未知'}}</dd></div><div><dt>Compose</dt><dd class="mono">{{data.docker.composeVersion ?? '未知'}}</dd></div><div><dt>数据目录</dt><dd class="mono">{{data.docker.dataRoot ?? '未知'}}</dd></div><div><dt>可用 / 总磁盘</dt><dd>{{formatBytes(data.docker.disk?.availableBytes)}} / {{formatBytes(data.docker.disk?.totalBytes)}}</dd></div></dl></section>
       </div>
       <section class="section-block"><div class="section-heading"><div><h2>检查结果</h2><p class="muted-text">阻断、警告与恢复建议</p></div></div><div class="environment-checks"><details v-for="check in checks" :key="`${check.code}:${check.label}`" class="environment-check"><summary><CheckCircle2 v-if="check.level === 'passed'" class="icon-success" :size="17"/><CircleX v-else-if="check.level === 'blocker'" class="icon-danger" :size="17"/><AlertTriangle v-else class="icon-warning" :size="17"/><span>{{check.label}}</span><span class="environment-check-result">{{check.message}}</span><ChevronDown v-if="check.recoverySteps.length" class="environment-check-chevron" :size="15"/></summary><ul v-if="check.recoverySteps.length"><li v-for="step in check.recoverySteps" :key="step">{{step}}</li></ul></details></div></section>
+<FloatingTask v-if="dockerTask && ['queued','running'].includes(dockerTask.status)" label="Docker 安装">
+      <div v-if="dockerTask && ['queued','running'].includes(dockerTask.status)" class="environment-summary" role="status"><StatusLabel tone="warning" :label="dockerInstallStatusLabel(dockerTask.status)"/><span>{{dockerInstallPhaseLabel(dockerTask.phase)}}</span><span class="muted-text">{{dockerTaskLoading ? '同步中…' : ''}}</span></div>
+</FloatingTask>
     </template>
     <div v-else-if="!error" class="empty-state"><h2>尚未检查</h2></div>
     <AppDialog v-model:open="planOpen" title="初始化管理目录">

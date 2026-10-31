@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 
 ROOT = Path("/var/lib/famine-hub")
 STAGING = ROOT / "staging"
@@ -69,6 +70,10 @@ def safe_dir(path, create=False, private=False):
         reject("CREATE_RELEASE_PATH_UNSAFE")
     if private and info.st_mode & 0o077:
         os.chmod(path, 0o700, follow_symlinks=False)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def release_entry(metadata, release_id):
@@ -221,9 +226,11 @@ def register(release_id):
         existing = next((item for item in catalog["releases"]
                          if isinstance(item, dict) and item.get("releaseId") == release_id), None)
         if existing is not None:
+            entry["createdAt"] = existing.get("createdAt", now_iso())
             comparable = dict(existing)
             comparable["verified"] = entry["verified"]
             comparable["runtimeVerified"] = False
+            comparable["createdAt"] = entry["createdAt"]
             if comparable != entry:
                 reject("CREATE_RELEASE_ID_CONFLICT")
             updated = dict(existing, verified=True)
@@ -235,6 +242,7 @@ def register(release_id):
         else:
             if len(catalog["releases"]) >= MAX_RELEASES:
                 reject("CREATE_RELEASE_CATALOG_FULL")
+            entry["createdAt"] = now_iso()
             catalog["releases"].append(entry)
             write_catalog(catalog)
     finally:

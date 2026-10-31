@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
 import subprocess
 import time
@@ -228,6 +229,51 @@ def inspect_running(container_id):
     if value is None or value.strip() not in ("true", "false"):
         reject("INSTANCE_START_DOCKER_RESPONSE_INVALID")
     return value.strip() == "true"
+
+
+def a2s_player_count(port):
+    """Return the connected-player count from a local Steam A2S endpoint, or None."""
+    if type(port) is not int or not 1 <= port <= 65535:
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.8)
+    try:
+        sock.sendto(b"\xff\xff\xff\xffU\xff\xff\xff\xff", ("127.0.0.1", port))
+        data, _ = sock.recvfrom(8192)
+        if len(data) >= 5 and data[:4] == b"\xff\xff\xff\xff":
+            if data[4:5] == b"A":
+                if len(data) >= 9:
+                    sock.sendto(b"\xff\xff\xff\xffU" + data[5:9], ("127.0.0.1", port))
+                    data, _ = sock.recvfrom(8192)
+            if (len(data) >= 6 and data[:4] == b"\xff\xff\xff\xff"
+                    and data[4:5] == b"D"):
+                count = data[5]
+                # Each player entry is at least 10 bytes; reject a truncated response.
+                if len(data) >= 6 + count * 10:
+                    return count
+        # Some DST builds reject A2S_PLAYER but still expose the player count in A2S_INFO.
+        sock.sendto(b"\xff\xff\xff\xffTSource Engine Query\x00", ("127.0.0.1", port))
+        data, _ = sock.recvfrom(8192)
+        if len(data) >= 5 and data[:4] == b"\xff\xff\xff\xff" and data[4:5] == b"A":
+            if len(data) >= 9:
+                sock.sendto(b"\xff\xff\xff\xffTSource Engine Query\x00" + data[5:9], ("127.0.0.1", port))
+                data, _ = sock.recvfrom(8192)
+        if len(data) < 7 or data[:4] != b"\xff\xff\xff\xff" or data[4:5] != b"I":
+            return None
+        offset = 6
+        # Protocol byte is at offset 5; then name, map, folder and game strings.
+        for _ in range(4):
+            end = data.find(b"\x00", offset)
+            if end < 0 or end + 1 > len(data):
+                return None
+            offset = end + 1
+        if offset + 4 > len(data):
+            return None
+        return data[offset + 2]
+    except (OSError, ValueError):
+        return None
+    finally:
+        sock.close()
 
 
 def runtime_running(container_id, shard):
@@ -472,7 +518,7 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
               "capturedAt": datetime.fromtimestamp(captured, timezone.utc).isoformat().replace("+00:00", "Z"),
               "configRevision": manifest.get("configRevision", 0) if manifest else 0,
               "status": "unknown", "verificationLevel": "unverified", "installedBuild": None,
-              "buildSource": "unknown", "releaseId": None, "maxPlayers": None,
+              "buildSource": "unknown", "releaseId": None, "maxPlayers": None, "players": None,
               "gameMode": None, "pvp": None, "desiredVsDeployed": "unknown",
               "shards": [], "ports": [], "warnings": [], "publicConnectivityVerified": False}
     if manifest is None:
@@ -626,6 +672,11 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
         result["status"] = "starting"
     if result["verificationLevel"] != "localVerified" and any(shard["processRunning"] is True for shard in shards):
         result["verificationLevel"] = "processOnly"
+    if result["status"] == "running":
+        counts = [a2s_player_count(required.get(role, {}).get("query")) for role in roles]
+        observed = [count for count in counts if count is not None]
+        if observed:
+            result["players"] = sum(observed)
     result["warnings"] = sorted(set(result["warnings"]))
     return result
 

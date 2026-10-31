@@ -9,6 +9,10 @@ export interface HostModItem {
   sizeBytes: number | null;
   fileCount: number | null;
   usedBy: { instanceId: string; displayName: string | null }[];
+  name: string | null;
+  author: string | null;
+  previewUrl: string | null;
+  version: string | null;
 }
 
 export function listHostMods(request: {
@@ -26,7 +30,9 @@ export function deleteHostMod(request: {
 
 export function prepareHostMods(request: {
   schemaVersion: 1; requestId: string; target: HostTarget; expectedRecordVersion: number;
-  operationId: string; workshopIds: string[]; sourceHandles?: Record<string, string>;
+  operationId: string; workshopIds: string[];
+  sourceHandles?: Record<string, string>;
+  metadata?: Record<string, { name?: string | null; author?: string | null; previewUrl?: string | null }>;
 }): Promise<{ schemaVersion: 1; requestId: string; target: HostTarget; task: TaskSnapshot }> {
   return call("prepare_host_mods", request);
 }

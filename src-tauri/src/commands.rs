@@ -769,6 +769,20 @@ pub async fn get_world_config(
 }
 
 #[tauri::command]
+pub async fn reveal_world_config_secrets(
+    state: State<'_, AppState>,
+    request: crate::world_config::GetRequest,
+) -> CommandResult<crate::world_config::RevealResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "revealWorldConfigSecrets",
+        safe_request_id(&request.request_id),
+        move || crate::world_config::reveal(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn list_host_mods(
     state: State<'_, AppState>,
     request: crate::host_mods::ListRequest,

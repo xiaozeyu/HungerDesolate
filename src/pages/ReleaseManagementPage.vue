@@ -3,7 +3,9 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import { AlertCircle, CheckCircle, Hammer, Package, RefreshCw, Trash2 } from "@lucide/vue";
 import { useRoute } from "vue-router";
 import PageHeader from "../components/PageHeader.vue";
+import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useReleaseList } from "../composables/useReleaseList";
@@ -32,6 +34,11 @@ const { data, error, loading, stale, refresh } = useReleaseList(server);
 
 const releases = computed(() => data.value?.releases ?? []);
 const creationReadyCount = computed(() => releases.value.filter(item => item.verified).length);
+const releaseSummary = computed(() => [
+  { label: "Release", value: releases.value.length },
+  { label: "可用于创建", value: creationReadyCount.value, tone: "success" as const },
+  { label: "构建", value: building.value ? "进行中" : "空闲", tone: building.value ? "warning" as const : "default" as const },
+]);
 const buildTasks = useBuildTasks();
 const buildStarting = ref(false);
 const buildStartError = ref("");
@@ -76,13 +83,16 @@ function isCurrent(target: { serverId: string; hostId: string; recordVersion: nu
 }
 
 function statusTone(release: InstanceReleaseSummary): "success" | "warning" | "danger" {
-  if (release.verified) return "success";
-  return "danger";
+  return release.verified ? "success" : "warning";
 }
 
 function statusLabel(release: InstanceReleaseSummary) {
-  if (release.verified) return release.runtimeVerified ? "构建验证通过 · 已有运行证据" : "构建验证通过，可创建";
-  return "待镜像验证";
+  return release.verified ? "已通过" : "待验证";
+}
+function formatReleaseDate(value: string | null | undefined) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
 function shortDigest(value: string) {
@@ -417,6 +427,68 @@ async function confirmCacheCleanup() {
     </PageHeader>
     <p v-if="cacheMessage" class="success-message" role="status">{{ cacheMessage }}</p>
 
+    <div v-if="error" class="environment-error release-feedback" role="alert">
+      <strong>{{ error.message }}</strong>
+      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
+    </div>
+
+    <div v-if="loading && !data" class="empty-state" role="status">读取 Release…</div>
+    <template v-else-if="data">
+      <SummaryBar :items="releaseSummary" label="Release 概览"/>
+      <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
+
+      <div v-if="!releases.length" class="release-empty">
+        <Package :size="20" />
+        <div><strong>暂无 DST Release</strong><span>构建镜像后，Release 会显示在此处。</span></div>
+        <button class="button" :disabled="building || !server" @click="startBuild"><Hammer :size="16" />构建镜像</button>
+      </div>
+
+      <div v-else class="release-table-wrap">
+        <div class="release-table release-table-head" aria-hidden="true">
+          <span>版本</span><span>固定镜像</span><span>验证状态</span><span>创建时间</span><span>操作</span>
+        </div>
+        <article v-for="release in releases" :key="release.releaseId" class="release-table release-row">
+          <div class="release-version-cell">
+            <strong>{{ release.dstBuild }}</strong>
+          </div>
+          <div class="release-digest-cell">
+            <span class="mono" :title="release.image">{{ release.image }}</span>
+          </div>
+          <div class="release-status-cell">
+            <StatusLabel :tone="statusTone(release)" :label="statusLabel(release)" />
+            <div class="verification-steps">
+              <span :class="{ passed: release.verified }"><CheckCircle :size="14" />镜像</span>
+              <span :class="{ passed: release.runtimeVerified }"><CheckCircle :size="14" />可选运行验证</span>
+            </div>
+          </div>
+          <div class="release-created-cell">{{ formatReleaseDate(release.createdAt) }}</div>
+          <div class="release-actions">
+            <div class="release-actions-main">
+            <template v-if="pendingReleaseId === release.releaseId">
+              <span class="release-action-progress" role="status"><span class="state-indicator busy" aria-hidden="true" />{{ pendingStage === "base" ? "检查镜像…" : pendingStage === "runtime" ? "启动隔离分片…" : pendingStage === "delete" ? "核对/删除 Release…" : "登记验证结果…" }}</span>
+            </template>
+            <template v-else-if="!release.verified">
+              <button class="button button-compact" :disabled="!!pendingReleaseId || building" @click="verifyBase(release)"><CheckCircle :size="15" />验证镜像</button>
+            </template>
+            <template v-else-if="!release.runtimeVerified">
+              <label class="runtime-bundle-picker">
+                <span>{{ bundleReleaseId === release.releaseId ? bundleName : "选择 ZIP 文件" }}</span>
+                <input :ref="element => rememberInput(release.releaseId, element)" type="file" accept=".zip,application/zip" :aria-label="`为 ${release.dstBuild} 选择 Klei 配置 ZIP`" :disabled="!!pendingReleaseId || building" @change="readBundle(release, $event)" />
+              </label>
+              <button class="button button-compact" :disabled="!!pendingReleaseId || building || bundleReleaseId !== release.releaseId || !bundleBase64" @click="verifyRuntime(release)"><CheckCircle :size="15" />运行验证</button>
+              <small v-if="bundleError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ bundleError.message }}</small>
+            </template>
+            <span v-else class="release-ready"><CheckCircle :size="15" />运行验证通过</span>
+            <small v-if="actionError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ actionError.message }}</small>
+            <small v-if="actionMessage?.releaseId === release.releaseId" class="release-action-success" role="status">{{ actionMessage.message }}</small>
+            </div>
+            <button class="icon-button release-delete" type="button" aria-label="删除 DST Release" title="删除 DST Release" :disabled="!!pendingReleaseId || building || stale" @click="previewDeleteRelease(release)"><Trash2 :size="15"/></button>
+          </div>
+        </article>
+      </div>
+    </template>
+    <div v-else-if="!error" class="empty-state">尚未读取 Release</div>
+<FloatingTask v-if="building || buildStatus?.status === 'failed' || buildMessage || buildError" label="镜像构建">
     <div v-if="building || buildStatus?.status === 'failed' || buildMessage || buildError" class="build-state" role="status">
       <div class="build-state-main">
         <span v-if="building" class="state-indicator busy" aria-hidden="true" />
@@ -437,75 +509,8 @@ async function confirmCacheCleanup() {
         <pre>{{ buildStatus.logTail.join("\n") }}</pre>
       </details>
     </div>
+</FloatingTask>
 
-    <div v-if="error" class="environment-error release-feedback" role="alert">
-      <strong>{{ error.message }}</strong>
-      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
-    </div>
-
-    <div v-if="loading && !data" class="empty-state" role="status">读取 Release…</div>
-    <template v-else-if="data">
-      <section class="summary-line" aria-label="Release 概览">
-        <div><span class="metric-number">{{ releases.length }}</span><span>Release</span></div>
-        <span class="summary-divider"/>
-        <div><span class="metric-number">{{ creationReadyCount }}</span><span>可用于创建</span></div>
-        <span class="summary-divider"/>
-        <StatusLabel v-if="building" tone="warning" label="构建中"/>
-        <StatusLabel v-else-if="stale" tone="warning" label="结果已过期"/>
-        <span v-else class="muted-text">构建完成后自动刷新</span>
-      </section>
-
-      <div v-if="!releases.length" class="release-empty">
-        <Package :size="20" />
-        <div><strong>暂无 DST Release</strong><span>构建镜像后，Release 会显示在此处。</span></div>
-        <button class="button" :disabled="building || !server" @click="startBuild"><Hammer :size="16" />构建镜像</button>
-      </div>
-
-      <div v-else class="release-table-wrap">
-        <div class="release-table release-table-head" aria-hidden="true">
-          <span>版本</span><span>固定镜像</span><span>验证状态</span><span>操作</span>
-        </div>
-        <article v-for="release in releases" :key="release.releaseId" class="release-table release-row">
-          <div class="release-version-cell">
-            <strong>{{ release.dstBuild }}</strong>
-            <span class="mono release-id">{{ release.releaseId }}</span>
-            <span class="release-platform">{{ release.platform }} · {{ release.scriptVersion }}</span>
-          </div>
-          <div class="release-digest-cell">
-            <span class="mono" :title="release.imageDigest">{{ release.image }}</span>
-            <span class="mono digest-value" :title="release.imageDigest">{{ shortDigest(release.imageDigest) }}</span>
-          </div>
-          <div class="release-status-cell">
-            <StatusLabel :tone="statusTone(release)" :label="statusLabel(release)" />
-            <div class="verification-steps">
-              <span :class="{ passed: release.verified }"><CheckCircle :size="14" />镜像</span>
-              <span :class="{ passed: release.runtimeVerified }"><CheckCircle :size="14" />可选运行验证</span>
-            </div>
-          </div>
-          <div class="release-actions">
-            <template v-if="pendingReleaseId === release.releaseId">
-              <span class="release-action-progress" role="status"><span class="state-indicator busy" aria-hidden="true" />{{ pendingStage === "base" ? "检查镜像…" : pendingStage === "runtime" ? "启动隔离分片…" : pendingStage === "delete" ? "核对/删除 Release…" : "登记验证结果…" }}</span>
-            </template>
-            <template v-else-if="!release.verified">
-              <button class="button button-compact" :disabled="!!pendingReleaseId || building" @click="verifyBase(release)"><CheckCircle :size="15" />验证镜像</button>
-            </template>
-            <template v-else-if="!release.runtimeVerified">
-              <label class="runtime-bundle-picker">
-                <span>{{ bundleReleaseId === release.releaseId ? bundleName : "选择 ZIP 文件" }}</span>
-                <input :ref="element => rememberInput(release.releaseId, element)" type="file" accept=".zip,application/zip" :aria-label="`为 ${release.dstBuild} 选择 Klei 配置 ZIP`" :disabled="!!pendingReleaseId || building" @change="readBundle(release, $event)" />
-              </label>
-              <button class="button button-compact" :disabled="!!pendingReleaseId || building || bundleReleaseId !== release.releaseId || !bundleBase64" @click="verifyRuntime(release)"><CheckCircle :size="15" />运行验证</button>
-              <small v-if="bundleError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ bundleError.message }}</small>
-            </template>
-            <span v-else class="release-ready"><CheckCircle :size="15" />运行验证通过</span>
-            <button class="icon-button" type="button" aria-label="删除 DST Release" title="删除 DST Release" :disabled="!!pendingReleaseId || building || stale" @click="previewDeleteRelease(release)"><Trash2 :size="15"/></button>
-            <small v-if="actionError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ actionError.message }}</small>
-            <small v-if="actionMessage?.releaseId === release.releaseId" class="release-action-success" role="status">{{ actionMessage.message }}</small>
-          </div>
-        </article>
-      </div>
-    </template>
-    <div v-else-if="!error" class="empty-state">尚未读取 Release</div>
     <AppDialog :open="!!deletePreview" title="删除 DST Release" description="删除 Release 登记及独占镜像；共用镜像保留。已归档专服的数据保留，但恢复时可能需要重新导入原镜像。" @update:open="closeDeleteDialog">
       <div v-if="deletePreview" class="form-stack">
         <dl class="environment-facts">
@@ -576,7 +581,7 @@ async function confirmCacheCleanup() {
 .release-summary > div strong { font-size: 18px; font-variant-numeric: tabular-nums; }
 .release-summary > div span { color: var(--text-secondary); font-size: 12px; }
 .release-table-wrap { min-width: 0; }
-.release-table { display: grid; grid-template-columns: minmax(160px, 1.1fr) minmax(150px, 1fr) minmax(140px, .9fr) minmax(240px, 1.35fr); gap: var(--space-4); align-items: center; }
+.release-table { display: grid; grid-template-columns: minmax(120px, .75fr) minmax(170px, 1.1fr) minmax(120px, .75fr) minmax(120px, .8fr) minmax(260px, 1.5fr); gap: var(--space-4); align-items: center; }
 .release-table-head { min-height: 36px; color: var(--text-secondary); font-size: 11px; border-bottom: 1px solid var(--border); }
 .release-row { min-height: 92px; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
 .release-version-cell, .release-digest-cell, .release-status-cell, .release-actions { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
@@ -589,7 +594,10 @@ async function confirmCacheCleanup() {
 .verification-steps svg { opacity: .55; }
 .verification-steps .passed { color: var(--success); }
 .verification-steps .passed svg { opacity: 1; }
-.release-actions { align-items: flex-start; }
+.release-actions { flex-direction: row; align-items: center; gap: 10px; }
+.release-actions-main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.release-delete { margin-left: auto; flex: 0 0 auto; border-left: 1px solid var(--border); padding-left: 12px; width: 30px; }
+.release-created-cell { color: var(--text-secondary); font-size: 11px; }
 .button-compact { min-height: 30px; padding: 0 var(--space-2); font-size: 12px; }
 .runtime-bundle-picker { display: inline-flex; position: relative; align-items: center; max-width: 100%; min-height: 30px; padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius-control); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
 .runtime-bundle-picker span { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -606,10 +614,15 @@ async function confirmCacheCleanup() {
 .release-empty .button { flex: 0 0 auto; }
 .release-feedback :deep(ul) { margin: var(--space-2) 0 0; }
 @keyframes release-pulse { 50% { opacity: .35; } }
+@media (max-width: 1100px) {
+  .release-table { grid-template-columns: minmax(90px, .8fr) minmax(130px, 1fr) minmax(90px, .8fr) minmax(90px, .8fr) minmax(210px, 1.4fr); gap: 8px; }
+  .release-actions-main { gap: 4px; }
+  .release-delete { padding-left: 8px; }
+}
 @media (max-width: 760px) {
   .release-table-head { display: none; }
   .release-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; row-gap: var(--space-3); }
-  .release-status-cell, .release-actions { border-top: 1px solid var(--border); padding-top: var(--space-2); }
+  .release-status-cell, .release-created-cell, .release-actions { border-top: 1px solid var(--border); padding-top: var(--space-2); }
 }
 @media (prefers-reduced-motion: reduce) { .state-indicator.busy { animation: none; } }
 </style>

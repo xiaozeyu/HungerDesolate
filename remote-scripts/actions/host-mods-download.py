@@ -475,6 +475,19 @@ def content_files(root):
     return entries, total, digest
 
 
+def modinfo_fields(content):
+    try:
+        text = (content / "modinfo.lua").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values = {}
+    for name in ("name", "author", "version"):
+        match = re.search(r"(?mi)^\s*" + name + r"\s*=\s*\"([^\"]*)\"", text)
+        if match:
+            values[name] = match.group(1).strip()[:200]
+    return values
+
+
 def wait_lock(path, cancel_path):
     safe_dir(path.parent, create=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -671,11 +684,17 @@ def worker(task_id):
                 candidate = staging_root / ("publish-" + workshop_id)
                 candidate.mkdir(mode=0o700)
                 os.replace(downloaded, candidate / "content")
+                info = modinfo_fields(candidate / "content")
+                supplied = request.get("metadata", {}).get(workshop_id, {}) if isinstance(request.get("metadata"), dict) else {}
                 atomic_json(candidate / "manifest.json", {"schemaVersion": 1, "workshopId": workshop_id,
                     "contentDigest": content_digest, "dstReleaseId": context["dstReleaseId"],
                     "fetcherImage": context["image"],
                     "preparedAt": now(), "fileCount": len(files), "sizeBytes": size_bytes,
-                    "sourceHandle": source_handles.get(workshop_id)})
+                    "sourceHandle": source_handles.get(workshop_id),
+                    "name": info.get("name") or supplied.get("name"),
+                    "author": info.get("author") or supplied.get("author"),
+                    "version": info.get("version"),
+                    "previewUrl": supplied.get("previewUrl")})
                 for current, _, names in os.walk(candidate / "content"):
                     os.chown(current, 0, 0)
                     os.chmod(current, 0o555)

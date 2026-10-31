@@ -104,6 +104,7 @@ pub struct RuntimeSnapshot {
     pub build_source: String,
     pub release_id: Option<String>,
     pub max_players: Option<u16>,
+    pub players: Option<u16>,
     pub game_mode: Option<String>,
     pub pvp: Option<bool>,
     pub desired_vs_deployed: String,

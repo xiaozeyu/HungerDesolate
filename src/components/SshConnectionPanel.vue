@@ -58,11 +58,11 @@ async function confirm() {
 }
 async function saveCredential() {
   if (!canUseSsh.value) return;
-  credentialFailure.value = credentialError(props.server.authKind,credentials.value);
+  credentialFailure.value = credentialError("password", credentials.value);
   if (credentialFailure.value) return;
   const captured = ticket();busy.value = true;failure.value = "";
   if (attempt?.editVersion !== credentialEditVersion) attempt = {editVersion:credentialEditVersion,operationId:crypto.randomUUID()};
-  const credential = credentialInput(props.server.authKind,credentials.value);
+  const credential = credentialInput("password", credentials.value);
   try { const result = await api.saveCredentials({...request(captured),operationId:attempt.operationId,credential});
     if (current(captured) && matchesConnection(captured,result,true)) {credentialOpen.value = false; clearSecrets();await workspace.refresh();} }
   catch (cause) { if (current(captured)) failure.value = describeError(cause).message; }
@@ -81,7 +81,7 @@ async function connect() {
     <div class="section-heading"><div><h2>SSH 信任与凭据</h2></div></div>
     <p v-if="failure && !trustOpen && !credentialOpen" class="error-strip" role="alert">{{failure}}</p>
     <div class="ssh-step"><Fingerprint :size="18"/><div><strong>主机指纹</strong><p v-if="state?.fingerprint" class="mono fingerprint-value">{{state.algorithm}} · {{state.fingerprint}}</p><p v-else>未确认</p></div><button class="button" :disabled="!canUseSsh" @click="scan">{{busy ? '处理中…' : '扫描指纹'}}</button></div>
-    <div class="ssh-step"><KeyRound :size="18"/><div><strong>系统凭据库</strong><p>{{state?.credentialConfigured ? '已配置' : '未配置'}} · {{server.authKind === 'password' ? '密码认证' : '私钥认证'}}</p></div><button class="button" :disabled="disabled || busy || (!preview && !canUseSsh)" @click="credentialOpen = true; failure = ''">{{state?.credentialConfigured ? '替换凭据' : preview ? '预览凭据表单' : '配置凭据'}}</button></div>
+    <div class="ssh-step"><KeyRound :size="18"/><div><strong>系统凭据库</strong><p>{{state?.credentialConfigured ? '已配置' : '未配置'}} · {{server.authKind === 'password' ? '密码认证' : '当前私钥认证，替换仅支持密码'}}</p></div><button class="button" :disabled="disabled || busy || (!preview && !canUseSsh)" @click="credentialOpen = true; failure = ''">{{state?.credentialConfigured ? '替换凭据' : preview ? '预览凭据表单' : '配置凭据'}}</button></div>
     <div class="ssh-step"><PlugZap :size="18"/><div><strong>登录验证</strong></div><button class="button primary" :disabled="!canUseSsh || !state?.fingerprint || !state?.credentialConfigured" @click="connect">验证登录</button></div>
     <div v-if="verification" class="ssh-verification" role="status"><p>{{message}}</p><p v-if="verification.hostId" class="mono">hostId：{{verification.hostId}}</p><small>核验时间：{{new Date(verification.verifiedAtUnixSeconds * 1000).toLocaleString()}}</small></div>
     <CredentialCleanupNotice/>
@@ -90,9 +90,9 @@ async function connect() {
       <p v-if="failure" class="error-strip" role="alert">{{failure}}</p>
       <template #footer><button class="button" @click="trustOpen = false">关闭</button><button class="button primary" :disabled="!acknowledged || !canUseSsh" @click="confirm">确认指纹</button></template>
     </AppDialog>
-    <AppDialog :open="credentialOpen" title="保存 SSH 凭据" :description="`${server.displayName} · ${server.username}@${server.host}`" @update:open="credentialOpen = $event">
+    <AppDialog :open="credentialOpen" title="保存 SSH 凭据" :description="`${server.displayName} · ${server.username}@${server.host} · 仅支持密码认证`" @update:open="credentialOpen = $event">
       <p v-if="preview" class="form-hint">演示数据</p>
-      <form id="ssh-credential-form" @submit.prevent="saveCredential"><CredentialFields v-model="credentials" :auth-kind="server.authKind" id-prefix="ssh-credential" :disabled="busy || preview" :error="credentialFailure" @update:model-value="edited"/></form><p v-if="failure" class="error-strip" role="alert">{{failure}}</p>
+      <form id="ssh-credential-form" @submit.prevent="saveCredential"><CredentialFields v-model="credentials" auth-kind="password" id-prefix="ssh-credential" :disabled="busy || preview" :error="credentialFailure" @update:model-value="edited"/></form><p v-if="failure" class="error-strip" role="alert">{{failure}}</p>
       <template #footer><button class="button" @click="credentialOpen = false">关闭</button><button class="button primary" form="ssh-credential-form" type="submit" :disabled="!canUseSsh">{{busy ? '保存中…' : '保存到系统凭据库'}}</button></template>
     </AppDialog>
   </section>

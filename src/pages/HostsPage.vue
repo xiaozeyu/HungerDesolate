@@ -4,6 +4,7 @@ import { Server, Plus, ArrowRight, Pencil } from "@lucide/vue";
 import { useRouter } from "vue-router";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
 import IconButton from "../components/IconButton.vue";
 import AppDialog from "../components/AppDialog.vue";
 import ServerForm from "../components/ServerForm.vue";
@@ -21,6 +22,11 @@ const addButton = ref<HTMLButtonElement | null>(null);
 const servers = computed(() => workspace.servers.value);
 const connectedCount = computed(() => servers.value.filter(host => host.connectionState === "connected").length);
 const pendingCount = computed(() => servers.value.filter(host => !host.hostId).length);
+const summaryItems = computed(() => [
+  { label: "主机", value: servers.value.length },
+  { label: "已连接", value: connectedCount.value, tone: "success" as const },
+  { label: "待初始化", value: pendingCount.value, tone: "warning" as const },
+]);
 
 function hostState(host: ServerSummary): { label: string; tone: "success" | "warning" | "danger" | "muted" } {
   if (!host.hostId) return { label: "待初始化", tone: "warning" };
@@ -61,13 +67,7 @@ function saved(server: ServerSummary) {
     <div v-if="workspace.loading.value && !servers.length" class="empty-state" role="status"><p>读取连接记录…</p></div>
     <div v-else-if="!servers.length" class="empty-state"><Server :size="28"/><h2>还没有主机</h2><button class="button" @click="setEditorOpen(true)">添加第一台主机</button></div>
     <template v-else>
-      <section class="summary-line">
-        <div><span class="metric-number">{{servers.length}}</span><span>台主机</span></div>
-        <span class="summary-divider"/>
-        <div><span class="metric-number">{{connectedCount}}</span><span>已连接</span></div>
-        <span class="summary-divider"/>
-        <div><span class="metric-number warning-number">{{pendingCount}}</span><span>待初始化</span></div>
-      </section>
+      <SummaryBar :items="summaryItems" label="主机摘要"/>
       <div class="table-wrap">
         <table>
           <thead><tr><th>主机</th><th>地址</th><th>认证</th><th>状态</th><th>记录版本</th><th class="table-action"/></tr></thead>
@@ -79,10 +79,12 @@ function saved(server: ServerSummary) {
               <td><StatusLabel :tone="hostState(host).tone" :label="hostState(host).label"/></td>
               <td class="mono">v{{host.recordVersion}}</td>
               <td class="table-action">
-                <button class="text-button" type="button" @click="openHost(host)">
-                  {{workspace.preview.value || host.hostId ? "进入" : "配置连接"}} <ArrowRight :size="15"/>
-                </button>
-                <IconButton v-if="!workspace.preview.value" :label="`编辑${host.displayName}连接`" @click="router.push(`/hosts/${host.serverId}/connection`)"><Pencil :size="16"/></IconButton>
+                <div class="host-actions">
+                  <button class="text-button" type="button" @click="openHost(host)">
+                    {{workspace.preview.value || host.hostId ? "进入" : "配置连接"}} <ArrowRight :size="15"/>
+                  </button>
+                  <IconButton v-if="!workspace.preview.value" :label="`编辑${host.displayName}连接`" @click="router.push(`/hosts/${host.serverId}/connection`)"><Pencil :size="16"/></IconButton>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -95,3 +97,8 @@ function saved(server: ServerSummary) {
     </AppDialog>
   </div>
 </template>
+
+
+<style scoped>
+.host-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; }
+</style>

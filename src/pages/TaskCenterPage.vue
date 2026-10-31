@@ -2,7 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { RefreshCw, X } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
-import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
+import TaskRow from "../components/TaskRow.vue";
 import { useOperations } from "../composables/useOperations";
 import { useTasks } from "../composables/useTasks";
 import { useBuildTasks } from "../composables/useBuildTasks";
@@ -62,7 +63,7 @@ const taskRows = computed<Row[]>(() => taskStore.tasks.value.map(task => ({
   id: `task-${task.taskId}`,
   title: taskOperationLabel(task.operation),
   target: displayTarget(task.target),
-  stage: task.queuePosition ? `排队中 · 第 ${task.queuePosition} 位` : stageLabel(task.stage),
+  stage: task.queuePosition ? `等待资源 · 第 ${task.queuePosition} 位` : stageLabel(task.stage),
   status: task.status,
   startedAt: Date.parse(task.createdAt) || Date.now(),
   finishedAt: task.finishedAt ? Date.parse(task.finishedAt) : null,
@@ -92,6 +93,11 @@ const buildRows = computed<Row[]>(() => buildTasks.all.value.map(entry => {
 const rows = computed(() => [...operationRows.value, ...taskRows.value, ...buildRows.value].sort((left, right) => right.startedAt - left.startedAt));
 const activeRows = computed(() => rows.value.filter(row => row.status === "running" || row.status === "queued"));
 const finishedRows = computed(() => rows.value.filter(row => row.status !== "running" && row.status !== "queued"));
+const taskSummary = computed(() => [
+  { label: "进行中", value: activeRows.value.length, tone: activeRows.value.length ? "warning" as const : "default" as const },
+  { label: "最近完成", value: finishedRows.value.length },
+  { label: "失败待处理", value: rows.value.filter(row => row.status === "failed").length, tone: rows.value.some(row => row.status === "failed") ? "danger" as const : "default" as const },
+]);
 
 function statusLabel(status: string) {
   return status === "running" ? "进行中" : status === "queued" ? "排队中"
@@ -128,59 +134,33 @@ onUnmounted(() => {
       </template>
     </PageHeader>
 
-    <div class="task-summary">
-      <div><span class="metric-number">{{ activeRows.length }}</span><span>进行中</span></div>
-      <span class="summary-divider"/>
-      <div><span class="metric-number">{{ finishedRows.length }}</span><span>最近完成</span></div>
-      <span class="summary-divider"/>
-      <div><span class="metric-number warning-number">{{ rows.filter(row => row.status === "failed").length }}</span><span>失败待处理</span></div>
-    </div>
+    <SummaryBar :items="taskSummary" label="任务记录摘要"/>
 
     <section class="section-block">
       <div class="section-heading"><div><h2>进行中</h2></div><span class="muted-text">切换页面不会停止任务</span></div>
-      <div v-if="activeRows.length" class="table-wrap">
-        <table>
-          <thead><tr><th>目标</th><th>操作</th><th>阶段</th><th>耗时</th><th>状态</th><th/></tr></thead>
-          <tbody>
-            <tr v-for="row in activeRows" :key="row.id">
-              <td><strong>{{row.target}}</strong></td>
-              <td>{{row.title}}</td>
-              <td>{{row.stage}}</td>
-              <td class="mono">{{elapsed(row)}}</td>
-              <td><StatusLabel :tone="statusTone(row.status)" :label="statusLabel(row.status)"/></td>
-              <td class="table-action">
-                <RouterLink v-if="row.route" class="text-button" :to="row.route">查看</RouterLink>
-                <button v-else-if="row.operation" class="icon-button" type="button" title="关闭记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-if="activeRows.length" class="task-list">
+        <TaskRow v-for="row in activeRows" :key="row.id" :title="row.title" :target="row.target" :stage="row.stage"
+          :status-label="statusLabel(row.status)" :tone="statusTone(row.status) === 'danger' ? 'danger' : 'warning'"
+          :elapsed="elapsed(row)" :error="row.error">
+          <template #actions>
+            <RouterLink v-if="row.route" class="text-button" :to="row.route">查看</RouterLink>
+            <button v-else-if="row.operation" class="icon-button" type="button" title="关闭记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
+          </template>
+        </TaskRow>
       </div>
       <div v-else class="empty-state task-empty"><h2>没有进行中的任务</h2><p>部署、启动、备份等长操作会集中显示在这里。</p></div>
     </section>
 
     <section class="section-block">
       <div class="section-heading"><div><h2>最近完成</h2></div><span class="muted-text">失败任务保留现场与错误信息</span></div>
-      <div v-if="finishedRows.length" class="table-wrap">
-        <table>
-          <thead><tr><th>目标</th><th>操作</th><th>阶段</th><th>耗时</th><th>状态</th><th/></tr></thead>
-          <tbody>
-            <tr v-for="row in finishedRows" :key="row.id">
-              <td>
-                <strong>{{row.target}}</strong>
-                <small v-if="row.error" class="table-sub">{{row.error}}</small>
-              </td>
-              <td>{{row.title}}</td>
-              <td>{{row.stage}}</td>
-              <td class="mono">{{elapsed(row)}}</td>
-              <td><StatusLabel :tone="statusTone(row.status)" :label="statusLabel(row.status)"/></td>
-              <td class="table-action">
-                <RouterLink v-if="row.route" class="text-button" :to="row.route">查看</RouterLink>
-                <button v-if="row.operation" class="icon-button" type="button" title="移除记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-if="finishedRows.length" class="task-list">
+        <TaskRow v-for="row in finishedRows" :key="row.id" :title="row.title" :target="row.target" :stage="row.stage"
+          :status-label="statusLabel(row.status)" :tone="statusTone(row.status)" :elapsed="elapsed(row)" :error="row.error">
+          <template #actions>
+            <RouterLink v-if="row.route" class="text-button" :to="row.route">查看</RouterLink>
+            <button v-if="row.operation" class="icon-button" type="button" title="移除记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
+          </template>
+        </TaskRow>
       </div>
       <div v-else class="empty-state task-empty"><h2>暂无任务记录</h2></div>
     </section>

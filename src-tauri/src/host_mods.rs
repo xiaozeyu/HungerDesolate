@@ -56,6 +56,16 @@ pub struct PrepareRequest {
     pub workshop_ids: Vec<String>,
     #[serde(default)]
     pub source_handles: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub metadata: std::collections::BTreeMap<String, WorkshopMetadata>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkshopMetadata {
+    pub name: Option<String>,
+    pub author: Option<String>,
+    pub preview_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +104,10 @@ pub struct ModItem {
     pub size_bytes: Option<u64>,
     pub file_count: Option<u64>,
     pub used_by: Vec<UsedBy>,
+    pub name: Option<String>,
+    pub author: Option<String>,
+    pub preview_url: Option<String>,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -357,6 +371,19 @@ pub fn list(database: &Path, request: ListRequest) -> CommandResult<ListResponse
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    name: item.get("name").and_then(Value::as_str).map(str::to_string),
+                    author: item
+                        .get("author")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    preview_url: item
+                        .get("previewUrl")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    version: item
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 });
             }
             Ok(ListResponse {
@@ -438,7 +465,8 @@ pub fn prepare(database: &Path, request: PrepareRequest) -> CommandResult<TaskRe
     let payload = serde_json::json!({"action":"start","schemaVersion":1,"requestId":request.request_id,
         "serverId":request.target.server_id,"hostId":request.target.host_id,
         "expectedRecordVersion":request.expected_record_version,"operationId":request.operation_id,
-        "workshopIds":request.workshop_ids,"sourceHandles":request.source_handles});
+        "workshopIds":request.workshop_ids,"sourceHandles":request.source_handles,
+        "metadata":request.metadata});
     with_verified_session(
         database,
         &connection(

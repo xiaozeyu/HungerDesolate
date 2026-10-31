@@ -40,7 +40,7 @@ def validate_release(value):
         reject("CREATE_RELEASE_INVALID")
     required = {"schemaVersion", "releaseId", "platform", "image", "imageDigest",
                 "dstBuild", "artifactDigest", "scriptVersion", "verified", "runtimeVerified", "commands"}
-    if set(value) != required:
+    if set(value) not in (required, required | {"createdAt"}):
         reject("CREATE_RELEASE_INVALID")
     if (value["schemaVersion"] != 1 or not valid_uuid(value["releaseId"])
             or value["platform"] != "linux/amd64" or not value["verified"]
@@ -52,7 +52,8 @@ def validate_release(value):
             or not isinstance(value["commands"], dict)
             or set(value["commands"]) != {"master", "caves"}
             or not command(value["commands"]["master"])
-            or not command(value["commands"]["caves"])):
+            or not command(value["commands"]["caves"])
+            or ("createdAt" in value and (not isinstance(value["createdAt"], str) or not value["createdAt"]))):
         reject("CREATE_RELEASE_INVALID")
     return value
 

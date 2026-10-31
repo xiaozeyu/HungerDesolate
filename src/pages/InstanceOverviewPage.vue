@@ -2,8 +2,10 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Play, Square, RotateCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
+import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
+import TaskPanel from "../components/TaskPanel.vue";
 import { useInstanceOverview } from "../composables/useInstanceOverview";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
@@ -33,6 +35,8 @@ const visibleTask = computed(() => instanceTasks.value.find(task => ["queued", "
   ?? null);
 const taskTone = computed(() => visibleTask.value?.status === "failed" ? "danger"
   : visibleTask.value?.status === "interrupted" ? "warning" : "warning");
+const taskStatusText = computed(() => visibleTask.value?.status === "failed" ? "失败"
+  : visibleTask.value?.status === "interrupted" ? "待核实" : visibleTask.value?.status === "queued" ? "排队中" : "进行中");
 const runtimeAction = computed<"start"|"stop"|"restart"|null>(() => {
   const operation = target.value ? operations.runningFor(targetKey.value, ["start", "stop", "restart"]) : null;
   return operation && (operation.kind === "start" || operation.kind === "stop" || operation.kind === "restart")
@@ -143,18 +147,7 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
       <strong>{{startError.message}}</strong>
       <ul v-if="startError.recoverySteps.length"><li v-for="step in startError.recoverySteps" :key="step">{{step}}</li></ul>
     </div>
-    <section v-if="visibleTask" class="section-block task-inline">
-      <div class="section-heading">
-        <div><h2>当前任务</h2></div>
-        <RouterLink class="text-button" to="/tasks">任务记录</RouterLink>
-      </div>
-      <div class="task-inline-body">
-        <StatusLabel :tone="taskTone" :label="visibleTask.status === 'failed' ? '失败' : visibleTask.status === 'interrupted' ? '待核实' : visibleTask.status === 'queued' ? '排队中' : '进行中'"/>
-        <strong>{{taskOperationLabel(visibleTask.operation)}}</strong>
-        <span>{{stageLabel(visibleTask.stage)}}</span>
-        <small v-if="visibleTask.error?.message" class="table-sub">{{visibleTask.error.message}}</small>
-      </div>
-    </section>
+
     <div v-if="loading && !data" class="empty-state" aria-live="polite">
       <p>
         读取当前专服…
@@ -278,6 +271,13 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
         </div>
         <p v-else class="muted-text">端口信息尚未采集</p>
       </section>
+<FloatingTask v-if="visibleTask" label="专服任务">
+    <TaskPanel v-if="visibleTask" :title="taskOperationLabel(visibleTask.operation)" :status-label="taskStatusText"
+      :stage-label="stageLabel(visibleTask.stage)" :tone="taskTone" :queue-position="visibleTask.queuePosition"
+      :error="visibleTask.error">
+      <template #actions><RouterLink class="text-button" to="/tasks">任务记录</RouterLink></template>
+    </TaskPanel>
+</FloatingTask>
     </template>
   </div>
 </template>

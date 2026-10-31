@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from "vue";
-import { RefreshCw, Save } from "@lucide/vue";
+import { Eye, EyeOff, RefreshCw, Save } from "@lucide/vue";
 import AppSelect from "../components/AppSelect.vue";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import { applyWorldConfig, getWorldConfig, saveWorldConfig } from "../api/world";
+import SummaryBar from "../components/SummaryBar.vue";
+import { applyWorldConfig, getWorldConfig, revealWorldSecrets, saveWorldConfig } from "../api/world";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useOperations } from "../composables/useOperations";
 import { usePageTarget } from "../composables/usePageTarget";
@@ -31,12 +32,29 @@ const saveMessage = ref("");
 const tokenStatus = ref<WorldConfig["tokenStatus"]>("unknown");
 const passwordStatus = ref<WorldConfig["serverPasswordStatus"]>("unknown");
 const tokenValue = ref(""), passwordValue = ref("");
+const showToken = ref(false), showPassword = ref(false);
+const revealedToken = ref(""), revealedPassword = ref("");
+const revealLoading = ref(false), secretError = ref("");
+const passwordInput = computed({
+  get: () => passwordValue.value || revealedPassword.value,
+  set: (value: string) => { passwordValue.value = value; revealedPassword.value = ""; },
+});
+const tokenInput = computed({
+  get: () => tokenValue.value || revealedToken.value,
+  set: (value: string) => { tokenValue.value = value; revealedToken.value = ""; },
+});
 const activeView = ref<"basic" | "access" | "worldgen" | "worldSettings">("basic");
 const selectedShard = ref<DstWorldShard>("master");
 const activeGroup = ref("misc");
 const draftVersion = ref(0), pendingOperationId = ref("");
 let epoch = 0, querySequence = 0, latestRequestId = "";
 
+const worldSummary = computed(() => [
+  { label: "期望版本", value: data.value?.revision ?? "—" },
+  { label: "已部署版本", value: data.value?.deployedRevision ?? "—", tone: status.value === "inSync" ? "success" as const : "warning" as const },
+  { label: "状态", value: status.value === "inSync" ? "已应用" : "待应用", tone: status.value === "inSync" ? "success" as const : "warning" as const },
+  { label: "编辑", value: hasChanges.value ? "未保存" : "已同步", tone: hasChanges.value ? "warning" as const : "default" as const },
+]);
 const hasChanges = computed(() => {
   if (!baseDesired.value) return false;
   return JSON.stringify(draft) !== JSON.stringify(baseDesired.value)
@@ -143,6 +161,11 @@ async function refresh() {
       baseRevision.value = response.configRevision;
       tokenValue.value = "";
       passwordValue.value = "";
+      showToken.value = false;
+      showPassword.value = false;
+      revealedToken.value = "";
+      revealedPassword.value = "";
+      secretError.value = "";
       if (useRestored) saveMessage.value = "已恢复未保存的草稿。";
     } else if (response.configRevision !== baseRevision.value) {
       error.value = { code: "REVISION_CONFLICT", message: "期望配置已被其他操作更新；本地草稿已保留，请比较后重载或重新编辑。", recoverySteps: [], field: null };
@@ -163,6 +186,43 @@ async function refresh() {
 
 function listDraft(value: string): string[] {
   return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+async function revealSavedSecrets() {
+  const connection = server.value, instanceTarget = target.value;
+  if (!connection || !instanceTarget || workspace.preview.value || revealLoading.value
+      || (revealedToken.value && revealedPassword.value)) return;
+  revealLoading.value = true;
+  secretError.value = "";
+  try {
+    const requestId = crypto.randomUUID();
+    const response = await revealWorldSecrets({ schemaVersion: 1, requestId, target: instanceTarget,
+      expectedRecordVersion: connection.recordVersion });
+    if (response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId
+        || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId) {
+      throw new Error("凭据读取响应身份不匹配");
+    }
+    revealedToken.value = response.token ?? "";
+    revealedPassword.value = response.serverPassword ?? "";
+  } catch (cause) {
+    secretError.value = describeError(cause).message;
+  } finally {
+    revealLoading.value = false;
+  }
+}
+
+async function togglePasswordVisibility() {
+  if (!showPassword.value && !passwordValue.value && passwordStatus.value === "configured" && !revealedPassword.value) {
+    await revealSavedSecrets();
+  }
+  showPassword.value = !showPassword.value;
+}
+
+async function toggleTokenVisibility() {
+  if (!showToken.value && !tokenValue.value && tokenStatus.value === "configured" && !revealedToken.value) {
+    await revealSavedSecrets();
+  }
+  showToken.value = !showToken.value;
 }
 
 function validateDraft(): string | null {
@@ -243,6 +303,11 @@ async function save(): Promise<boolean> {
       assignSettings(response.data.desired);
       tokenValue.value = "";
       passwordValue.value = "";
+      showToken.value = false;
+      showPassword.value = false;
+      revealedToken.value = "";
+      revealedPassword.value = "";
+      secretError.value = "";
     }
     pendingOperationId.value = "";
     saveMessage.value = `期望配置已保存（版本 ${response.data.revision}）。`;
@@ -391,14 +456,7 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
     <div v-else-if="!target && !workspace.preview.value" class="empty-state"><h2>无法确定专服</h2><p>返回专服列表后重新进入。</p></div>
     <template v-else>
       <div v-if="stale" class="environment-error" role="status">显示上次读取的配置；当前结果已过期，保存已停用。</div>
-      <section v-if="data" class="summary-line">
-        <div><span class="metric-number">{{data.revision}}</span><span>期望版本</span></div>
-        <span class="summary-divider"/>
-        <div><span class="metric-number">{{data.deployedRevision ?? '—'}}</span><span>已部署版本</span></div>
-        <span class="summary-divider"/>
-        <StatusLabel :tone="status === 'inSync' ? 'success' : 'warning'" :label="status === 'inSync' ? '已应用' : '待应用'"/>
-        <span class="muted-text">{{hasChanges ? '有未保存更改' : '没有未保存更改'}}</span>
-      </section>
+      <SummaryBar v-if="data" :items="worldSummary" label="世界配置摘要"/>
       <nav class="world-view-tabs" aria-label="世界配置分类">
         <button type="button" :aria-pressed="activeView==='basic'" :class="{active:activeView==='basic'}" @click="selectView('basic')">基本设置</button>
         <button type="button" :aria-pressed="activeView==='access'" :class="{active:activeView==='access'}" @click="selectView('access')">访问与联机</button>
@@ -419,9 +477,27 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
         <div class="world-subsection">
           <div class="section-heading"><h2>联机凭据</h2></div>
           <div class="form-grid world-credential-grid">
-            <label>服务器密码<input v-model="passwordValue" type="password" autocomplete="new-password" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'"/></label>
-            <label>Klei Token<input v-model="tokenValue" type="password" autocomplete="off" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'"/></label>
+            <div class="world-secret-field">
+              <label for="world-server-password">服务器密码</label>
+              <div class="world-secret-input">
+                <input id="world-server-password" v-model="passwordInput" :type="showPassword ? 'text' : 'password'" autocomplete="new-password" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'"/>
+                <button class="world-secret-toggle" type="button" :aria-label="showPassword ? '隐藏服务器密码' : '显示服务器密码'" :aria-pressed="showPassword" @click="togglePasswordVisibility">
+                  <EyeOff v-if="showPassword" :size="16"/><Eye v-else :size="16"/>
+                </button>
+              </div>
+            </div>
+            <div class="world-secret-field">
+              <label for="world-klei-token">Klei Token</label>
+              <div class="world-secret-input">
+                <input id="world-klei-token" v-model="tokenInput" :type="showToken ? 'text' : 'password'" autocomplete="off" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'"/>
+                <button class="world-secret-toggle" type="button" :aria-label="showToken ? '隐藏 Klei Token' : '显示 Klei Token'" :aria-pressed="showToken" @click="toggleTokenVisibility">
+                  <EyeOff v-if="showToken" :size="16"/><Eye v-else :size="16"/>
+                </button>
+              </div>
+            </div>
           </div>
+          <p v-if="secretError" class="error-strip" role="alert">{{ secretError }}</p>
+          <p v-if="revealLoading" class="muted-text" role="status">正在读取已保存凭据…</p>
         </div>
 
         <div class="world-subsection">
@@ -486,3 +562,12 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
     </template>
   </div>
 </template>
+
+
+<style scoped>
+.world-secret-field { display: flex; flex-direction: column; gap: 6px; }
+.world-secret-input { position: relative; display: flex; align-items: center; }
+.world-secret-input input { width: 100%; padding-right: 38px; }
+.world-secret-toggle { position: absolute; right: 3px; top: 50%; display: grid; width: 30px; height: 30px; place-items: center; transform: translateY(-50%); border: 0; border-radius: 2px; background: transparent; color: var(--text-tertiary); }
+.world-secret-toggle:hover { color: var(--text); background: var(--surface-hover); }
+</style>

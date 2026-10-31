@@ -1,22 +1,23 @@
 <script setup lang="ts">
 defineProps<{
-    eyebrow?: string;
-    title: string;
+  eyebrow?: string;
+  title: string;
+  description?: string;
 }>();
 </script>
 
 <template>
   <header class="page-header">
-    <div>
-      <div v-if="eyebrow" class="eyebrow">
-        {{ eyebrow }}
+    <div class="page-heading">
+      <div v-if="eyebrow" class="eyebrow">{{ eyebrow }}</div>
+      <div class="title-line">
+        <h1>{{ title }}</h1>
+        <slot name="status"/>
       </div>
-      <h1>
-        {{ title }}
-      </h1>
+      <p v-if="description" class="page-description">{{ description }}</p>
     </div>
     <div class="header-actions">
-      <slot name="actions" />
+      <slot name="actions"/>
     </div>
   </header>
 </template>

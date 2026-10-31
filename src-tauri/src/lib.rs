@@ -95,6 +95,7 @@ pub fn run() -> tauri::Result<()> {
             commands::preview_instance_delete,
             commands::delete_instance,
             commands::get_world_config,
+            commands::reveal_world_config_secrets,
             commands::get_workshop_metadata,
             commands::list_instance_mods,
             commands::save_instance_mods,

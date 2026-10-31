@@ -1,6 +1,6 @@
 [package]
 name = "hunger-desolate"
-version = "0.1.0"
+version = "1.0.1"
 description = "Desktop console for isolated DST instances"
 edition = "2021"
 

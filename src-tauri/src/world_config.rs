@@ -31,6 +31,26 @@ pub struct GetRequest {
     pub expected_record_version: u64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealResponse {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub token: Option<String>,
+    pub server_password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevealRemote {
+    schema_version: u32,
+    request_id: String,
+    target: InstanceTarget,
+    token: Option<String>,
+    server_password: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdvancedConfig {
@@ -621,6 +641,49 @@ pub fn get(database: &Path, request: GetRequest) -> CommandResult<WorldQueryResp
             freshness: remote.freshness,
             config_revision: remote.config_revision,
             data: remote.data,
+        })
+    })
+}
+
+pub fn reveal(database: &Path, request: GetRequest) -> CommandResult<RevealResponse> {
+    let connection = connection(
+        request.schema_version,
+        &request.request_id,
+        &request.target,
+        request.expected_record_version,
+    )?;
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error(
+                "HOST_IDENTITY_MISMATCH",
+                "世界配置目标主机身份不一致",
+            ));
+        }
+        let remote_value = execute(
+            session,
+            &json!({"schemaVersion":1,"action":"reveal",
+            "requestId":request.request_id,"serverId":request.target.server_id,
+            "hostId":request.target.host_id,"instanceId":request.target.instance_id}),
+        )?;
+        let remote: RevealRemote = serde_json::from_value(remote_value)
+            .map_err(|_| error("WORLD_CONFIG_PROTOCOL_INVALID", "凭据查询响应字段无效"))?;
+        if remote.schema_version != 1
+            || remote.request_id != request.request_id
+            || remote.target.server_id != request.target.server_id
+            || remote.target.host_id != request.target.host_id
+            || remote.target.instance_id != request.target.instance_id
+        {
+            return Err(error(
+                "WORLD_CONFIG_PROTOCOL_INVALID",
+                "凭据查询响应身份无效",
+            ));
+        }
+        Ok(RevealResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            token: remote.token,
+            server_password: remote.server_password,
         })
     })
 }

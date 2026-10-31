@@ -403,6 +403,7 @@ fn apply_runtime(
 ) {
     identity.runtime_status = snapshot.status;
     identity.installed_build = snapshot.installed_build.clone();
+    identity.players = snapshot.players.or(identity.players);
     identity.max_players = snapshot.max_players.or(identity.max_players);
     identity.game_mode = snapshot.game_mode.clone().or(identity.game_mode.take());
     identity.last_synced_at = Some(snapshot.captured_at.clone());

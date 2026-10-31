@@ -3,7 +3,9 @@ import { computed, ref, watch } from "vue";
 import { Eye, Library, Package, Pencil, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
 import AppDialog from "../components/AppDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
+import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
 import { applyInstanceMods, listInstanceModApplyTasks,
   cancelInstanceModApply, listInstanceMods, previewInstanceMods, saveInstanceMods } from "../api/mods";
 import { getInstanceOverview } from "../api/instances";
@@ -13,7 +15,6 @@ import { describeError } from "../lib/commandError";
 import type { InstanceModSummary, ModSchemaStatus } from "../types/mods";
 import { listHostMods, type HostModItem } from "../api/hostMods";
 import { createSerialQueue } from "../lib/serialQueue";
-import { formatBytes } from "../lib/environmentView";
 import { useTasks } from "../composables/useTasks";
 import type { TaskSnapshot } from "../types/contracts";
 import {
@@ -45,6 +46,14 @@ const applyTask = computed<TaskSnapshot | null>(() => {
   return tasks.find(task => ["queued", "running"].includes(task.status)) ?? tasks[0] ?? null;
 });
 const applyTaskError = ref("");
+const applyTaskTone = computed<"running"|"success"|"danger"|"warning">(() => {
+  const status = applyTask.value?.status;
+  return status === "succeeded" ? "success" : status === "failed" ? "danger" : status === "interrupted" ? "warning" : "running";
+});
+const applyTaskStatusLabel = computed(() => {
+  const status = applyTask.value?.status;
+  return status === "succeeded" ? "完成" : status === "failed" ? "失败" : status === "interrupted" ? "待核实" : status === "cancelled" ? "已取消" : "进行中";
+});
 const cancelBusy = ref(false);
 const cancelMessage = ref("");
 const removeTarget = ref<InstanceModSummary | null>(null);
@@ -78,6 +87,12 @@ const finalizedPrepareTasks = new Set<string>();
 const enabledCount = computed(() => items.value.filter(item => item.desiredEnabled === true).length);
 const pendingCount = computed(() => items.value.filter(modNeedsApply).length);
 const disabledCount = computed(() => items.value.filter(item => item.desiredEnabled === false).length);
+const modSummary = computed(() => [
+  { label: "MOD", value: items.value.length },
+  { label: "已启用", value: enabledCount.value, tone: "success" as const },
+  { label: "待应用", value: pendingCount.value, tone: pendingCount.value ? "warning" as const : "default" as const },
+  { label: "已禁用", value: disabledCount.value },
+]);
 
 function statusLabel(status: ModSchemaStatus) {
   return { available: "可配置", partial: "部分支持", noOptions: "无配置项", unavailable: "未准备", failed: "解析失败" }[status];
@@ -466,7 +481,7 @@ function modActionChangeLabel(change: NonNullable<ModApplyPreview["changes"]>[nu
   return change.actionLabel;
 }
 
-async function openApplyPreview(autoApply = false) {
+async function openApplyPreview() {
   const connection = server.value;
   const instanceTarget = target.value;
   const expectedRevision = revision.value;
@@ -491,13 +506,13 @@ async function openApplyPreview(autoApply = false) {
     if (requestEpoch !== epoch || target.value === null
       || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
       || server.value?.recordVersion !== recordVersion) return;
-    if (revision.value !== expectedRevision) throw new Error("MOD 配置版本已变化，请刷新后重新生成预览");
+    if (revision.value !== expectedRevision) throw new Error("MOD 配置已变化，请刷新后重新生成预览");
     if (overview.schemaVersion !== 1 || overview.requestId !== requestIds.overview
       || overview.recordVersion !== recordVersion || overview.configRevision !== expectedRevision
       || overview.target.serverId !== instanceTarget.serverId || overview.target.hostId !== instanceTarget.hostId
       || overview.target.instanceId !== instanceTarget.instanceId || !overview.data.manifestSummary
       || overview.data.manifestSummary.configRevision !== expectedRevision) {
-      throw new Error("运行概览与 MOD 配置版本不一致，请刷新后重试");
+      throw new Error("运行概览与 MOD 配置不一致，请刷新后重试");
     }
     if (serverPreview.schemaVersion !== 1 || serverPreview.requestId !== requestIds.apply
       || serverPreview.target.serverId !== instanceTarget.serverId || serverPreview.target.hostId !== instanceTarget.hostId
@@ -518,12 +533,6 @@ async function openApplyPreview(autoApply = false) {
     serverApplyPreview.value = serverPreview;
     applyPreviewRevision.value = expectedRevision;
     applyPreviewRuntime.value = overview.data.runtime?.status ?? overview.data.identity.runtimeStatus;
-    if (autoApply) {
-      if (applyPreview.value.canApply) {
-        applyPreviewOpen.value = false;
-        await applyMods();
-      }
-    }
   } catch (cause) {
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
@@ -676,7 +685,7 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
         <button class="button" :disabled="workspace.preview.value || !target || loading || applyPreviewLoading || savingWorkshopId !== null
           || !!applyTask && ['queued', 'running'].includes(applyTask.status)
           "
-          @click="openApplyPreview(true)"><Eye :size="15"/>应用更改</button>
+          @click="openApplyPreview"><Eye :size="15"/>应用更改</button>
         <button class="button" :disabled="workspace.preview.value || !target || loading" @click="openHostLibrary"><Library :size="15"/>主机库</button>
         <button class="button" :disabled="loading || !target" @click="refreshAll">
           <RefreshCw :size="16" :class="{ spinning: loading }" />
@@ -688,38 +697,8 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
     <div v-if="error" class="inline-error">{{ error }}</div>
     <div v-if="taskError" class="error-strip">{{ taskError }}</div>
     <div v-if="applyTaskError" class="error-strip">{{ applyTaskError }}</div>
-    <section v-if="applyTask" class="mod-task-state" aria-live="polite">
-      <div>
-        <strong>{{ applyTask.status === 'succeeded' ? 'MOD 应用完成' : applyTask.status === 'failed' ? 'MOD 应用失败' : applyTask.status === 'interrupted' ? 'MOD 应用中断' : '正在应用 MOD' }}</strong>
-        <span>{{ applyStageLabel(applyTask) }}</span>
-        <span v-if="applyTask.status === 'failed'" class="task-failure-detail">{{ applyTask.error?.message ?? '任务错误详情暂不可用' }} <span class="mono">{{ applyTask.error?.code }}</span></span>
-        <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
-      </div>
-      <div class="task-panel-actions">
-        <span class="muted-text mono">{{ applyTask.progress.kind === 'determinate' ? `${applyTask.progress.completed}/${applyTask.progress.total}` : '处理中' }}</span>
-        <button v-if="applyTask.cancelAllowed && ['queued', 'running'].includes(applyTask.status)" class="button subtle" type="button" :disabled="cancelBusy" @click="cancelApply">{{ cancelBusy ? "提交中…" : "取消任务" }}</button>
-      </div>
-    </section>
-    <section v-if="revision !== null" class="summary-line">
-      <div><span class="metric-number">{{ items.length }}</span><span>个 MOD</span></div>
-      <span class="summary-divider" />
-      <div><span class="metric-number">{{ enabledCount }}</span><span>个已启用</span></div>
-      <span class="summary-divider" />
-      <div><span class="metric-number warning-number">{{ pendingCount }}</span><span>个待应用</span></div>
-      <span class="summary-divider" />
-      <div><span class="metric-number">{{ disabledCount }}</span><span>个已禁用</span></div>
-      <span class="summary-divider" />
-      <div class="muted-text">配置版本 {{ revision }}</div>
-    </section>
-    <section v-if="revision !== null" class="mod-apply-options">
-      <label class="mod-backup-choice">
-        <input v-model="createProtectionBackup" type="checkbox"
-          :disabled="workspace.preview.value || !!applyTask && ['queued', 'running'].includes(applyTask.status)"/>
-        应用前创建冷备份
-      </label>
-      <span v-if="!createProtectionBackup" class="muted-text">不创建时，应用失败无法自动恢复原部署</span>
-    </section>
 
+    <SummaryBar v-if="revision !== null" :items="modSummary" label="MOD 摘要"/>
     <div v-if="loading && items.length === 0" class="empty-state"><h2>正在读取 MOD</h2></div>
     <div v-else-if="!loading && items.length === 0" class="empty-state"><h2>尚未发现 MOD</h2></div>
     <div v-else class="table-wrap">
@@ -755,18 +734,31 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
       </table>
     </div>
 
-    <AppDialog v-model:open="hostLibraryOpen" title="从主机 MOD 库添加">
+<FloatingTask v-if="applyTask" label="MOD 应用">
+    <TaskPanel v-if="applyTask" title="应用 MOD" :status-label="applyTaskStatusLabel" :stage-label="applyStageLabel(applyTask)"
+      :tone="applyTaskTone" :queue-position="applyTask.queuePosition" :error="applyTask.error"
+      :progress="applyTask.progress.kind === 'determinate' ? `${applyTask.progress.completed}/${applyTask.progress.total}` : '处理中'"
+      :cancellable="!!applyTask.cancelAllowed && ['queued', 'running'].includes(applyTask.status)" :busy="cancelBusy" @cancel="cancelApply">
+      <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
+    </TaskPanel>
+</FloatingTask>
+    <AppDialog v-model:open="hostLibraryOpen" title="从主机 MOD 库添加" size="lg">
       <div v-if="hostLibraryError" class="error-strip">{{ hostLibraryError }}</div>
       <div v-if="hostLibraryLoading" class="muted-text" role="status">读取主机 MOD 库…</div>
       <div v-else-if="!hostLibraryItems.length" class="empty-state"><h2>主机 MOD 库为空</h2><p class="muted-text">请先在主机级“MOD 库”添加内容。</p></div>
       <div v-else class="table-wrap">
-        <table>
-          <thead><tr><th>Workshop ID</th><th>内容摘要</th><th>大小</th><th class="table-action">操作</th></tr></thead>
+        <table class="host-library-table">
+          <thead><tr><th>图片</th><th>名称</th><th>ID</th><th>作者</th><th>版本</th><th class="table-action">操作</th></tr></thead>
           <tbody>
             <tr v-for="item in hostLibraryItems" :key="`${item.workshopId}:${item.contentDigest}`">
+              <td>
+                <img v-if="item.previewUrl" class="host-library-thumb" :src="item.previewUrl" :alt="item.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
+                <span v-else class="host-library-thumb host-library-placeholder"><Package :size="16"/></span>
+              </td>
+              <td><strong class="host-library-name">{{ item.name ?? "—" }}</strong></td>
               <td class="mono">{{ item.workshopId }}</td>
-              <td class="mono">{{ item.contentDigest.slice(0, 12) }}</td>
-              <td>{{ item.sizeBytes === null ? "未知" : formatBytes(item.sizeBytes) }}</td>
+              <td>{{ item.author ?? "未知" }}</td>
+              <td class="mono">{{ item.version ?? "—" }}</td>
               <td class="table-action">
                 <button class="text-button"
                   :disabled="savingWorkshopId === item.workshopId || items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null && current.artifactDigest === item.contentDigest)"
@@ -781,7 +773,7 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
       <template #footer><button class="button" type="button" @click="hostLibraryOpen = false">关闭</button></template>
     </AppDialog>
 
-    <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod?.schema.metadata.name ?? editingMod?.workshopId ?? ''}`">
+    <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod?.schema.metadata.name ?? editingMod?.workshopId ?? ''}`" size="lg">
       <div v-if="editingMod" class="mod-config-editor">
         <div class="mod-config-meta">
           <span class="mono">{{ editingMod.workshopId }}</span>
@@ -829,16 +821,15 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
       </template>
     </AppDialog>
 
-    <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容、分片与恢复条件">
+    <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容、分片与恢复条件" size="lg">
       <div v-if="applyPreviewLoading" class="empty-state"><h2>正在核对应用条件</h2></div>
       <div v-else-if="applyPreviewError" class="inline-error">{{ applyPreviewError }}</div>
       <div v-else-if="applyPreview" class="mod-apply-preview">
         <div class="mod-apply-summary">
-          <div><span>配置版本</span><strong class="mono">{{ applyPreviewRevision }}</strong></div>
           <div><span>专服状态</span><strong>{{ runtimeLabel(applyPreviewRuntime) }}</strong></div>
           <div><span>目标分片</span><strong>{{ applyPreview.shards.map(shard => shard === 'master' ? 'Master' : 'Caves').join(' / ') || '无待应用变更' }}</strong></div>
         </div>
-        <div v-if="applyPreviewStale" class="error-strip">MOD 配置版本已变化，此预览已失效。请重新生成。</div>
+        <div v-if="applyPreviewStale" class="error-strip">MOD 配置已变化，此预览已失效。请重新生成。</div>
         <section class="mod-apply-section">
           <h3>MOD 变更 <span class="muted-text">{{ applyPreview.changes.length }}</span></h3>
           <p v-if="!applyPreview.changes.length" class="muted-text">期望与已部署状态一致</p>
@@ -855,7 +846,6 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
             <input v-model="createProtectionBackup" type="checkbox"/>
             应用前创建冷备份
           </label>
-          <p v-if="!createProtectionBackup" class="muted-text">不创建时，应用失败无法自动恢复原部署</p>
         </section>
         <div v-if="applyPreview.warnings.length" class="mod-preview-warning-list">
           <p v-for="warning in applyPreview.warnings" :key="warning">{{ warning }}</p>
@@ -868,7 +858,7 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
       <template #footer>
         <button class="button" type="button" @click="applyPreviewOpen = false">关闭</button>
         <button class="button primary" type="button" :disabled="applyPreviewLoading || !applyPreview || applyPreviewStale"
-          @click="openApplyPreview(false)">重新核对</button>
+          @click="openApplyPreview">重新核对</button>
         <button class="button primary" type="button" :disabled="applyPreviewLoading || applyBusy || !applyPreview?.canApply
           || !serverApplyPreview || applyPreviewStale || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
           @click="applyMods">{{ applyBusy ? '正在提交…' : '应用 MOD' }}</button>
@@ -892,3 +882,31 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
     </AppDialog>
   </div>
 </template>
+
+
+<style scoped>
+.host-library-table { table-layout: fixed; }
+.host-library-table th:nth-child(1) { width: 68px; }
+.host-library-table th:nth-child(2) { width: 28%; }
+.host-library-table th:nth-child(3) { width: 17%; }
+.host-library-table th:nth-child(4) { width: 23%; }
+.host-library-table th:nth-child(5) { width: 72px; }
+.host-library-table th:nth-child(6) { width: 82px; }
+.host-library-table td { vertical-align: middle; }
+.host-library-table td:nth-child(3) { overflow-wrap: anywhere; }
+.host-library-thumb {
+  display: block;
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  min-height: 40px;
+  max-height: 40px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--surface-muted);
+}
+.host-library-placeholder { display: grid; place-items: center; color: var(--text-tertiary); }
+.host-library-name { display: block; font-weight: 500; overflow-wrap: anywhere; }
+</style>

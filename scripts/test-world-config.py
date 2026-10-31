@@ -134,6 +134,17 @@ class WorldConfigTests(unittest.TestCase):
         self.assertEqual(len(list((self.instance / "desired-secrets").iterdir())), 2)
         self.assertEqual(MODULE.get_config(self.request())["data"]["tokenStatus"], "configured")
 
+    def test_reveal_returns_secrets_only_on_explicit_request(self):
+        MODULE.save_config(self.request("save",
+            tokenChange={"action": "replace", "value": "secret-token"},
+            serverPasswordChange={"action": "replace", "value": "secret-password"}))
+        public = json.dumps(MODULE.get_config(self.request()))
+        self.assertNotIn("secret-token", public)
+        self.assertNotIn("secret-password", public)
+        revealed = MODULE.reveal_secrets(self.request("reveal"))
+        self.assertEqual(revealed["token"], "secret-token")
+        self.assertEqual(revealed["serverPassword"], "secret-password")
+
     def test_revision_conflict_and_invalid_option_do_not_write(self):
         stale = self.request("save", expectedRevision=2)
         with self.assertRaises(MODULE.Rejected) as error:

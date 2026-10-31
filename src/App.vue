@@ -9,7 +9,6 @@ import { useTheme } from "./composables/useTheme";
 import { useTasks } from "./composables/useTasks";
 import { useOperations } from "./composables/useOperations";
 import { useBuildTasks } from "./composables/useBuildTasks";
-import AppSelect from "./components/AppSelect.vue";
 import IconButton from "./components/IconButton.vue";
 import { elapsedLabel, operationKindLabel, operationTargetLabel, stageLabel, taskOperationLabel, taskTargetLabel } from "./lib/operationView";
 import { refreshActiveTasks } from "./lib/taskRefresh";
@@ -26,14 +25,12 @@ const activeServerId = computed(() => String(route.params.serverId ?? ""));
 const activeInstanceId = computed(() => String(route.params.instanceId ?? ""));
 const activeServer = computed(() => workspace.servers.value.find(server => server.serverId === activeServerId.value));
 const activeInstance = computed(() => activeServer.value?.hostId ? workspace.instances(activeServer.value.hostId).find(instance => instance.instanceId === activeInstanceId.value) : undefined);
-const hostOptions = computed(() => workspace.servers.value.map(server => ({ label: server.displayName, value: server.serverId })));
 const breadcrumb = computed(() => [activeServer.value?.displayName, activeInstance.value?.displayName, String(route.meta.title ?? "主机")].filter(Boolean).join(" / "));
 const instancePages = [
     { name: "overview", label: "概览", icon: Gauge }, { name: "world", label: "世界", icon: Globe2 },
     { name: "mods", label: "MOD", icon: Wrench }, { name: "backups", label: "备份", icon: HardDrive },
     { name: "diagnostics", label: "诊断", icon: TerminalSquare },
 ];
-function goToServer(serverId: string) { void router.push(`/hosts/${serverId}/instances`); }
 function hostRoute(page: string) { void router.push(activeServerId.value ? `/hosts/${activeServerId.value}/${page}` : "/hosts"); }
 
 const now = ref(Date.now());
@@ -111,11 +108,6 @@ onUnmounted(() => {
           </small>
         </div>
       </div>
-      <AppSelect :model-value="activeServerId" :options="hostOptions" label="选择主机" placeholder="选择主机" :disabled="hostOptions.length === 0" @update:model-value="goToServer">
-        <template #icon>
-          <Server :size="16"/>
-        </template>
-      </AppSelect>
       <nav class="app-nav" aria-label="主导航">
         <div v-if="!activeInstanceId" class="nav-group">
           <div class="nav-group-label">
@@ -173,7 +165,7 @@ onUnmounted(() => {
             版本
           </span>
           <span>
-            0.2.0
+            1.0.1 Bate
           </span>
         </div>
       </div>
@@ -202,7 +194,7 @@ onUnmounted(() => {
           </template>
           <template v-else>
             <strong>{{activeInstance?.displayName ?? activeServer?.displayName ?? '荒野中枢'}}</strong>
-            <span class="muted-text">{{activeServer ? 'SSH 已连接' : '选择主机开始'}}</span>
+            <span class="muted-text">{{activeServer ? 'SSH 已连接' : '从主机列表进入'}}</span>
           </template>
         </div>
         <button v-if="route.path!=='/tasks'" class="text-button" type="button" @click="router.push('/tasks')">

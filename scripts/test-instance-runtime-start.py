@@ -351,6 +351,7 @@ class InstanceRuntimeStartTests(unittest.TestCase):
     def test_fresh_inspection_reads_real_version_and_ports_without_mutating_instance(self):
         before = {path.relative_to(self.root): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
         with patch.object(MODULE, "docker", side_effect=self.inspection_docker(self.containers())), \
+             patch.object(MODULE, "a2s_player_count", side_effect=[2, 3]), \
              patch.object(MODULE.os, "fchown") as chown:
             response = MODULE.inspect_instances(self.inspection_request())
         snapshot = response["instances"][0]
@@ -358,6 +359,7 @@ class InstanceRuntimeStartTests(unittest.TestCase):
         self.assertEqual(snapshot["installedBuild"], "756039")
         self.assertEqual(snapshot["buildSource"], "containerFile")
         self.assertEqual(snapshot["maxPlayers"], 6)
+        self.assertEqual(snapshot["players"], 5)
         self.assertEqual(snapshot["desiredVsDeployed"], "inSync")
         self.assertEqual(len(snapshot["ports"]), 7)
         public = [port["hostPort"] for port in snapshot["ports"] if port["required"] and port["published"]]

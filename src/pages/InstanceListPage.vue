@@ -5,6 +5,7 @@ import { useRoute, useRouter } from "vue-router";
 import InstanceCreateDialog from "../components/InstanceCreateDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
@@ -31,6 +32,11 @@ watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.rec
 const instances=computed(()=>data.value?.instances ?? []);
 const running=computed(()=>instances.value.filter(item=>item.runtimeStatus==='running').length);
 const unknown=computed(()=>instances.value.filter(item=>item.runtimeStatus==='unknown').length);
+const summaryItems=computed(()=>[
+  {label:"专服",value:instances.value.length},
+  {label:"运行中",value:running.value,tone:"success" as const},
+  {label:"未核实",value:unknown.value,tone:unknown.value?"warning" as const:"default" as const},
+]);
 async function creationSucceeded(created:{serverId:string;hostId:string;instanceId:string}){
   await refresh();
   createdTarget.value=created;
@@ -108,9 +114,10 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
     <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul><button v-if="server" class="text-button" @click="router.push(`/hosts/${server.serverId}/connection`)">连接设置</button><button v-if="server" class="text-button" @click="router.push(`/hosts/${server.serverId}/environment`)">主机环境</button></div>
     <div v-if="loading && !data" class="empty-state" role="status">读取专服列表…</div>
     <template v-else-if="data">
-      <section class="summary-line"><div><span class="metric-number">{{instances.length}}</span><span>个专服</span></div><span class="summary-divider"/><div><span>{{running}} 个运行中</span><span v-if="unknown">{{unknown}} 个未核实</span></div><StatusLabel v-if="stale" tone="warning" label="结果已过期"/></section>
+      <SummaryBar :items="summaryItems" label="专服摘要"/>
+      <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
       <div v-if="!instances.length" class="empty-state"><ServerCog :size="28"/><h2>暂无专服</h2></div>
-      <div v-else class="table-wrap"><table><thead><tr><th>名称</th><th>模式</th><th>洞穴</th><th>状态</th><th>玩家</th><th>版本</th><th>最近运行采集</th><th/></tr></thead><tbody><tr v-for="item in instances" :key="item.instanceId"><td><div class="table-primary"><ServerCog :size="17"/><strong>{{item.displayName}}</strong></div><small v-if="!item.manifestAvailable" class="table-sub">配置未完成</small></td><td>{{gameModeLabel(item.gameMode)}}</td><td>{{item.cavesEnabled === null ? '未知' : item.cavesEnabled ? '启用' : '关闭'}}</td><td><StatusLabel :tone="instanceState(item).tone" :label="instanceState(item).label"/><small v-if="taskFor(item)" class="table-sub">{{taskOperationLabel(taskFor(item)!.operation)}} · {{stageLabel(taskFor(item)!.stage)}}</small><button v-if="taskFor(item)" class="text-button" type="button" @click="selectedTask=taskFor(item)??null"><FileText :size="14"/>任务记录</button></td><td>{{item.runtimeStatus==='stopped'?'—':item.players===null?(item.maxPlayers===null?'未知':`未知 / ${item.maxPlayers}`):`${item.players} / ${item.maxPlayers ?? '未知'}`}}</td><td class="mono">{{item.installedBuild ?? '未知'}}</td><td class="muted-text">{{formatBeijingDateTime(item.lastSyncedAt)}}</td><td class="table-action"><button v-if="canDeleteInstance(item)" class="icon-button" type="button" :aria-label="`预览删除专服 ${item.displayName}`" title="预览删除专服" @click="openDelete(item)" ><Trash2 :size="15"/></button><button class="text-button" :disabled="stale || !canInspectInstance(item)" @click="enter(item)">进入 <ArrowRight :size="15"/></button></td></tr></tbody></table></div>
+      <div v-else class="table-wrap"><table><thead><tr><th>名称</th><th>模式</th><th>洞穴</th><th>状态</th><th>玩家</th><th>版本</th><th>最近运行采集</th><th/></tr></thead><tbody><tr v-for="item in instances" :key="item.instanceId"><td><div class="table-primary"><ServerCog :size="17"/><strong>{{item.displayName}}</strong></div><small v-if="!item.manifestAvailable" class="table-sub">配置未完成</small></td><td>{{gameModeLabel(item.gameMode)}}</td><td>{{item.cavesEnabled === null ? '未知' : item.cavesEnabled ? '启用' : '关闭'}}</td><td><StatusLabel :tone="instanceState(item).tone" :label="instanceState(item).label"/><small v-if="taskFor(item)" class="table-sub">{{taskOperationLabel(taskFor(item)!.operation)}} · {{stageLabel(taskFor(item)!.stage)}}</small><button v-if="taskFor(item)" class="text-button" type="button" @click="selectedTask=taskFor(item)??null"><FileText :size="14"/>任务记录</button></td><td>{{item.runtimeStatus==='stopped'?'—':item.players===null?(item.maxPlayers===null?'未知':`未知 / ${item.maxPlayers}`):`${item.players} / ${item.maxPlayers ?? '未知'}`}}</td><td class="mono">{{item.installedBuild ?? '未知'}}</td><td class="muted-text">{{formatBeijingDateTime(item.lastSyncedAt)}}</td><td class="table-action"><div class="row-actions"><button class="icon-button" type="button" :aria-label="`预览删除专服 ${item.displayName}`" :title="canDeleteInstance(item) ? '预览删除专服' : '当前状态不可删除'" :disabled="!canDeleteInstance(item)" @click="openDelete(item)"><Trash2 :size="15"/></button><button class="text-button" :disabled="stale || !canInspectInstance(item)" @click="enter(item)">进入 <ArrowRight :size="15"/></button></div></td></tr></tbody></table></div>
     </template>
     <div v-else-if="!error" class="empty-state"><ServerCog :size="28"/><h2>尚未读取专服</h2></div>
     <AppDialog :open="!!deleteTarget" title="删除专服" description="只移除已核实归属且未运行的 Docker 容器与网络；启动失败且反复重启的受管容器会先强制停止。实例目录会完整移入 retired 归档；不删除 DST 镜像和其他实例资源。" @update:open="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
@@ -140,3 +147,8 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
     </AppDialog>
   </div>
 </template>
+
+
+<style scoped>
+.row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; }
+</style>

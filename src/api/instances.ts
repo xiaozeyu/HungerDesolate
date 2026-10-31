@@ -59,6 +59,9 @@ export function createInstanceBackup(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number;
   expectedRevision: number; captureMode: BackupCaptureMode; operationId: string; backupId: string; reason: string;
 }): Promise<InstanceBackupTaskResponse> { return call("create_instance_backup", request); }
+export function cancelInstanceBackup(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; operationId: string;
+}): Promise<InstanceBackupTaskResponse> { return call("cancel_instance_backup", request); }
 export function getInstanceBackupTask(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; operationId: string;
 }): Promise<InstanceBackupTaskResponse> { return call("get_instance_backup_task", request); }
@@ -71,6 +74,7 @@ export function downloadInstanceBackup(request:{schemaVersion:1;requestId:string
 export function listBackupDownloadTasks(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number}):Promise<BackupDownloadResponse[]>{return call("list_backup_download_tasks",request);}
 export function deleteInstanceBackup(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRevision:number;backupId:string;expectedChecksum:string}):Promise<{schemaVersion:1;requestId:string;target:InstanceTarget;backupId:string;deleted:boolean}>{return call("delete_instance_backup",request);}
 export function restoreInstanceBackup(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRevision:number;backupId:string;operationId:string;createProtectionBackup:boolean}):Promise<InstanceBackupTaskResponse>{return call("restore_instance_backup",request);}
+export function cancelInstanceRestore(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;operationId:string}):Promise<InstanceBackupTaskResponse>{return call("cancel_instance_restore",request);}
 export function getInstanceRestoreTask(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;operationId:string}):Promise<InstanceBackupTaskResponse>{return call("get_instance_restore_task",request);}
 export function listInstanceRestoreTasks(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number}):Promise<InstanceBackupTaskResponse[]>{return call("list_instance_restore_tasks",request);}
 

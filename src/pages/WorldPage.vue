@@ -7,17 +7,22 @@ import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import { applyWorldConfig, getWorldConfig, saveWorldConfig } from "../api/world";
 import { useWorkspace } from "../composables/useWorkspace";
+import { useOperations } from "../composables/useOperations";
 import { usePageTarget } from "../composables/usePageTarget";
 import { describeError, type UserError } from "../lib/commandError";
 import { dstGameModeOptions, languageOptions } from "../lib/dstGameModes";
 import { defaultWorldSettings, optionValue, optionValuesForShard, updateShardOption, visibleWorldOptions } from "../lib/dstWorldOptions";
 import { copyWorldSettings } from "../lib/worldConfigDraft";
+import { clearWorldDraft, readWorldDraft, writeWorldDraft } from "../lib/worldDraft";
+import { operationTargetKey } from "../lib/operationView";
 import type { DstWorldCategory, DstWorldShard, WorldConfig, WorldSettings } from "../types/world";
 
 const workspace = useWorkspace();
+const operations = useOperations();
 const { server, instance, target, instanceName } = usePageTarget();
+const targetKey = computed(() => target.value ? operationTargetKey(target.value) : "");
+const applyBusy = computed(() => !!targetKey.value && operations.isRunningFor(targetKey.value, ["worldApply"]));
 const data = ref<WorldConfig | null>(null);
-const applyBusy = ref(false);
 const draft = reactive<WorldSettings>(defaultWorldSettings(false));
 const baseDesired = ref<WorldSettings | null>(null), baseRevision = ref(0);
 const loading = ref(false), saving = ref(false), stale = ref(false);
@@ -130,11 +135,15 @@ async function refresh() {
     }
     data.value = response.data;
     if (!preserveDraft) {
-      assignSettings(response.data.desired);
+      const restored = readWorldDraft(instanceTarget, response.configRevision);
+      const useRestored = restored !== null && JSON.stringify(restored) !== JSON.stringify(response.data.desired);
+      if (!useRestored) clearWorldDraft(instanceTarget);
+      assignSettings(useRestored ? restored : response.data.desired);
       baseDesired.value = copySettings(response.data.desired);
       baseRevision.value = response.configRevision;
       tokenValue.value = "";
       passwordValue.value = "";
+      if (useRestored) saveMessage.value = "已恢复未保存的草稿。";
     } else if (response.configRevision !== baseRevision.value) {
       error.value = { code: "REVISION_CONFLICT", message: "期望配置已被其他操作更新；本地草稿已保留，请比较后重载或重新编辑。", recoverySteps: [], field: null };
     }
@@ -266,37 +275,44 @@ async function applyWorld() {
       || loading.value || saving.value || hasChanges.value || stale.value || workspace.preview.value) return;
   const ticketEpoch = epoch, revision = baseRevision.value;
   const requestId = crypto.randomUUID();
-  applyBusy.value = true;
   error.value = null;
   saveMessage.value = "正在检查并部署世界配置…";
-  try {
-    const result = await applyWorldConfig({
-      schemaVersion: 1, requestId, target: instanceTarget,
-      expectedRecordVersion: connection.recordVersion, expectedRevision: revision,
-      operationId: crypto.randomUUID(),
-    });
-    if (epoch !== ticketEpoch || target.value?.instanceId !== instanceTarget.instanceId
-        || server.value?.recordVersion !== connection.recordVersion) return;
-    if (result.requestId !== requestId || result.revision !== revision
-        || result.runtimeVerified !== false || !Array.isArray(result.warnings)
-        || result.warnings.length > 128
-        || !Array.isArray(result.runningShards) || result.runningShards.length > 2
-        || result.target.serverId !== instanceTarget.serverId || result.target.hostId !== instanceTarget.hostId
-        || result.target.instanceId !== instanceTarget.instanceId) {
-      throw new Error("配置应用结果身份、版本或验证状态无效");
-    }
-    saveMessage.value = [result.runningShards.length
-      ? "世界配置已部署并重启原运行分片；隔离运行验证仍待完成。"
-      : "世界配置已部署，专服保持停止；隔离运行验证仍待完成。", ...result.warnings].join(" ");
-    await refresh();
-  } catch (cause) {
-    if (epoch === ticketEpoch) {
-      error.value = describeError(cause);
-      saveMessage.value = "";
-    }
-  } finally {
-    if (epoch === ticketEpoch) applyBusy.value = false;
+  const outcome = await operations.run({
+    kind: "worldApply",
+    target: instanceTarget,
+    title: "应用世界配置",
+    stage: "检查并应用",
+    work: async setStage => {
+      setStage("检查并应用");
+      const result = await applyWorldConfig({
+        schemaVersion: 1, requestId, target: instanceTarget,
+        expectedRecordVersion: connection.recordVersion, expectedRevision: revision,
+        operationId: crypto.randomUUID(),
+      });
+      if (result.requestId !== requestId || result.revision !== revision
+          || result.runtimeVerified !== false || !Array.isArray(result.warnings)
+          || result.warnings.length > 128
+          || !Array.isArray(result.runningShards) || result.runningShards.length > 2
+          || result.target.serverId !== instanceTarget.serverId || result.target.hostId !== instanceTarget.hostId
+          || result.target.instanceId !== instanceTarget.instanceId) {
+        throw new Error("配置应用结果身份、版本或验证状态无效");
+      }
+      setStage("验证部署结果");
+      return result;
+    },
+  });
+  if (epoch !== ticketEpoch || target.value?.instanceId !== instanceTarget.instanceId
+      || server.value?.recordVersion !== connection.recordVersion) return;
+  if (outcome.error) {
+    error.value = outcome.error;
+    saveMessage.value = "";
+    return;
   }
+  const result = outcome.result!;
+  saveMessage.value = [result.runningShards.length
+    ? "世界配置已部署并重启原运行分片；隔离运行验证仍待完成。"
+    : "世界配置已部署，专服保持停止；隔离运行验证仍待完成。", ...result.warnings].join(" ");
+  await refresh();
 }
 
 function changeWorldOption(itemKey: string, value: string) {
@@ -346,6 +362,12 @@ watch([() => target.value?.serverId, () => target.value?.hostId, () => target.va
 }, { immediate: true, flush: "sync" });
 
 watch(draft, () => { draftVersion.value++; pendingOperationId.value = ""; if (!applyBusy.value) saveMessage.value = ""; }, { deep: true, flush: "sync" });
+watch(draft, () => {
+  const selected = target.value;
+  if (!selected || !baseDesired.value) return;
+  if (hasChanges.value) writeWorldDraft(selected, baseRevision.value, draft);
+  else clearWorldDraft(selected);
+}, { deep: true, flush: "post" });
 watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperationId.value = ""; if (!applyBusy.value) saveMessage.value = ""; }, { flush: "sync" });
 </script>
 
@@ -369,6 +391,14 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
     <div v-else-if="!target && !workspace.preview.value" class="empty-state"><h2>无法确定专服</h2><p>返回专服列表后重新进入。</p></div>
     <template v-else>
       <div v-if="stale" class="environment-error" role="status">显示上次读取的配置；当前结果已过期，保存已停用。</div>
+      <section v-if="data" class="summary-line">
+        <div><span class="metric-number">{{data.revision}}</span><span>期望版本</span></div>
+        <span class="summary-divider"/>
+        <div><span class="metric-number">{{data.deployedRevision ?? '—'}}</span><span>已部署版本</span></div>
+        <span class="summary-divider"/>
+        <StatusLabel :tone="status === 'inSync' ? 'success' : 'warning'" :label="status === 'inSync' ? '已应用' : '待应用'"/>
+        <span class="muted-text">{{hasChanges ? '有未保存更改' : '没有未保存更改'}}</span>
+      </section>
       <nav class="world-view-tabs" aria-label="世界配置分类">
         <button type="button" :aria-pressed="activeView==='basic'" :class="{active:activeView==='basic'}" @click="selectView('basic')">基本设置</button>
         <button type="button" :aria-pressed="activeView==='access'" :class="{active:activeView==='access'}" @click="selectView('access')">访问与联机</button>

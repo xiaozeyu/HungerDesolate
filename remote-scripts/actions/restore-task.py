@@ -114,6 +114,114 @@ def journal_tail(directory):
         reject("BACKUP_TASK_STATE_INVALID")
 
 
+def registry_lock():
+    safe_dir(ROOT / "locks")
+    fd = os.open(ROOT / "locks" / "registry.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def admit_queue(request):
+    task_id = request["operationId"]
+    lock_fd = registry_lock()
+    try:
+        registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+        if (registry.get("schemaVersion") != 1 or registry.get("hostId") != request["hostId"]
+                or not isinstance(registry.get("instances"), list)):
+            reject("BACKUP_REGISTRY_INVALID")
+        if not isinstance(registry.get("heavyQueue"), list):
+            registry["heavyQueue"] = []
+        entry = next((item for item in registry["instances"]
+                      if isinstance(item, dict) and item.get("instanceId") == request["instanceId"]), None)
+        if entry is None:
+            reject("BACKUP_REGISTRY_INVALID")
+        pending = entry.get("pendingTaskId")
+        if pending and pending != task_id:
+            reject("INSTANCE_BUSY")
+        entry["pendingTaskId"] = task_id
+        queue = [item for item in registry["heavyQueue"] if item.get("taskId") != task_id]
+        queue.append({"taskId": task_id, "operation": "backupRestore", "instanceId": request["instanceId"],
+                      "requestedAtUnixSeconds": now(), "ownerToken": str(uuid.uuid4()), "generation": 1})
+        registry["heavyQueue"] = queue
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(ROOT / "registry.json", registry)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def dequeue(task_id):
+    path = ROOT / "registry.json"
+    if not path.exists():
+        return
+    try:
+        lock_fd = registry_lock()
+    except OSError:
+        return
+    try:
+        registry = read_json(path, 2 * 1024 * 1024)
+        queue = registry.get("heavyQueue")
+        if not isinstance(queue, list):
+            return
+        remaining = [item for item in queue if item.get("taskId") != task_id]
+        if len(remaining) == len(queue):
+            return
+        registry["heavyQueue"] = remaining
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(path, registry)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def release_queue(task_id):
+    path = ROOT / "registry.json"
+    if not path.exists():
+        return
+    try:
+        lock_fd = registry_lock()
+    except OSError:
+        return
+    try:
+        registry = read_json(path, 2 * 1024 * 1024)
+        if not isinstance(registry.get("heavyQueue"), list) or not isinstance(registry.get("instances"), list):
+            return
+        queue = [item for item in registry["heavyQueue"] if item.get("taskId") != task_id]
+        changed = len(queue) != len(registry["heavyQueue"])
+        for entry in registry["instances"]:
+            if isinstance(entry, dict) and entry.get("pendingTaskId") == task_id:
+                entry["pendingTaskId"] = None
+                changed = True
+        if not changed:
+            return
+        registry["heavyQueue"] = queue
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(path, registry)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def queue_position(task_id):
+    try:
+        registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    queue = registry.get("heavyQueue")
+    if not isinstance(queue, list):
+        return None
+    ordered = sorted((item for item in queue if isinstance(item, dict)),
+                     key=lambda item: item.get("requestedAtUnixSeconds", 0))
+    for index, item in enumerate(ordered, 1):
+        if item.get("taskId") == task_id:
+            return index
+    return None
+
+
 def load(task_id):
     if not valid_uuid(task_id):
         reject("BACKUP_TASK_INPUT_INVALID")
@@ -122,9 +230,11 @@ def load(task_id):
     state = read_json(directory / "status.json")
     if (state.get("schemaVersion") != 1 or state.get("taskId") != task_id
             or state.get("operationId") != task_id or state.get("operation") != "backupRestore"
-            or state.get("status") not in ("queued", "running", "succeeded", "failed", "interrupted")):
+            or state.get("status") not in ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")):
         reject("BACKUP_TASK_STATE_INVALID")
     state["journal"] = journal_tail(directory)
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
+        release_queue(directory.name)
     return state
 
 
@@ -138,8 +248,9 @@ def set_status(directory, status, stage, completed=None, result=None, error=None
         state.update(fields)
     if status == "running" and state.get("startedAt") is None:
         state["startedAt"] = now()
-    if status in ("succeeded", "failed", "interrupted"):
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
         state["finishedAt"] = now()
+        state["cancelAllowed"] = False
     atomic_json(directory / "status.json", state)
     journal = directory / "journal.jsonl"
     previous = journal.read_bytes() if journal.exists() else b""
@@ -636,10 +747,122 @@ def request_host_id(staging):
     return manifest.get("hostId")
 
 
+def wait_lock(handle, cancel_path):
+    while True:
+        if cancel_path.exists():
+            reject("BACKUP_CANCELLED")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(0.5)
+
+
+def controller_active():
+    result = subprocess.run(["systemctl", "is-active", "--quiet", "famine-queue-controller"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=5, check=False)
+    return result.returncode == 0
+
+
+CONTROLLER_TASKS = {
+    "modApply": ROOT / "mod-apply-tasks",
+    "backupCreate": ROOT / "backup-tasks",
+    "backupRestore": ROOT / "restore-tasks",
+    "hostModPrepare": ROOT / "host-mod-tasks",
+}
+
+
+def controller_main():
+    safe_dir(ROOT / "locks")
+    lock_fd = os.open(ROOT / "locks" / "queue-controller.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(lock_fd)
+        return
+    try:
+        idle = 0
+        while True:
+            try:
+                registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                time.sleep(1)
+                continue
+            queue = registry.get("heavyQueue")
+            if not isinstance(queue, list):
+                return
+            ordered = sorted((item for item in queue if isinstance(item, dict)),
+                             key=lambda item: item.get("requestedAtUnixSeconds", 0))
+            if not ordered:
+                idle += 1
+                if idle >= 3:
+                    return
+                time.sleep(1)
+                continue
+            idle = 0
+            head = ordered[0]
+            task_id = head.get("taskId")
+            task_dir = CONTROLLER_TASKS.get(head.get("operation"))
+            if not valid_uuid(task_id):
+                return
+            if task_dir is None:
+                time.sleep(1)
+                continue
+            worker = task_dir / task_id / "worker.py"
+            if not worker.exists():
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            try:
+                state = read_json(task_dir / task_id / "status.json", 262144)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            if state.get("status") in ("succeeded", "failed", "cancelled", "interrupted"):
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            request = read_json(task_dir / task_id / "request.json")
+            instance_id = request.get("instanceId")
+            instance = ROOT / "instances" / instance_id if isinstance(instance_id, str) else None
+            heavy = maintenance = instance_lock = None
+            try:
+                heavy = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                fcntl.flock(heavy, fcntl.LOCK_EX)
+                if instance is not None:
+                    safe_dir(instance / "locks")
+                    maintenance = os.open(instance / "locks" / "world-config.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    fcntl.flock(maintenance, fcntl.LOCK_EX)
+                    instance_lock = os.open(instance / "locks" / "instance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    fcntl.flock(instance_lock, fcntl.LOCK_EX)
+                env = dict(os.environ)
+                env["FAMINE_CONTROLLER_LEASE"] = task_id
+                subprocess.run([sys.executable, "-I", str(worker), "worker", task_id],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=env, check=False)
+            finally:
+                for fd in (instance_lock, maintenance, heavy):
+                    if fd is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+            try:
+                final = read_json(task_dir / task_id / "status.json", 262144)
+                if final.get("status") in ("succeeded", "failed", "cancelled", "interrupted"):
+                    release_queue(task_id)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                pass
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def _worker_impl(task_id):
     directory = TASKS / task_id
+    cancel_path = directory / "cancel.request"
     state = load(task_id)
-    if state["status"] in ("succeeded", "failed", "interrupted"):
+    if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
         return state
     request = read_json(directory / "request.json")
     set_status(directory, "running", "preflight")
@@ -655,12 +878,17 @@ def _worker_impl(task_id):
     mods_apply_ns, mods_download_ns = load_restore_mod_helpers(directory)
     instance, manifest = verify_instance(request)
     runtime_before, roles = runtime(request["instanceId"], manifest)
-    heavy = open(ROOT / "locks" / "heavy.lock", "a+b")
-    maintenance = open(instance / "locks" / "world-config.lock", "a+b")
-    instance_lock = open(instance / "locks" / "instance.lock", "a+b")
-    fcntl.flock(heavy.fileno(), fcntl.LOCK_EX)
-    fcntl.flock(maintenance.fileno(), fcntl.LOCK_EX)
-    fcntl.flock(instance_lock.fileno(), fcntl.LOCK_EX)
+    lease = os.environ.get("FAMINE_CONTROLLER_LEASE") == task_id
+    heavy = maintenance = instance_lock = None
+    if not lease:
+        heavy = open(ROOT / "locks" / "heavy.lock", "a+b")
+        maintenance = open(instance / "locks" / "world-config.lock", "a+b")
+        instance_lock = open(instance / "locks" / "instance.lock", "a+b")
+        wait_lock(heavy, cancel_path)
+        dequeue(task_id)
+        wait_lock(maintenance, cancel_path)
+        wait_lock(instance_lock, cancel_path)
+    if cancel_path.exists(): reject("BACKUP_CANCELLED")
     protection_id = str(uuid.uuid4())
     recovery = instance / (".restore-recovery-" + task_id)
     staging = instance / (".restore-staging-" + task_id)
@@ -991,9 +1219,12 @@ def _worker_impl(task_id):
                           error=error_payload(code, request, task_id, True, details))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-        fcntl.flock(instance_lock.fileno(), fcntl.LOCK_UN); instance_lock.close()
-        fcntl.flock(maintenance.fileno(), fcntl.LOCK_UN); maintenance.close()
-        fcntl.flock(heavy.fileno(), fcntl.LOCK_UN); heavy.close()
+        if instance_lock is not None:
+            fcntl.flock(instance_lock.fileno(), fcntl.LOCK_UN); instance_lock.close()
+        if maintenance is not None:
+            fcntl.flock(maintenance.fileno(), fcntl.LOCK_UN); maintenance.close()
+        if heavy is not None:
+            fcntl.flock(heavy.fileno(), fcntl.LOCK_UN); heavy.close()
 
 
 def worker(task_id):
@@ -1005,7 +1236,9 @@ def worker(task_id):
             state = load(task_id)
             request = read_json(directory / "request.json")
             code = getattr(failure, "code", "BACKUP_RESTORE_WORKER_FAILED")
-            if state["status"] not in ("succeeded", "failed", "interrupted"):
+            if code == "BACKUP_CANCELLED":
+                return set_status(directory, "cancelled", "cancelled")
+            if state["status"] not in ("succeeded", "failed", "cancelled", "interrupted"):
                 return set_status(directory, "failed", state.get("stage", "preflight"),
                                   error=error_payload(code, request, task_id, True))
         except Exception:
@@ -1040,9 +1273,9 @@ def start(request):
     atomic_json(directory / "status.json", {"schemaVersion": 1, "taskId": request["operationId"], "operationId": request["operationId"],
         "target": {"hostId": request["hostId"], "instanceId": request["instanceId"]}, "operation": "backupRestore", "status": "queued", "stage": "queued",
         "lastCompletedStage": None, "progress": {"kind": "indeterminate"}, "sequence": 1, "createdAt": created, "startedAt": None, "finishedAt": None,
-        "cancelAllowed": False, "observation": "live", "result": None, "error": None})
+        "cancelAllowed": True, "observation": "live", "result": None, "error": None})
     atomic_bytes(directory / "journal.jsonl", canonical({"sequence": 1, "status": "queued", "stage": "queued", "at": created}) + b"\n")
-    unit = "famine-restore-" + request["operationId"].replace("-", "")
+    unit = "famine-queue-controller"
     worker_path = directory / "worker.py"
     worker_source = globals().get("RESTORE_SOURCE")
     archive_source = globals().get("ARCHIVE_SOURCE")
@@ -1051,20 +1284,37 @@ def start(request):
     mods_download_source = globals().get("MODS_DOWNLOAD_SOURCE")
     write_worker_bundle(directory, worker_source, archive_source, release_source,
                         mods_apply_source, mods_download_source)
-    launch = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect", "--unit", unit, "--property=Type=exec", "/usr/bin/python3", "-I", str(worker_path), "worker", request["operationId"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
-    if launch.returncode != 0:
+    admit_queue(request)
+    atomic_bytes(ROOT / "queue-controller.py", worker_source.encode(), 0o700)
+    launch = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect", "--unit", unit, "--property=Type=exec", "/usr/bin/python3", "-I", str(ROOT / "queue-controller.py"), "controller"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
+    if launch.returncode != 0 and not controller_active():
         return set_status(directory, "failed", "queued", error=error_payload("BACKUP_CONTROLLER_START_FAILED", request, request["operationId"], False))
     return load(request["operationId"])
+
+
+def cancel(request):
+    task_id = request.get("operationId")
+    if request.get("schemaVersion") != 1 or not valid_uuid(task_id) or not valid_uuid(request.get("requestId")):
+        reject("BACKUP_TASK_INPUT_INVALID")
+    state = load(task_id)
+    if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
+        return state
+    atomic_json(TASKS / task_id / "cancel.request", {"requestedAt": now()})
+    return state
 
 
 def status(request):
     if not valid_uuid(request.get("operationId")) or request.get("schemaVersion") != 1:
         reject("BACKUP_TASK_INPUT_INVALID")
     state = load(request["operationId"])
+    if state["status"] == "queued":
+        position = queue_position(request["operationId"])
+        if position is not None:
+            state = dict(state, queuePosition=position)
     if state["target"] != {"hostId": request.get("hostId"), "instanceId": request.get("instanceId")}:
         reject("BACKUP_TARGET_MISMATCH")
     if state["status"] in ("queued", "running"):
-        unit = "famine-restore-" + request["operationId"].replace("-", "")
+        unit = "famine-queue-controller"
         active = subprocess.run(["systemctl", "is-active", "--quiet", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
         if active.returncode != 0:
             state = reconcile_interrupted(request, state)
@@ -1165,7 +1415,7 @@ def list_tasks(request):
         state = load(child.name)
         if state["target"].get("hostId") == request["hostId"] and state["target"].get("instanceId") == request["instanceId"]:
             if state["status"] in ("queued", "running"):
-                unit = "famine-restore-" + child.name.replace("-", "")
+                unit = "famine-queue-controller"
                 active = subprocess.run(["systemctl", "is-active", "--quiet", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
                 if active.returncode != 0:
                     state = reconcile_interrupted(read_json(child / "request.json"), state)
@@ -1179,6 +1429,7 @@ def main(request=None):
         action = request.get("action")
         if action == "restoreStart": data = start(request)
         elif action == "restoreStatus": data = status(request)
+        elif action == "restoreCancel": data = cancel(request)
         elif action == "restoreList": data = list_tasks(request)
         else: reject("BACKUP_ACTION_INVALID")
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)
@@ -1191,5 +1442,7 @@ def main(request=None):
 
 
 if __name__ == "__main__":
-    if len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "worker":
+    if len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "controller":
+        controller_main()
+    elif len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "worker":
         worker(__import__("sys").argv[2])

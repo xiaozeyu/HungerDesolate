@@ -6,7 +6,7 @@ import AppDialog from "../components/AppDialog.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import { listHostMods } from "../api/hostMods";
-import { createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, getInstanceBackupTask, getInstanceRestoreTask, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
+import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useInstanceOverview } from "../composables/useInstanceOverview";
@@ -21,6 +21,8 @@ const overview = useInstanceOverview({ poll: false });
 const taskStore = useTasks();
 const mode = ref<BackupCaptureMode>("cold");
 const items = ref<BackupSummary[]>([]);
+const verifiedCount = computed(() => items.value.filter(item => item.verification === "verified").length);
+const totalSize = computed(() => items.value.reduce((total, item) => total + item.sizeBytes, 0));
 const preview = ref<BackupPreviewResponse | null>(null);
 const loading = ref(false);
 const previewLoading = ref(false);
@@ -28,17 +30,24 @@ const error = ref("");
 const restoreError = ref("");
 const deleteError = ref("");
 const createBusy = ref(false);
-const activeTask = ref<TaskSnapshot | null>(null);
+const activeTask = computed<TaskSnapshot | null>(() => {
+  const key = targetKey.value;
+  if (!key) return null;
+  const tasks = taskStore.tasks.value.filter(task => taskBelongsHere(task, key))
+    .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
+  return tasks.find(task => ["queued", "running"].includes(task.status)) ?? tasks[0] ?? null;
+});
 const restoreBusy = ref(false);
 const restoreTarget = ref<BackupSummary | null>(null);
 const restoreModWarnings = ref<string[]>([]);
 const restoreProtection = ref(true);
 const deleteTarget = ref<BackupSummary | null>(null);
 const deleteBusy = ref(false);
+const cancelBusy = ref(false);
+const cancelMessage = ref("");
 const downloadTasks = ref<BackupDownloadResponse[]>([]);
 let pendingOperationId = "";
 let pendingCreate: { requestId: string; backupId: string; captureMode: BackupCaptureMode; revision: number } | null = null;
-let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let epoch = 0;
 let listSequence = 0;
 let previewSequence = 0;
@@ -104,13 +113,10 @@ async function refresh() {
     if (!isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) return;
     const latest = [...tasks, ...restoreTasks].find(task => taskBelongsHere(task.task, targetKey));
     if (latest) {
-      activeTask.value = latest.task;
       taskStore.receive(latest.task);
       if (["queued", "running"].includes(latest.task.status)) {
         createBusy.value = true;
         pendingOperationId = latest.task.operationId;
-        if (latest.task.operation === "backupRestore") scheduleRestorePoll(targetKey, latest.task.operationId, connection.recordVersion);
-        else scheduleTaskPoll(targetKey, latest.task.operationId, connection.recordVersion);
       }
     }
   } catch (cause) {
@@ -242,12 +248,12 @@ async function restoreBackup() {
   try { const response = await queueSsh(() => restoreInstanceBackup({ schemaVersion: 1, requestId: crypto.randomUUID(), target: instanceTarget,
     expectedRecordVersion: connection.recordVersion, expectedRevision, backupId: current.backupId, operationId,
     createProtectionBackup: restoreProtection.value }));
-    if (requestEpoch !== epoch || targetKey.value !== requestTarget || server.value?.recordVersion !== connection.recordVersion) return;
     if (response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
       || response.target.instanceId !== instanceTarget.instanceId || response.task.operationId !== operationId
       || response.task.operation !== "backupRestore") throw new Error("恢复任务回执身份不匹配");
-    activeTask.value = response.task; taskStore.receive(response.task); restoreTarget.value = null;
-    scheduleRestorePoll(requestTarget, operationId, connection.recordVersion);
+    taskStore.receive(response.task);
+    if (requestEpoch !== epoch || targetKey.value !== requestTarget || server.value?.recordVersion !== connection.recordVersion) return;
+    restoreTarget.value = null;
   } catch (cause) { if (requestEpoch === epoch) restoreError.value = describeError(cause).message; }
   finally { if (requestEpoch === epoch) restoreBusy.value = false; }
 }
@@ -271,75 +277,40 @@ async function deleteBackup() {
   finally { if (requestEpoch === epoch) deleteBusy.value = false; }
 }
 
-function scheduleRestorePoll(key: string, operationId: string, recordVersion: number) {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = setTimeout(() => void pollRestore(key, operationId, recordVersion), 2500);
-}
-async function pollRestore(key: string, operationId: string, recordVersion: number) {
-  const instanceTarget = target.value;
-  if (!instanceTarget || !server.value || `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}` !== key) return;
-  const requestEpoch = epoch; const requestId = crypto.randomUUID();
-  try { const response = await queueSsh(() => getInstanceRestoreTask({ schemaVersion: 1, requestId, target: instanceTarget, expectedRecordVersion: recordVersion, operationId }));
-    if (requestEpoch !== epoch || !target.value || server.value?.recordVersion !== recordVersion || !taskBelongsHere(response.task, key)) return;
-    if (response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
-      || response.target.instanceId !== instanceTarget.instanceId || response.task.operationId !== operationId || response.task.operation !== "backupRestore") throw new Error("恢复任务响应身份不匹配");
-    activeTask.value = response.task; taskStore.receive(response.task);
-    if (["queued", "running"].includes(response.task.status)) scheduleRestorePoll(key, operationId, recordVersion);
-    else {
-      createBusy.value = false;
-      pendingOperationId = "";
-      const revisionBeforeRestore = revision.value;
-      await overview.refresh();
-      if (requestEpoch !== epoch || targetKey.value !== key || server.value?.recordVersion !== recordVersion) return;
-      const revisionAfterRefresh = revision.value;
-      if (response.task.status === "succeeded" && revisionBeforeRestore !== null
-        && (revisionAfterRefresh === null || revisionAfterRefresh <= revisionBeforeRestore)) {
-        error.value = overview.error.value ?? "恢复已完成，但专服新配置版本尚未确认；备份列表未刷新。";
-        return;
-      }
-      await refreshPage();
-    }
-  } catch (cause) { if (requestEpoch === epoch) error.value = describeError(cause).message; }
-}
-
-function scheduleTaskPoll(targetKey: string, operationId: string, recordVersion: number) {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = setTimeout(() => void pollTask(targetKey, operationId, recordVersion), 2500);
-}
-
-async function pollTask(targetKey: string, operationId: string, recordVersion: number) {
-  const instanceTarget = target.value;
-  if (!instanceTarget || !server.value || !activeTask.value
-    || `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}` !== targetKey
-    || activeTask.value.operationId !== operationId) return;
-  try {
-    const requestId = crypto.randomUUID();
-    const response = await queueSsh(() => getInstanceBackupTask({ schemaVersion: 1, requestId, target: instanceTarget,
-      expectedRecordVersion: recordVersion, operationId }));
-    const stillCurrent = target.value && server.value?.recordVersion === recordVersion
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && activeTask.value?.operationId === operationId;
-    if (!stillCurrent) return;
-    if (response.schemaVersion !== 1 || response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId
-      || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId
-      || response.task.operationId !== operationId || !taskBelongsHere(response.task, targetKey)) {
-      throw new Error("备份任务响应身份不匹配");
-    }
-    activeTask.value = response.task;
-    taskStore.receive(response.task);
-    if (["succeeded", "failed", "interrupted"].includes(response.task.status)) {
-      createBusy.value = false;
-      pendingOperationId = "";
-      await refresh();
-      await inspectMode();
+watch(activeTask, async (next, previous) => {
+  if (!next || ["queued", "running"].includes(next.status)) return;
+  createBusy.value = false;
+  pendingOperationId = "";
+  if (previous?.taskId === next.taskId && previous.status === next.status) return;
+  if (loading.value || previewLoading.value) return;
+  if (next.operation === "backupRestore" && next.status === "succeeded") {
+    const revisionBeforeRestore = revision.value;
+    await overview.refresh();
+    if (revisionBeforeRestore !== null && (revision.value === null || revision.value <= revisionBeforeRestore)) {
+      error.value = overview.error.value ?? "恢复已完成，但专服新配置版本尚未确认；备份列表未刷新。";
       return;
     }
-    scheduleTaskPoll(targetKey, operationId, recordVersion);
+  }
+  await refreshPage();
+}, { flush: "sync" });
+
+async function cancelActiveTask() {
+  const connection = server.value, instanceTarget = target.value, task = activeTask.value;
+  if (!connection || !instanceTarget || !task || !["backupCreate", "backupRestore"].includes(task.operation) || cancelBusy.value) return;
+  cancelBusy.value = true;
+  cancelMessage.value = "";
+  try {
+    const request = { schemaVersion: 1 as const, requestId: crypto.randomUUID(), target: instanceTarget,
+      expectedRecordVersion: connection.recordVersion, operationId: task.operationId };
+    const response = task.operation === "backupCreate"
+      ? await cancelInstanceBackup(request)
+      : await cancelInstanceRestore(request);
+    taskStore.receive(response.task);
+    cancelMessage.value = "取消请求已提交，等待任务安全结束。";
   } catch (cause) {
-    if (activeTask.value?.operationId === operationId) {
-      error.value = describeError(cause).message;
-      scheduleTaskPoll(targetKey, operationId, recordVersion);
-    }
+    error.value = describeError(cause).message;
+  } finally {
+    cancelBusy.value = false;
   }
 }
 
@@ -364,18 +335,16 @@ async function createBackup() {
     const result = await queueSsh(() => createInstanceBackup({ schemaVersion: 1, requestId, target: instanceTarget,
       expectedRecordVersion: connection.recordVersion, expectedRevision: requestRevision, captureMode,
       operationId, backupId, reason: "手动创建" }));
-    if (target.value === null || server.value?.recordVersion !== connection.recordVersion
-      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey) return;
     if (result.schemaVersion !== 1 || result.requestId !== requestId
       || result.target.serverId !== instanceTarget.serverId || result.target.hostId !== instanceTarget.hostId
       || result.target.instanceId !== instanceTarget.instanceId || result.task.operationId !== operationId
       || !taskBelongsHere(result.task, targetKey)) throw new Error("备份任务回执身份不匹配");
-    activeTask.value = result.task;
+    taskStore.receive(result.task);
+    if (target.value === null || server.value?.recordVersion !== connection.recordVersion
+      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey) return;
     pendingCreate = null;
     pendingOperationId = "";
-    taskStore.receive(result.task);
     preview.value = null;
-    scheduleTaskPoll(targetKey, operationId, connection.recordVersion);
   } catch (cause) {
     if (target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) {
       error.value = describeError(cause).message;
@@ -503,8 +472,6 @@ function activeTaskStageLabel(task: Pick<TaskSnapshot, "operation" | "stage">) {
 }
 
 watch([targetKey, () => server.value?.recordVersion, revision, () => workspace.preview.value], () => {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = undefined;
   epoch++;
   listSequence++;
   previewSequence++;
@@ -520,7 +487,6 @@ watch([targetKey, () => server.value?.recordVersion, revision, () => workspace.p
   loading.value = false;
   previewLoading.value = false;
   error.value = "";
-  activeTask.value = null;
   createBusy.value = false;
   pendingOperationId = "";
   pendingCreate = null;
@@ -535,7 +501,6 @@ onBeforeUnmount(() => {
   previewSequence++;
   currentListRequest = "";
   currentPreviewRequest = "";
-  if (pollTimer) clearTimeout(pollTimer);
 });
 </script>
 
@@ -550,6 +515,14 @@ onBeforeUnmount(() => {
       </template>
     </PageHeader>
     <PreviewNotice/>
+    <section v-if="items.length" class="summary-line">
+      <div><span class="metric-number">{{items.length}}</span><span>份备份</span></div>
+      <span class="summary-divider"/>
+      <div><span class="metric-number">{{verifiedCount}}</span><span>份已校验</span></div>
+      <span class="summary-divider"/>
+      <div><span>{{formatBytes(totalSize)}}</span><span>归档总量</span></div>
+      <StatusLabel v-if="activeTask" tone="warning" :label="activeTaskStatusLabel(activeTask)"/>
+    </section>
     <div v-if="error" class="error-strip" role="alert">{{ error }}</div>
     <section class="backup-controls" aria-label="备份预览">
       <div class="segmented" role="group" aria-label="备份模式">
@@ -567,6 +540,8 @@ onBeforeUnmount(() => {
       <span v-if="activeTask.result?.backupId" class="mono">{{ activeTask.result.backupId }}</span>
       <p v-if="activeTask.error" class="backup-warning">{{ taskErrorLabel(activeTask.error.code, activeTask.stage, activeTask.operation, activeTask.error.details) }}</p>
       <p v-if="activeTask.result?.modsWarnings?.length" class="backup-warning">{{ activeTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}。缺少 MOD 时世界可能崩溃。</p>
+      <p v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</p>
+      <button v-if="['backupCreate','backupRestore'].includes(activeTask.operation) && activeTask.cancelAllowed && ['queued','running'].includes(activeTask.status)" class="button subtle" type="button" :disabled="cancelBusy" @click="cancelActiveTask">{{ cancelBusy ? "提交中…" : activeTask.operation === 'backupRestore' ? "取消恢复" : "取消备份" }}</button>
     </section>
     <section v-if="preview" class="backup-preview" aria-live="polite">
       <div class="backup-preview-heading">

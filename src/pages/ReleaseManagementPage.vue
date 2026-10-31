@@ -7,10 +7,11 @@ import StatusLabel from "../components/StatusLabel.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useReleaseList } from "../composables/useReleaseList";
+import { useBuildTasks } from "../composables/useBuildTasks";
+import { queryClient } from "../lib/queryClient";
 import {
   buildDstImage,
   deleteInstanceRelease,
-  getBuildStatus,
   importInstanceRelease,
   previewInstanceRelease,
   previewInstanceReleaseDelete,
@@ -31,12 +32,18 @@ const { data, error, loading, stale, refresh } = useReleaseList(server);
 
 const releases = computed(() => data.value?.releases ?? []);
 const creationReadyCount = computed(() => releases.value.filter(item => item.verified).length);
-const building = ref(false);
-const buildError = ref("");
-const buildObservationError = ref("");
-const buildMessage = ref("");
-const buildStatus = ref<BuildStatusResponse | null>(null);
-const currentBuildId = ref("");
+const buildTasks = useBuildTasks();
+const buildStarting = ref(false);
+const buildStartError = ref("");
+const buildEntry = computed(() => buildTasks.forHost(server.value?.hostId));
+const building = computed(() => buildStarting.value || buildEntry.value?.status.status === "building");
+const buildStatus = computed<BuildStatusResponse | null>(() => buildEntry.value?.status ?? null);
+const buildMessage = computed(() => buildEntry.value?.message ?? "");
+const buildObservationError = computed(() => buildEntry.value?.observationError ?? "");
+const buildError = computed(() => buildEntry.value?.status.status === "failed"
+  ? buildEntry.value.status.logTail.at(-1) ?? "构建失败，请查看主机构建日志"
+  : buildEntry.value?.status.status === "notFound" ? "构建任务不存在，请重新构建"
+  : buildStartError.value);
 const pendingReleaseId = ref("");
 const pendingStage = ref<"base" | "runtime" | "import" | "delete" | "" >("");
 const actionError = ref<{ releaseId: string; message: string } | null>(null);
@@ -52,11 +59,9 @@ const deleteError = ref("");
 const cachePreview = ref<BuildCachePreview | null>(null);
 const cacheBusy = ref(false);
 const cacheError = ref("");
+const cacheMessage = ref("");
 const bundleInputs = new Map<string, HTMLInputElement>();
-let statusInterval: number | null = null;
-let buildPollBusy = false;
 let actionSequence = 0;
-let buildTarget: { serverId: string; hostId: string; recordVersion: number } | null = null;
 
 function targetSnapshot() {
   const value = server.value;
@@ -300,61 +305,11 @@ async function verifyRuntime(release: InstanceReleaseSummary) {
   }
 }
 
-async function pollBuildStatus() {
-  const target = buildTarget;
-  if (!target || !currentBuildId.value || !isCurrent(target) || buildPollBusy) return;
-  buildPollBusy = true;
-  try {
-    const response = await getBuildStatus({
-      schemaVersion: 1,
-      requestId: crypto.randomUUID(),
-      target: { serverId: target.serverId, hostId: target.hostId },
-      expectedRecordVersion: target.recordVersion,
-      releaseId: currentBuildId.value,
-    });
-    if (!isCurrent(target)) return;
-    buildStatus.value = response;
-    buildObservationError.value = "";
-    if (response.status === "completed") {
-      stopPolling();
-      buildError.value = "";
-      buildMessage.value = "镜像构建完成，Release 已登记";
-      await refresh();
-    } else if (response.status === "failed") {
-      stopPolling();
-      buildError.value = response.logTail.at(-1) || "构建失败，请查看主机构建日志";
-    }
-  } catch (cause) {
-    if (isCurrent(target)) {
-      buildObservationError.value = "状态查询暂不可用，继续重试：" + describeError(cause).message;
-    }
-  } finally {
-    buildPollBusy = false;
-  }
-}
-
-function startPolling() {
-  if (statusInterval !== null) return;
-  statusInterval = window.setInterval(() => void pollBuildStatus(), 3000);
-}
-
-function stopPolling() {
-  if (statusInterval !== null) {
-    window.clearInterval(statusInterval);
-    statusInterval = null;
-  }
-  building.value = false;
-}
-
 async function startBuild() {
   const target = targetSnapshot();
   if (!target || building.value) return;
-  buildTarget = target;
-  building.value = true;
-  buildError.value = "";
-  buildObservationError.value = "";
-  buildMessage.value = "";
-  buildStatus.value = null;
+  buildStarting.value = true;
+  buildStartError.value = "";
   try {
     const response = await buildDstImage({
       schemaVersion: 1,
@@ -362,18 +317,21 @@ async function startBuild() {
       target: { serverId: target.serverId, hostId: target.hostId },
       expectedRecordVersion: target.recordVersion,
     });
+    buildTasks.start(target.serverId, target.hostId, target.recordVersion, response.releaseId, response.message);
     if (!isCurrent(target)) return;
-    currentBuildId.value = response.releaseId;
-    buildMessage.value = response.message;
-    startPolling();
-    void pollBuildStatus();
   } catch (cause) {
-    if (isCurrent(target)) {
-      buildError.value = describeError(cause).message;
-      building.value = false;
-    }
+    if (isCurrent(target)) buildStartError.value = describeError(cause).message;
+  } finally {
+    buildStarting.value = false;
   }
 }
+
+watch(() => buildEntry.value?.status.status, (next, previous) => {
+  if (next === "completed" && previous !== "completed") {
+    queryClient.invalidate("releases:");
+    void refresh();
+  }
+}, { flush: "sync" });
 
 watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordVersion], () => {
   actionSequence++;
@@ -388,23 +346,15 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   deleteError.value = "";
   cachePreview.value = null;
   cacheError.value = "";
+  cacheMessage.value = "";
   cacheBusy.value = false;
   clearBundle();
-  if (buildTarget && !isCurrent(buildTarget)) {
-    stopPolling();
-    buildTarget = null;
-    currentBuildId.value = "";
-    buildStatus.value = null;
-    buildError.value = "";
-    buildObservationError.value = "";
-    buildMessage.value = "";
-  }
+  buildStarting.value = false;
+  buildStartError.value = "";
 });
 
 onUnmounted(() => {
   actionSequence++;
-  stopPolling();
-  buildObservationError.value = "";
   clearBundle();
 });
 
@@ -414,6 +364,7 @@ async function openCacheCleanup() {
   const sequence = ++actionSequence;
   cacheBusy.value = true;
   cacheError.value = "";
+  cacheMessage.value = "";
   try {
     const response = await previewBuildCache({ schemaVersion: 1, requestId: crypto.randomUUID(), action: "preview",
       serverId: target.serverId, hostId: target.hostId, expectedRecordVersion: target.recordVersion });
@@ -440,7 +391,7 @@ async function confirmCacheCleanup() {
     if (!isCurrent(target, sequence)) return;
     if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存清理身份不匹配");
     cachePreview.value = null;
-    buildMessage.value = `构建缓存已清理${response.contextBytes ? `，移除 ${formatBytes(response.contextBytes)} 构建目录` : ""}`;
+    cacheMessage.value = `构建缓存已清理${response.contextBytes ? `，移除 ${formatBytes(response.contextBytes)} 构建目录` : ""}`;
   } catch (cause) {
     if (isCurrent(target, sequence)) cacheError.value = describeError(cause).message;
   } finally {
@@ -464,6 +415,7 @@ async function confirmCacheCleanup() {
         </button>
       </template>
     </PageHeader>
+    <p v-if="cacheMessage" class="success-message" role="status">{{ cacheMessage }}</p>
 
     <div v-if="building || buildStatus?.status === 'failed' || buildMessage || buildError" class="build-state" role="status">
       <div class="build-state-main">
@@ -493,10 +445,14 @@ async function confirmCacheCleanup() {
 
     <div v-if="loading && !data" class="empty-state" role="status">读取 Release…</div>
     <template v-else-if="data">
-      <section class="release-summary" aria-label="Release 概览">
-        <div><strong>{{ releases.length }}</strong><span>Release</span></div>
-        <div><strong>{{ creationReadyCount }}</strong><span>可用于创建</span></div>
-        <StatusLabel v-if="stale" tone="warning" label="结果已过期" />
+      <section class="summary-line" aria-label="Release 概览">
+        <div><span class="metric-number">{{ releases.length }}</span><span>Release</span></div>
+        <span class="summary-divider"/>
+        <div><span class="metric-number">{{ creationReadyCount }}</span><span>可用于创建</span></div>
+        <span class="summary-divider"/>
+        <StatusLabel v-if="building" tone="warning" label="构建中"/>
+        <StatusLabel v-else-if="stale" tone="warning" label="结果已过期"/>
+        <span v-else class="muted-text">构建完成后自动刷新</span>
       </section>
 
       <div v-if="!releases.length" class="release-empty">

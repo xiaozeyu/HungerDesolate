@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "vue-tsc --noEmit",
-    "test:frontend": "node --experimental-strip-types --test src/lib/*.test.ts && node --test scripts/test-docker-install-ui.mjs scripts/test-instance-create-ui.mjs scripts/test-world-config-ui.mjs scripts/test-mods-apply-ui.mjs",
+    "test:frontend": "node --experimental-strip-types --test src/lib/*.test.ts && node --test scripts/test-docker-install-ui.mjs scripts/test-instance-create-ui.mjs scripts/test-world-config-ui.mjs scripts/test-mods-apply-ui.mjs scripts/test-operations-ui.mjs scripts/test-app-shell-ui.mjs scripts/test-world-draft-ui.mjs scripts/test-build-tasks-ui.mjs scripts/test-persistence-ui.mjs scripts/test-operation-persistence-ui.mjs scripts/test-query-client-ui.mjs",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

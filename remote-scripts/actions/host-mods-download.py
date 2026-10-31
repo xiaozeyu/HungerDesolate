@@ -150,12 +150,107 @@ def task_dir(task_id):
     return path
 
 
+def registry_lock():
+    safe_dir(ROOT / "locks")
+    fd = os.open(ROOT / "locks" / "registry.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def admit_queue(request):
+    task_id = request["operationId"]
+    lock_fd = registry_lock()
+    try:
+        registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+        if registry.get("schemaVersion") != 1 or registry.get("hostId") != request["hostId"]:
+            reject("HOST_MOD_REGISTRY_INVALID")
+        if not isinstance(registry.get("heavyQueue"), list):
+            registry["heavyQueue"] = []
+        queue = [item for item in registry["heavyQueue"] if item.get("taskId") != task_id]
+        queue.append({"taskId": task_id, "operation": "hostModPrepare", "hostId": request["hostId"],
+                      "requestedAtUnixSeconds": now(), "ownerToken": str(uuid.uuid4()), "generation": 1})
+        registry["heavyQueue"] = queue
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(ROOT / "registry.json", registry)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def dequeue(task_id):
+    path = ROOT / "registry.json"
+    if not path.exists():
+        return
+    try:
+        lock_fd = registry_lock()
+    except OSError:
+        return
+    try:
+        registry = read_json(path, 2 * 1024 * 1024)
+        queue = registry.get("heavyQueue")
+        if not isinstance(queue, list):
+            return
+        remaining = [item for item in queue if item.get("taskId") != task_id]
+        if len(remaining) == len(queue):
+            return
+        registry["heavyQueue"] = remaining
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(path, registry)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def release_queue(task_id):
+    path = ROOT / "registry.json"
+    if not path.exists():
+        return
+    try:
+        lock_fd = registry_lock()
+    except OSError:
+        return
+    try:
+        registry = read_json(path, 2 * 1024 * 1024)
+        queue = registry.get("heavyQueue")
+        if not isinstance(queue, list):
+            return
+        remaining = [item for item in queue if item.get("taskId") != task_id]
+        if len(remaining) == len(queue):
+            return
+        registry["heavyQueue"] = remaining
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(path, registry)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def queue_position(task_id):
+    try:
+        registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    queue = registry.get("heavyQueue")
+    if not isinstance(queue, list):
+        return None
+    ordered = sorted((item for item in queue if isinstance(item, dict)),
+                     key=lambda item: item.get("requestedAtUnixSeconds", 0))
+    for index, item in enumerate(ordered, 1):
+        if item.get("taskId") == task_id:
+            return index
+    return None
+
+
 def load_status(task_id):
     directory = task_dir(task_id)
     state = read_json(directory / "status.json", 262144)
     if (state.get("schemaVersion") != 1 or state.get("taskId") != task_id
             or state.get("operationId") != task_id or state.get("operation") != "hostModPrepare"
-            or state.get("status") not in ("queued", "running", "succeeded", "failed", "interrupted")
+            or state.get("status") not in ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")
             or type(state.get("sequence")) is not int or state["sequence"] < 1):
         reject("HOST_MOD_TASK_STATE_INVALID")
     return state
@@ -177,7 +272,8 @@ def journal_tail(directory):
 def set_status(directory, status, stage, *, completed=None, result=None, code=None, progress=None, details=None):
     state = load_status(directory.name)
     sequence = state["sequence"] + 1
-    state.update({"status": status, "stage": stage, "sequence": sequence, "observation": "live", "cancelAllowed": False})
+    state.update({"status": status, "stage": stage, "sequence": sequence, "observation": "live",
+                  "cancelAllowed": status in ("queued", "running")})
     if completed is not None:
         state["lastCompletedStage"] = completed
     if progress is not None:
@@ -191,12 +287,14 @@ def set_status(directory, status, stage, *, completed=None, result=None, code=No
             "recoverySteps": ["查看任务阶段和错误代码，再重试"], "details": details or {}}
     if status == "running" and state.get("startedAt") is None:
         state["startedAt"] = now()
-    if status in ("succeeded", "failed", "interrupted"):
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
         state["finishedAt"] = now()
     atomic_json(directory / "status.json", state)
     entries = journal_tail(directory)
     entries.append({"sequence": sequence, "status": status, "stage": stage, "at": now()})
     atomic_bytes(directory / "journal.jsonl", b"\n".join(canonical(item) for item in entries[-100:]) + b"\n")
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
+        release_queue(directory.name)
     return state
 
 
@@ -316,7 +414,7 @@ def start(request, worker_source):
             "status": "queued", "stage": "queued", "lastCompletedStage": None,
             "progress": {"kind": "determinate", "completed": 0, "total": len(request["workshopIds"])},
             "sequence": 1, "createdAt": created, "startedAt": None, "finishedAt": None,
-            "cancelAllowed": False, "observation": "live", "result": task_result(request, []), "error": None})
+            "cancelAllowed": True, "observation": "live", "result": task_result(request, []), "error": None})
         atomic_json(directory / "journal.jsonl", {"sequence": 1, "status": "queued", "stage": "queued", "at": created})
         atomic_json(directory / "worker-context.json", {"schemaVersion": 1, "image": image_ref,
             "dstReleaseId": target_release_id})
@@ -327,11 +425,13 @@ def start(request, worker_source):
                 output.write(worker_source.encode()); output.flush(); os.fsync(fd)
         finally:
             os.close(fd)
-        unit = "famine-host-mod-" + request["operationId"].replace("-", "")
+        unit = "famine-queue-controller"
+        admit_queue(request)
+        atomic_bytes(ROOT / "queue-controller.py", worker_source.encode(), 0o700)
         launch = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect", "--unit", unit,
-            "--property=Type=exec", "/usr/bin/python3", "-I", str(worker_path), "worker", request["operationId"]],
+            "--property=Type=exec", "/usr/bin/python3", "-I", str(ROOT / "queue-controller.py"), "controller"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
-        if launch.returncode != 0:
+        if launch.returncode != 0 and not controller_active():
             set_status(directory, "failed", "queued", code="HOST_MOD_CONTROLLER_START_FAILED")
         return load_status(request["operationId"])
     finally:
@@ -375,11 +475,135 @@ def content_files(root):
     return entries, total, digest
 
 
+def wait_lock(path, cancel_path):
+    safe_dir(path.parent, create=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077:
+        os.close(fd)
+        reject("HOST_MOD_TASK_LOCK_INVALID")
+    while True:
+        if cancel_path.exists():
+            os.close(fd)
+            reject("HOST_MOD_CANCELLED")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            time.sleep(0.5)
+
+
+def controller_active():
+    result = subprocess.run(["systemctl", "is-active", "--quiet", "famine-queue-controller"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=5, check=False)
+    return result.returncode == 0
+
+
+CONTROLLER_TASKS = {
+    "modApply": ROOT / "mod-apply-tasks",
+    "backupCreate": ROOT / "backup-tasks",
+    "backupRestore": ROOT / "restore-tasks",
+    "hostModPrepare": ROOT / "host-mod-tasks",
+}
+
+
+def controller_main():
+    safe_dir(ROOT / "locks")
+    lock_fd = os.open(ROOT / "locks" / "queue-controller.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(lock_fd)
+        return
+    try:
+        idle = 0
+        while True:
+            try:
+                registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                time.sleep(1)
+                continue
+            queue = registry.get("heavyQueue")
+            if not isinstance(queue, list):
+                return
+            ordered = sorted((item for item in queue if isinstance(item, dict)),
+                             key=lambda item: item.get("requestedAtUnixSeconds", 0))
+            if not ordered:
+                idle += 1
+                if idle >= 3:
+                    return
+                time.sleep(1)
+                continue
+            idle = 0
+            head = ordered[0]
+            task_id = head.get("taskId")
+            task_dir = CONTROLLER_TASKS.get(head.get("operation"))
+            if not valid_uuid(task_id):
+                return
+            if task_dir is None:
+                time.sleep(1)
+                continue
+            worker = task_dir / task_id / "worker.py"
+            if not worker.exists():
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            try:
+                state = read_json(task_dir / task_id / "status.json", 262144)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            if state.get("status") in ("succeeded", "failed", "cancelled", "interrupted"):
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            request = read_json(task_dir / task_id / "request.json")
+            instance_id = request.get("instanceId")
+            instance = ROOT / "instances" / instance_id if isinstance(instance_id, str) else None
+            heavy = maintenance = instance_lock = None
+            try:
+                heavy = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                fcntl.flock(heavy, fcntl.LOCK_EX)
+                if instance is not None:
+                    safe_dir(instance / "locks")
+                    maintenance = os.open(instance / "locks" / "world-config.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    fcntl.flock(maintenance, fcntl.LOCK_EX)
+                    instance_lock = os.open(instance / "locks" / "instance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    fcntl.flock(instance_lock, fcntl.LOCK_EX)
+                env = dict(os.environ)
+                env["FAMINE_CONTROLLER_LEASE"] = task_id
+                subprocess.run([sys.executable, "-I", str(worker), "worker", task_id],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=env, check=False)
+            finally:
+                for fd in (instance_lock, maintenance, heavy):
+                    if fd is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+            try:
+                final = read_json(task_dir / task_id / "status.json", 262144)
+                if final.get("status") in ("succeeded", "failed", "cancelled", "interrupted"):
+                    release_queue(task_id)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                pass
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def worker(task_id):
     global CURRENT_STAGE
     directory = task_dir(task_id); request = read_json(directory / "request.json", 262144)
     context = read_json(directory / "worker-context.json", 65536)
-    heavy = lock(ROOT / "locks" / "heavy.lock")
+    cancel_path = directory / "cancel.request"
+    lease = os.environ.get("FAMINE_CONTROLLER_LEASE") == task_id
+    heavy = None
+    if not lease:
+        heavy = wait_lock(ROOT / "locks" / "heavy.lock", cancel_path)
+        dequeue(task_id)
+    if cancel_path.exists(): reject("HOST_MOD_CANCELLED")
     try:
         image_ref, target_release_id = verify_scope(request, context.get("image"))
         if image_ref != context.get("image"):
@@ -472,11 +696,25 @@ def worker(task_id):
         return set_status(directory, "succeeded", "finalize", completed="verify", result=result,
             progress={"kind": "determinate", "completed": len(request["workshopIds"]), "total": len(request["workshopIds"])})
     except Exception as failure:
+        if getattr(failure, "code", None) == "HOST_MOD_CANCELLED":
+            return set_status(directory, "cancelled", "cancelled")
         try: return set_status(directory, "failed", CURRENT_STAGE, code=getattr(failure, "code", "HOST_MOD_WORKER_FAILED"),
             details=getattr(failure, "details", None))
         except Exception: return None
     finally:
-        fcntl.flock(heavy, fcntl.LOCK_UN); os.close(heavy)
+        if heavy is not None:
+            fcntl.flock(heavy, fcntl.LOCK_UN); os.close(heavy)
+
+
+def cancel(request):
+    task_id = request.get("operationId")
+    if request.get("schemaVersion") != 1 or not valid_uuid(task_id):
+        reject("HOST_MOD_TASK_INPUT_INVALID")
+    state = load_status(task_id)
+    if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
+        return state
+    atomic_json(TASKS / task_id / "cancel.request", {"requestedAt": now()})
+    return state
 
 
 def status(request):
@@ -485,10 +723,14 @@ def status(request):
             or any(not valid_uuid(request.get(key)) for key in ("serverId", "hostId")) or not valid_uuid(task_id)):
         reject("HOST_MOD_TASK_INPUT_INVALID")
     state = load_status(task_id)
+    if state["status"] == "queued":
+        position = queue_position(task_id)
+        if position is not None:
+            state = dict(state, queuePosition=position)
     expected = {"serverId": request["serverId"], "hostId": request["hostId"]}
     if state["target"] != expected: reject("HOST_MOD_TASK_TARGET_MISMATCH")
     if state["status"] in ("queued", "running"):
-        unit = "famine-host-mod-" + task_id.replace("-", "")
+        unit = "famine-queue-controller"
         active = subprocess.run(["systemctl", "show", "--property=ActiveState", "--value", unit], stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5, check=False)
         if active.returncode != 0 or active.stdout.strip() not in ("active", "activating", "reloading"):
@@ -516,6 +758,7 @@ def main(request, worker_source):
         action = request.get("action")
         if action == "start": data = {"task": start(request, worker_source)}
         elif action == "status": data = {"task": status(request)}
+        elif action == "cancel": data = {"task": cancel(request)}
         elif action == "list": data = list_tasks(request)
         else: reject("HOST_MOD_TASK_ACTION_INVALID")
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)
@@ -524,7 +767,9 @@ def main(request, worker_source):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "worker":
+    if len(sys.argv) > 1 and sys.argv[1] == "controller":
+        controller_main()
+    elif len(sys.argv) == 3 and sys.argv[1] == "worker":
         worker(sys.argv[2])
     else:
         main(json.load(sys.stdin), Path(__file__).read_text())

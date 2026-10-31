@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {createServer} from 'vite';
 import {createRenderer,defineComponent,ref} from 'vue';
-let vite,handlers,useInstanceCreation;
+let vite,handlers,useInstanceCreation,taskStore,taskCounter=0,useTasks;
 const virtual='\0creation-test-api';
 test('creation form submits check-and-create in one step', async()=>{
   const source=await readFile(resolve(process.cwd(),'src/components/InstanceCreateDialog.vue'),'utf8');
@@ -47,16 +47,23 @@ test('creation form submits check-and-create in one step', async()=>{
 before(async()=>{
   vite=await createServer({configFile:false,logLevel:'error',optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,watch:null},plugins:[{
     name:'creation-ipc',enforce:'pre',resolveId(id,importer){if(id==='virtual:creation-api'||/\/api\/instances(?:\.ts)?$/.test(id)&&importer?.endsWith('useInstanceCreation.ts'))return virtual;},
-    configureServer(server){server.ws.listen=()=>{};},load(id){if(id===virtual)return 'export const handlers={}; export const listInstanceReleases=request=>handlers.listReleases(request); export const createInstance=request=>handlers.create(request); export const getInstanceCreateStatus=request=>handlers.status(request); export const verifyInstanceReleaseBase=request=>handlers.verifyBase(request); export const verifyInstanceReleaseRuntime=request=>handlers.verifyRuntime(request); export const previewInstanceRelease=request=>handlers.previewRelease(request); export const importInstanceRelease=request=>handlers.importRelease(request);';},
+    configureServer(server){server.ws.listen=()=>{};},load(id){if(id===virtual)return 'export const handlers={}; export const listInstanceReleases=request=>handlers.listReleases(request); export const createInstance=request=>handlers.create(request); export const verifyInstanceReleaseBase=request=>handlers.verifyBase(request); export const verifyInstanceReleaseRuntime=request=>handlers.verifyRuntime(request); export const previewInstanceRelease=request=>handlers.previewRelease(request); export const importInstanceRelease=request=>handlers.importRelease(request);';},
   }]});
   handlers=(await vite.ssrLoadModule('virtual:creation-api')).handlers;
   ({useInstanceCreation}=await vite.ssrLoadModule('/src/composables/useInstanceCreation.ts'));
+  ({useTasks}=await vite.ssrLoadModule('/src/composables/useTasks.ts'));
+  taskStore=useTasks();
 });
 after(async()=>{await vite?.close();});
 const hostId='11111111-1111-4111-8111-111111111111',candidate='22222222-2222-4222-8222-222222222222';
 const renderer=createRenderer({createComment:()=>({}),insert(){},remove(){},parentNode:()=>null,nextSibling:()=>null,createElement:()=>({}),createText:()=>({}),setText(){},setElementText(){},patchProp(){}});
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};}
-function task(status,extra={}){return {schemaVersion:1,taskId:'33333333-3333-4333-8333-333333333333',operationId:'33333333-3333-4333-8333-333333333333',target:{serverId:'server-a',hostId,instanceId:candidate},operation:'instanceCreate',status,stage:'reserve',lastCompletedStage:null,progress:{kind:'indeterminate'},sequence:1,createdAt:'2026-10-31T00:00:00Z',startedAt:null,finishedAt:null,cancelAllowed:false,observation:'live',result:status==='succeeded'?{verification:'passed'}:null,error:null,journal:[],...extra};}
+function task(status,extra={}){
+  taskCounter++;
+  const id=`${String(taskCounter).padStart(8,'0')}-3333-4333-8333-333333333333`;
+  return {schemaVersion:1,taskId:id,operationId:id,target:{serverId:'server-a',hostId,instanceId:candidate},operation:'instanceCreate',status,stage:'reserve',lastCompletedStage:null,progress:{kind:'indeterminate'},sequence:1,createdAt:'2026-10-31T00:00:00Z',startedAt:null,finishedAt:null,cancelAllowed:false,observation:'live',result:status==='succeeded'?{verification:'passed'}:null,error:null,journal:[],...extra};
+}
+function succeeded(previous){return {...previous,status:'succeeded',stage:'finalize',sequence:previous.sequence+1,result:{verification:'passed'},finishedAt:'2026-10-31T00:01:00Z'};}
 function createResponse(request,value){return {schemaVersion:1,requestId:request.requestId,serverId:request.target.serverId,recordVersion:request.expectedRecordVersion,task:value};}
 function releaseItem(releaseId,verified=true){return {releaseId,platform:'linux/amd64',image:'hungerdesolate/dst-runtime',imageDigest:'sha256:'+((releaseId===candidate?'b':'d').repeat(64)),dstBuild:'756039',artifactDigest:'sha256:'+('c'.repeat(64)),scriptVersion:'V2-test',verified,runtimeVerified:false,commands:{master:[],caves:[]}};}
 function releaseCatalog(request,releases){return {schemaVersion:1,requestId:request.requestId,serverId:request.serverId,hostId,recordVersion:request.expectedRecordVersion,catalogDigest:'sha256:'+('a'.repeat(64)),releases,blockers:[]};}
@@ -136,15 +143,16 @@ test('a failed creation task surfaces its error and stops creating',async()=>{
     assert.equal(view.flow.task.value.error.code,'CREATE_CONTAINERS_FAILED');
   }finally{view.unmount();}
 });
-test('a queued task is polled until verification passes and reports success',async()=>{
+test('a queued task completes from the global task store and reports success',async()=>{
   const created=[];
   const view=await readyView((_event,target)=>created.push(target));
-  handlers.create=async request=>createResponse(request,task('queued'));
-  handlers.status=async request=>createResponse(request,task('succeeded'));
+  const queued=task('queued');
+  handlers.create=async request=>createResponse(request,queued);
   try{
     await view.flow.create();
     assert.equal(view.flow.creating.value,true);
-    await new Promise(resolve=>setTimeout(resolve,1700));
+    taskStore.receive(succeeded(queued));
+    await new Promise(resolve=>setTimeout(resolve,1100));
     assert.equal(view.flow.task.value.status,'succeeded');
     assert.equal(view.flow.creating.value,false);
     assert.equal(created.length,1);

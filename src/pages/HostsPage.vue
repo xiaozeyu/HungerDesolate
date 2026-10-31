@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick } from "vue";
+import { computed, ref, nextTick } from "vue";
 import { Server, Plus, ArrowRight, Pencil } from "@lucide/vue";
 import { useRouter } from "vue-router";
 import PageHeader from "../components/PageHeader.vue";
@@ -10,6 +10,7 @@ import ServerForm from "../components/ServerForm.vue";
 import CredentialCleanupNotice from "../components/CredentialCleanupNotice.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import type { ServerSummary } from "../types/contracts";
+
 const router = useRouter();
 const workspace = useWorkspace();
 const editorOpen = ref(false);
@@ -17,6 +18,25 @@ const saving = ref(false);
 const savedMessage = ref("");
 const savedServerId = ref("");
 const addButton = ref<HTMLButtonElement | null>(null);
+const servers = computed(() => workspace.servers.value);
+const connectedCount = computed(() => servers.value.filter(host => host.connectionState === "connected").length);
+const pendingCount = computed(() => servers.value.filter(host => !host.hostId).length);
+
+function hostState(host: ServerSummary): { label: string; tone: "success" | "warning" | "danger" | "muted" } {
+  if (!host.hostId) return { label: "待初始化", tone: "warning" };
+  if (host.connectionState === "connected") return { label: "已连接", tone: "success" };
+  if (host.connectionState === "connecting") return { label: "连接中", tone: "warning" };
+  if (host.connectionState === "unreachable") return { label: "不可达", tone: "danger" };
+  if (host.connectionState === "trustRequired") return { label: "待确认指纹", tone: "warning" };
+  return { label: "未连接", tone: "muted" };
+}
+function authLabel(host: ServerSummary) {
+  return host.authKind === "key" ? "SSH 密钥" : "密码";
+}
+function openHost(host: ServerSummary) {
+  const page = workspace.preview.value || host.hostId ? "instances" : "connection";
+  void router.push(`/hosts/${host.serverId}/${page}`);
+}
 async function setEditorOpen(open: boolean) {
   editorOpen.value = open;
   if (!open) { await nextTick(); addButton.value?.focus(); }
@@ -27,9 +47,10 @@ function saved(server: ServerSummary) {
   void setEditorOpen(false);
 }
 </script>
+
 <template>
   <div class="page">
-    <PageHeader eyebrow="主机管理" title="Linux 主机">
+    <PageHeader eyebrow="主机管理" title="主机列表">
       <template #actions>
         <button ref="addButton" class="button primary" :disabled="workspace.preview.value" @click="setEditorOpen(true)"><Plus :size="16"/>添加主机</button>
       </template>
@@ -37,17 +58,37 @@ function saved(server: ServerSummary) {
     <CredentialCleanupNotice/>
     <p v-if="savedMessage" role="status" class="success-message">{{savedMessage}}<button v-if="savedServerId" class="text-button" @click="router.push(`/hosts/${savedServerId}/connection`)">配置连接</button></p>
     <div v-if="workspace.error.value" class="error-strip" role="alert">{{workspace.error.value}}</div>
-    <div v-if="workspace.loading.value && !workspace.servers.value.length" class="empty-state" role="status"><p>读取连接记录…</p></div>
-    <div v-else-if="!workspace.servers.value.length" class="empty-state"><Server :size="28"/><h2>还没有主机</h2><button class="button" @click="setEditorOpen(true)">添加第一台主机</button></div>
-    <div v-else class="host-list">
-      <article v-for="host in workspace.servers.value" :key="host.serverId" class="host-row">
-        <div class="host-symbol"><Server :size="19"/></div>
-        <div class="host-main"><strong>{{host.displayName}}</strong><span class="mono">{{host.host}}:{{host.sshPort}}</span><small>{{host.username}}</small></div>
-        <StatusLabel tone="muted" label="未连接"/>
-        <IconButton v-if="!workspace.preview.value" :label="`编辑${host.displayName}连接`" @click="router.push(`/hosts/${host.serverId}/connection`)"><Pencil :size="17"/></IconButton>
-        <IconButton :label="`进入${host.displayName}`" @click="router.push(`/hosts/${host.serverId}/${workspace.preview.value ? 'instances' : 'connection'}`)"><ArrowRight :size="17"/></IconButton>
-      </article>
-    </div>
+    <div v-if="workspace.loading.value && !servers.length" class="empty-state" role="status"><p>读取连接记录…</p></div>
+    <div v-else-if="!servers.length" class="empty-state"><Server :size="28"/><h2>还没有主机</h2><button class="button" @click="setEditorOpen(true)">添加第一台主机</button></div>
+    <template v-else>
+      <section class="summary-line">
+        <div><span class="metric-number">{{servers.length}}</span><span>台主机</span></div>
+        <span class="summary-divider"/>
+        <div><span class="metric-number">{{connectedCount}}</span><span>已连接</span></div>
+        <span class="summary-divider"/>
+        <div><span class="metric-number warning-number">{{pendingCount}}</span><span>待初始化</span></div>
+      </section>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>主机</th><th>地址</th><th>认证</th><th>状态</th><th>记录版本</th><th class="table-action"/></tr></thead>
+          <tbody>
+            <tr v-for="host in servers" :key="host.serverId">
+              <td><div class="table-primary"><Server :size="17"/><strong>{{host.displayName}}</strong></div><small class="table-sub">{{host.username}}</small></td>
+              <td class="mono">{{host.host}}:{{host.sshPort}}</td>
+              <td>{{authLabel(host)}}</td>
+              <td><StatusLabel :tone="hostState(host).tone" :label="hostState(host).label"/></td>
+              <td class="mono">v{{host.recordVersion}}</td>
+              <td class="table-action">
+                <button class="text-button" type="button" @click="openHost(host)">
+                  {{workspace.preview.value || host.hostId ? "进入" : "配置连接"}} <ArrowRight :size="15"/>
+                </button>
+                <IconButton v-if="!workspace.preview.value" :label="`编辑${host.displayName}连接`" @click="router.push(`/hosts/${host.serverId}/connection`)"><Pencil :size="16"/></IconButton>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
     <AppDialog :open="editorOpen" title="添加 Linux 主机" @update:open="setEditorOpen">
       <ServerForm v-if="editorOpen" form-id="new-server" :server="null" @saved="saved" @busy="saving = $event"/>
       <template #footer><button class="button" @click="setEditorOpen(false)">关闭</button><button class="button primary" form="new-server" type="submit" :disabled="saving">{{saving ? '保存中…' : '保存主机'}}</button></template>

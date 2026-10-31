@@ -127,6 +127,114 @@ def atomic_bytes(path, payload, mode=0o600):
         temporary.unlink(missing_ok=True)
 
 
+def registry_lock():
+    safe_dir(ROOT / "locks")
+    fd = os.open(ROOT / "locks" / "registry.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def admit_queue(request):
+    task_id = request["operationId"]
+    lock_fd = registry_lock()
+    try:
+        registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+        if (registry.get("schemaVersion") != 1 or registry.get("hostId") != request["hostId"]
+                or not isinstance(registry.get("instances"), list)):
+            reject("BACKUP_REGISTRY_INVALID")
+        if not isinstance(registry.get("heavyQueue"), list):
+            registry["heavyQueue"] = []
+        entry = next((item for item in registry["instances"]
+                      if isinstance(item, dict) and item.get("instanceId") == request["instanceId"]), None)
+        if entry is None:
+            reject("BACKUP_REGISTRY_INVALID")
+        pending = entry.get("pendingTaskId")
+        if pending and pending != task_id:
+            reject("INSTANCE_BUSY")
+        entry["pendingTaskId"] = task_id
+        queue = [item for item in registry["heavyQueue"] if item.get("taskId") != task_id]
+        queue.append({"taskId": task_id, "operation": "backupCreate", "instanceId": request["instanceId"],
+                      "requestedAtUnixSeconds": now(), "ownerToken": str(uuid.uuid4()), "generation": 1})
+        registry["heavyQueue"] = queue
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(ROOT / "registry.json", registry)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def dequeue(task_id):
+    path = ROOT / "registry.json"
+    if not path.exists():
+        return
+    try:
+        lock_fd = registry_lock()
+    except OSError:
+        return
+    try:
+        registry = read_json(path, 2 * 1024 * 1024)
+        queue = registry.get("heavyQueue")
+        if not isinstance(queue, list):
+            return
+        remaining = [item for item in queue if item.get("taskId") != task_id]
+        if len(remaining) == len(queue):
+            return
+        registry["heavyQueue"] = remaining
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(path, registry)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def release_queue(task_id):
+    path = ROOT / "registry.json"
+    if not path.exists():
+        return
+    try:
+        lock_fd = registry_lock()
+    except OSError:
+        return
+    try:
+        registry = read_json(path, 2 * 1024 * 1024)
+        if not isinstance(registry.get("heavyQueue"), list) or not isinstance(registry.get("instances"), list):
+            return
+        queue = [item for item in registry["heavyQueue"] if item.get("taskId") != task_id]
+        changed = len(queue) != len(registry["heavyQueue"])
+        for entry in registry["instances"]:
+            if isinstance(entry, dict) and entry.get("pendingTaskId") == task_id:
+                entry["pendingTaskId"] = None
+                changed = True
+        if not changed:
+            return
+        registry["heavyQueue"] = queue
+        registry["registryRevision"] = int(registry.get("registryRevision", 0)) + 1
+        atomic_json(path, registry)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def queue_position(task_id):
+    try:
+        registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    queue = registry.get("heavyQueue")
+    if not isinstance(queue, list):
+        return None
+    ordered = sorted((item for item in queue if isinstance(item, dict)),
+                     key=lambda item: item.get("requestedAtUnixSeconds", 0))
+    for index, item in enumerate(ordered, 1):
+        if item.get("taskId") == task_id:
+            return index
+    return None
+
+
 def load_status(task_id):
     if not valid_uuid(task_id):
         reject("BACKUP_TASK_INPUT_INVALID")
@@ -135,7 +243,7 @@ def load_status(task_id):
     state = read_json(directory / "status.json")
     if (state.get("schemaVersion") != 1 or state.get("taskId") != task_id
             or state.get("operationId") != task_id or state.get("operation") != "backupCreate"
-            or state.get("status") not in ("queued", "running", "succeeded", "failed", "interrupted")
+            or state.get("status") not in ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")
             or type(state.get("sequence")) is not int or state["sequence"] < 1):
         reject("BACKUP_TASK_STATE_INVALID")
     return state
@@ -152,8 +260,9 @@ def set_status(directory, status, stage, *, completed=None, result=None, error=N
         state.update(fields)
     if status == "running" and state.get("startedAt") is None:
         state["startedAt"] = now()
-    if status in ("succeeded", "failed", "interrupted"):
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
         state["finishedAt"] = now()
+        state["cancelAllowed"] = False
     atomic_json(directory / "status.json", state)
     journal_path = directory / "journal.jsonl"
     previous = journal_path.read_bytes() if journal_path.exists() else b""
@@ -172,6 +281,8 @@ def set_status(directory, status, stage, *, completed=None, result=None, error=N
         os.close(fd)
         temporary.unlink(missing_ok=True)
     state["journal"] = journal_tail(directory)
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
+        release_queue(directory.name)
     return state
 
 
@@ -338,13 +449,25 @@ def verify_instance(request, allow_unknown=False, allow_degraded=False):
     return instance, manifest, roles, runtime
 
 
+def wait_lock(fd, cancel_path):
+    while True:
+        if cancel_path.exists():
+            reject("BACKUP_CANCELLED")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(0.5)
+
+
 def _worker_impl(task_id):
     archive_module = {}
     if os.geteuid() != 0:
         reject("ROOT_REQUIRED")
     directory = TASKS / task_id
+    cancel_path = directory / "cancel.request"
     state = load_status(task_id)
-    if state["status"] in ("succeeded", "failed", "interrupted"):
+    if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
         return state
     request = read_json(directory / "request.json")
     request_digest = request.get("requestDigest")
@@ -360,30 +483,30 @@ def _worker_impl(task_id):
     heavy_fd = None
     lock_fd = None
     instance_lock_fd = None
+    lease = os.environ.get("FAMINE_CONTROLLER_LEASE") == task_id
     try:
         allow_unknown = request["captureMode"] == "quasiHot"
         allow_degraded = request["captureMode"] == "cold"
         instance, manifest, roles, runtime_before = verify_instance(request, allow_unknown, allow_degraded)
-        safe_dir(ROOT / "locks")
-        heavy_fd = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        heavy_info = os.fstat(heavy_fd)
-        if not stat.S_ISREG(heavy_info.st_mode) or heavy_info.st_nlink != 1 or heavy_info.st_mode & 0o077:
-            os.close(heavy_fd)
-            reject("BACKUP_LOCK_FAILED")
-        try:
-            fcntl.flock(heavy_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(heavy_fd)
-            heavy_fd = None
-            reject("BACKUP_TASK_BUSY")
-        safe_dir(instance / "locks")
-        lock_path = instance / "locks" / "world-config.lock"
-        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        instance_lock_fd = os.open(instance / "locks" / "instance.lock",
-                                   os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        if not lease:
+            safe_dir(ROOT / "locks")
+            heavy_fd = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            heavy_info = os.fstat(heavy_fd)
+            if not stat.S_ISREG(heavy_info.st_mode) or heavy_info.st_nlink != 1 or heavy_info.st_mode & 0o077:
+                os.close(heavy_fd)
+                reject("BACKUP_LOCK_FAILED")
+            wait_lock(heavy_fd, cancel_path)
+            dequeue(task_id)
+            safe_dir(instance / "locks")
+            lock_path = instance / "locks" / "world-config.lock"
+            lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            instance_lock_fd = os.open(instance / "locks" / "instance.lock",
+                                       os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except Rejected as failure:
         if instance_lock_fd is not None:
             os.close(instance_lock_fd)
+        if failure.code == "BACKUP_CANCELLED":
+            return set_status(directory, "cancelled", "cancelled")
         if lock_fd is not None:
             os.close(lock_fd)
         if heavy_fd is not None:
@@ -402,17 +525,13 @@ def _worker_impl(task_id):
         return set_status(directory, "failed", current["stage"], error=task_error(
             "BACKUP_TASK_PREFLIGHT_FAILED", task_id, request))
     try:
-        info = os.fstat(lock_fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
-            reject("BACKUP_LOCK_FAILED")
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            reject("INSTANCE_BUSY")
-        try:
-            fcntl.flock(instance_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            reject("INSTANCE_BUSY")
+        if not lease:
+            info = os.fstat(lock_fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+                reject("BACKUP_LOCK_FAILED")
+            wait_lock(lock_fd, cancel_path)
+            wait_lock(instance_lock_fd, cancel_path)
+        if cancel_path.exists(): reject("BACKUP_CANCELLED")
         instance, manifest, roles, runtime_before = verify_instance(request, allow_unknown, allow_degraded)
         if request["captureMode"] == "cold" and runtime_before not in ("running", "stopped", "degraded"):
             reject("BACKUP_RUNTIME_INVALID")
@@ -436,6 +555,7 @@ def _worker_impl(task_id):
         estimated = source_size + max(source_size // 10, 1024 * 1024)
         if estimated >= available:
             reject("BACKUP_SPACE_INSUFFICIENT")
+        if cancel_path.exists(): reject("BACKUP_CANCELLED")
         set_status(directory, "running", "stop" if request["captureMode"] == "cold" else "backup",
                    completed="preflight")
         stop_attempted = False
@@ -538,6 +658,8 @@ def _worker_impl(task_id):
     except Exception as failure:
         if isinstance(failure, Rejected):
             code = failure.code
+            if code == "BACKUP_CANCELLED":
+                return set_status(directory, "cancelled", "cancelled")
         elif archive_module and isinstance(failure, archive_module["BackupRejected"]):
             code = failure.code
         else:
@@ -555,12 +677,15 @@ def _worker_impl(task_id):
             code, task_id, request["hostId"], request["instanceId"],
             request["captureMode"] == "cold" and stopped))
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-        fcntl.flock(instance_lock_fd, fcntl.LOCK_UN)
-        os.close(instance_lock_fd)
-        fcntl.flock(heavy_fd, fcntl.LOCK_UN)
-        os.close(heavy_fd)
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        if instance_lock_fd is not None:
+            fcntl.flock(instance_lock_fd, fcntl.LOCK_UN)
+            os.close(instance_lock_fd)
+        if heavy_fd is not None:
+            fcntl.flock(heavy_fd, fcntl.LOCK_UN)
+            os.close(heavy_fd)
 
 
 def task_error(code, task_id, request):
@@ -609,7 +734,8 @@ def recover_interrupted(request, directory):
         instance, manifest, roles, _ = verify_instance(request, allow_unknown=True)
         safe_dir(ROOT / "locks")
         heavy_fd = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        fcntl.flock(heavy_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        wait_lock(heavy_fd, cancel_path)
+        dequeue(task_id)
         safe_dir(instance / "locks")
         maintenance_fd = os.open(instance / "locks" / "world-config.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         fcntl.flock(maintenance_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -631,6 +757,106 @@ def recover_interrupted(request, directory):
         if heavy_fd is not None:
             fcntl.flock(heavy_fd, fcntl.LOCK_UN)
             os.close(heavy_fd)
+
+
+def controller_active():
+    result = subprocess.run(["systemctl", "is-active", "--quiet", "famine-queue-controller"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=5, check=False)
+    return result.returncode == 0
+
+
+CONTROLLER_TASKS = {
+    "modApply": ROOT / "mod-apply-tasks",
+    "backupCreate": ROOT / "backup-tasks",
+    "backupRestore": ROOT / "restore-tasks",
+    "hostModPrepare": ROOT / "host-mod-tasks",
+}
+
+
+def controller_main():
+    safe_dir(ROOT / "locks")
+    lock_fd = os.open(ROOT / "locks" / "queue-controller.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(lock_fd)
+        return
+    try:
+        idle = 0
+        while True:
+            try:
+                registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                time.sleep(1)
+                continue
+            queue = registry.get("heavyQueue")
+            if not isinstance(queue, list):
+                return
+            ordered = sorted((item for item in queue if isinstance(item, dict)),
+                             key=lambda item: item.get("requestedAtUnixSeconds", 0))
+            if not ordered:
+                idle += 1
+                if idle >= 3:
+                    return
+                time.sleep(1)
+                continue
+            idle = 0
+            head = ordered[0]
+            task_id = head.get("taskId")
+            task_dir = CONTROLLER_TASKS.get(head.get("operation"))
+            if not valid_uuid(task_id):
+                return
+            if task_dir is None:
+                time.sleep(1)
+                continue
+            worker = task_dir / task_id / "worker.py"
+            if not worker.exists():
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            try:
+                state = read_json(task_dir / task_id / "status.json", 262144)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            if state.get("status") in ("succeeded", "failed", "cancelled", "interrupted"):
+                dequeue(task_id)
+                release_queue(task_id)
+                continue
+            request = read_json(task_dir / task_id / "request.json")
+            instance_id = request.get("instanceId")
+            instance = ROOT / "instances" / instance_id if isinstance(instance_id, str) else None
+            heavy = maintenance = instance_lock = None
+            try:
+                heavy = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                fcntl.flock(heavy, fcntl.LOCK_EX)
+                if instance is not None:
+                    safe_dir(instance / "locks")
+                    maintenance = os.open(instance / "locks" / "world-config.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    fcntl.flock(maintenance, fcntl.LOCK_EX)
+                    instance_lock = os.open(instance / "locks" / "instance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    fcntl.flock(instance_lock, fcntl.LOCK_EX)
+                env = dict(os.environ)
+                env["FAMINE_CONTROLLER_LEASE"] = task_id
+                subprocess.run([sys.executable, "-I", str(worker), "worker", task_id],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, env=env, check=False)
+            finally:
+                for fd in (instance_lock, maintenance, heavy):
+                    if fd is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+            try:
+                final = read_json(task_dir / task_id / "status.json", 262144)
+                if final.get("status") in ("succeeded", "failed", "cancelled", "interrupted"):
+                    release_queue(task_id)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                pass
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def worker(task_id):
@@ -691,7 +917,7 @@ def start(request, archive_source, worker_source=None):
             "operation": "backupCreate", "status": "queued", "stage": "queued",
             "lastCompletedStage": None, "progress": {"kind": "indeterminate"},
             "sequence": 1, "createdAt": created, "startedAt": None, "finishedAt": None,
-            "cancelAllowed": False, "observation": "live", "result": None, "error": None})
+            "cancelAllowed": True, "observation": "live", "result": None, "error": None})
         journal = canonical({"sequence": 1, "status": "queued", "stage": "queued", "at": created}) + b"\n"
         atomic_bytes(directory / "journal.jsonl", journal)
         worker_path = directory / "worker.py"
@@ -703,18 +929,32 @@ def start(request, archive_source, worker_source=None):
         if not isinstance(worker_source, str) or not worker_source:
             reject("BACKUP_CONTROLLER_BUNDLE_INVALID")
         atomic_bytes(worker_path, worker_source.encode("utf-8"), 0o700)
-        unit = "famine-backup-" + request["operationId"].replace("-", "")
+        unit = "famine-queue-controller"
+        admit_queue(request)
+        atomic_bytes(ROOT / "queue-controller.py", worker_source.encode(), 0o700)
         launch = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect",
             "--unit", unit, "--property=Type=exec", "/usr/bin/python3", "-I",
-            str(worker_path), "worker", request["operationId"]], stdin=subprocess.DEVNULL,
+            str(ROOT / "queue-controller.py"), "controller"], stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
-        if launch.returncode != 0:
+        if launch.returncode != 0 and not controller_active():
             return set_status(directory, "failed", "queued", error=task_error(
                 "BACKUP_CONTROLLER_START_FAILED", request["operationId"], request))
         return load_status(request["operationId"])
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+
+
+def cancel(request):
+    task_id = request.get("operationId")
+    if (request.get("schemaVersion") != 1 or not valid_uuid(request.get("requestId"))
+            or not valid_uuid(task_id)):
+        reject("BACKUP_TASK_INPUT_INVALID")
+    state = load_status(task_id)
+    if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
+        return state
+    atomic_json(TASKS / task_id / "cancel.request", {"requestedAt": now()})
+    return state
 
 
 def status(request):
@@ -724,10 +964,14 @@ def status(request):
             or not valid_uuid(task_id)):
         reject("BACKUP_TASK_INPUT_INVALID")
     state = load_status(task_id)
+    if state["status"] == "queued":
+        position = queue_position(task_id)
+        if position is not None:
+            state = dict(state, queuePosition=position)
     if (state["target"].get("hostId") != request.get("hostId")
             or state["target"].get("instanceId") != request.get("instanceId")):
         reject("BACKUP_TARGET_MISMATCH")
-    unit = "famine-backup-" + task_id.replace("-", "")
+    unit = "famine-queue-controller"
     active = subprocess.run(["systemctl", "is-active", "--quiet", unit], stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
     execution_path = TASKS / task_id / "execution.json"
@@ -792,6 +1036,8 @@ def main(request=None):
                          globals().get("WORKER_SOURCE"))
         elif request.get("action") == "status":
             data = status(request)
+        elif request.get("action") == "cancel":
+            data = cancel(request)
         elif request.get("action") == "listTasks":
             data = list_tasks(request)
         else:
@@ -813,4 +1059,7 @@ def main(request=None):
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "controller":
+        controller_main()
+    else:
+        main()

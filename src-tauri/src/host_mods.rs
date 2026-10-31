@@ -511,6 +511,41 @@ pub fn task(database: &Path, request: TaskRequest) -> CommandResult<TaskResponse
     )
 }
 
+pub fn cancel(database: &Path, request: TaskRequest) -> CommandResult<TaskResponse> {
+    validate_task_target(
+        &request.target,
+        &request.request_id,
+        request.expected_record_version,
+        &request.operation_id,
+    )?;
+    if request.schema_version != 1 {
+        return Err(error("SCHEMA_UNSUPPORTED", "主机 MOD 请求版本不受支持"));
+    }
+    let payload = serde_json::json!({"action":"cancel","schemaVersion":1,"requestId":request.request_id,
+        "serverId":request.target.server_id,"hostId":request.target.host_id,
+        "expectedRecordVersion":request.expected_record_version,"operationId":request.operation_id});
+    with_verified_session(
+        database,
+        &connection(
+            &request.target,
+            &request.request_id,
+            request.expected_record_version,
+        ),
+        |session, host_id| {
+            if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+                return Err(error("HOST_IDENTITY_MISMATCH", "主机身份不一致"));
+            }
+            let value = invoke_download(session, &payload)?;
+            Ok(TaskResponse {
+                schema_version: 1,
+                request_id: request.request_id,
+                target: request.target,
+                task: value.get("task").cloned().unwrap_or(Value::Null),
+            })
+        },
+    )
+}
+
 pub fn tasks(database: &Path, request: TaskListRequest) -> CommandResult<TaskListResponse> {
     validate_target(
         &request.target,

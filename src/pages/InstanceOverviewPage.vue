@@ -7,22 +7,44 @@ import PreviewNotice from "../components/PreviewNotice.vue";
 import { useInstanceOverview } from "../composables/useInstanceOverview";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
+import { useOperations } from "../composables/useOperations";
+import { useTasks } from "../composables/useTasks";
 import { controlInstance } from "../api/instances";
-import { describeError, type UserError } from "../lib/commandError";
+import type { UserError } from "../lib/commandError";
 import { firewallUdpPorts, hasReadyShardListeners } from "../lib/instanceRuntime";
 import { activeContext } from "../context/activeContext";
+import { operationTargetKey, stageLabel, taskOperationLabel } from "../lib/operationView";
 const { data, error, loading, stale, refresh, pausePolling, resumePolling } = useInstanceOverview();
 const { server, target } = usePageTarget();
 const workspace = useWorkspace();
-const runtimeAction = ref<"start"|"stop"|"restart"|null>(null), startError = ref<UserError|null>(null);
-let startSequence = 0;
+const operations = useOperations();
+const taskStore = useTasks();
+const targetKey = computed(() => target.value ? operationTargetKey(target.value) : "");
+const instanceTasks = computed(() => {
+  const selected = target.value;
+  if (!selected) return [];
+  return [...taskStore.tasks.value]
+    .filter(task => "hostId" in task.target && task.target.hostId === selected.hostId
+      && "instanceId" in task.target && task.target.instanceId === selected.instanceId)
+    .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
+});
+const visibleTask = computed(() => instanceTasks.value.find(task => ["queued", "running"].includes(task.status))
+  ?? instanceTasks.value.find(task => ["failed", "interrupted"].includes(task.status))
+  ?? null);
+const taskTone = computed(() => visibleTask.value?.status === "failed" ? "danger"
+  : visibleTask.value?.status === "interrupted" ? "warning" : "warning");
+const runtimeAction = computed<"start"|"stop"|"restart"|null>(() => {
+  const operation = target.value ? operations.runningFor(targetKey.value, ["start", "stop", "restart"]) : null;
+  return operation && (operation.kind === "start" || operation.kind === "stop" || operation.kind === "restart")
+    ? operation.kind : null;
+});
+const startError = ref<UserError|null>(null);
+let mounted = true;
 watch([() => activeContext.value.epoch, () => server.value?.recordVersion,
   () => target.value?.serverId, () => target.value?.hostId, () => target.value?.instanceId], () => {
-  startSequence++;
-  runtimeAction.value = null;
   startError.value = null;
 }, { flush: "sync" });
-onBeforeUnmount(() => { startSequence++; });
+onBeforeUnmount(() => { mounted = false; });
 const name = computed(() => data.value?.identity.displayName ?? "专服");
 const runtimeStatus = computed(() => data.value?.runtime?.status ?? data.value?.identity.runtimeStatus ?? "unknown");
 const runtime = computed(() => data.value?.runtime);
@@ -48,43 +70,49 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
   const selectedTarget = target.value, connection = server.value, overview = data.value;
   const allowed = action === "start" ? canStart.value : action === "stop" ? canStop.value : canRestart.value;
   if (!selectedTarget || !connection || !overview?.manifestSummary || !allowed) return;
-  const sequence = ++startSequence, contextEpoch = activeContext.value.epoch;
-  const current = () => sequence === startSequence && contextEpoch === activeContext.value.epoch
-    && target.value?.serverId === selectedTarget.serverId && target.value?.hostId === selectedTarget.hostId
-    && target.value?.instanceId === selectedTarget.instanceId && server.value?.recordVersion === connection.recordVersion;
-  runtimeAction.value = action;
+  const cavesEnabled = overview.manifestSummary.cavesEnabled;
+  const revision = overview.manifestSummary.configRevision;
   startError.value = null;
   pausePolling();
-  try {
-    const requestId = crypto.randomUUID(), operationId = crypto.randomUUID();
-    const response = await controlInstance({
-      action,
-      schemaVersion: 1, requestId, operationId, target: selectedTarget,
-      expectedRecordVersion: connection.recordVersion,
-      expectedRevision: overview.manifestSummary.configRevision,
-    });
-    if (!current()) return;
-    if (response.schemaVersion !== 1 || response.requestId !== requestId || response.operationId !== operationId
-      || response.recordVersion !== connection.recordVersion || response.revision !== overview.manifestSummary.configRevision
-      || response.target.serverId !== selectedTarget.serverId || response.target.hostId !== selectedTarget.hostId
-      || response.target.instanceId !== selectedTarget.instanceId || response.publicConnectivityVerified !== false) {
-      throw new Error("专服运行操作结果身份无效");
-    }
-    if (action === "stop") {
-      if (response.status !== "stopped" || response.runningShards.length || Object.keys(response.listeners).length) {
-        throw new Error("专服停止结果仍报告运行中的分片");
+  const outcome = await operations.run({
+    kind: action,
+    target: selectedTarget,
+    title: action === "start" ? "启动专服" : action === "stop" ? "停止专服" : "重启专服",
+    stage: "提交运行操作",
+    work: async setStage => {
+      const requestId = crypto.randomUUID(), operationId = crypto.randomUUID();
+      const response = await controlInstance({
+        action,
+        schemaVersion: 1, requestId, operationId, target: selectedTarget,
+        expectedRecordVersion: connection.recordVersion,
+        expectedRevision: revision,
+      });
+      setStage("验证运行状态");
+      if (response.schemaVersion !== 1 || response.requestId !== requestId || response.operationId !== operationId
+        || response.recordVersion !== connection.recordVersion || response.revision !== revision
+        || response.target.serverId !== selectedTarget.serverId || response.target.hostId !== selectedTarget.hostId
+        || response.target.instanceId !== selectedTarget.instanceId || response.publicConnectivityVerified !== false) {
+        throw new Error("专服运行操作结果身份无效");
       }
-    } else if (response.status !== "running" || response.verificationLevel !== "localVerified"
-      || !hasReadyShardListeners(response, overview.manifestSummary.cavesEnabled)) {
-      throw new Error("专服进程或 UDP 监听未就绪");
-    }
-    await refresh();
-  } catch (cause) {
-    if (current()) startError.value = describeError(cause);
-  } finally {
-    if (current()) runtimeAction.value = null;
-    resumePolling();
+      if (action === "stop") {
+        if (response.status !== "stopped" || response.runningShards.length || Object.keys(response.listeners).length) {
+          throw new Error("专服停止结果仍报告运行中的分片");
+        }
+      } else if (response.status !== "running" || response.verificationLevel !== "localVerified"
+        || !hasReadyShardListeners(response, cavesEnabled)) {
+        throw new Error("专服进程或 UDP 监听未就绪");
+      }
+      return response;
+    },
+  });
+  resumePolling();
+  if (!mounted || target.value?.instanceId !== selectedTarget.instanceId
+      || server.value?.recordVersion !== connection.recordVersion) return;
+  if (outcome.error) {
+    startError.value = outcome.error;
+    return;
   }
+  await refresh();
 }
 </script>
 
@@ -115,6 +143,18 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
       <strong>{{startError.message}}</strong>
       <ul v-if="startError.recoverySteps.length"><li v-for="step in startError.recoverySteps" :key="step">{{step}}</li></ul>
     </div>
+    <section v-if="visibleTask" class="section-block task-inline">
+      <div class="section-heading">
+        <div><h2>当前任务</h2></div>
+        <RouterLink class="text-button" to="/tasks">任务记录</RouterLink>
+      </div>
+      <div class="task-inline-body">
+        <StatusLabel :tone="taskTone" :label="visibleTask.status === 'failed' ? '失败' : visibleTask.status === 'interrupted' ? '待核实' : visibleTask.status === 'queued' ? '排队中' : '进行中'"/>
+        <strong>{{taskOperationLabel(visibleTask.operation)}}</strong>
+        <span>{{stageLabel(visibleTask.stage)}}</span>
+        <small v-if="visibleTask.error?.message" class="table-sub">{{visibleTask.error.message}}</small>
+      </div>
+    </section>
     <div v-if="loading && !data" class="empty-state" aria-live="polite">
       <p>
         读取当前专服…

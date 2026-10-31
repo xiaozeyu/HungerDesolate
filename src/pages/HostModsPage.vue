@@ -1,27 +1,55 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { Plus, Trash2 } from "@lucide/vue";
 import { useRoute } from "vue-router";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
-import { deleteHostMod, getHostModTask, listHostMods, prepareHostMods, type HostModItem } from "../api/hostMods";
+import { useTasks } from "../composables/useTasks";
+import { cancelHostModTask, deleteHostMod, listHostMods, prepareHostMods, type HostModItem } from "../api/hostMods";
 import { getWorkshopMetadata } from "../api/workshop";
 import type { WorkshopItem } from "../types/workshop";
 import { normalizeWorkshopIds } from "../lib/workshopInput";
-import { describeError, type UserError } from "../lib/commandError";
+import { describeError } from "../lib/commandError";
+import { useQuery } from "../lib/queryClient";
 import { formatBytes } from "../lib/environmentView";
 import type { TaskSnapshot } from "../types/contracts";
 
 const route = useRoute();
 const workspace = useWorkspace();
+const taskStore = useTasks();
 const server = computed(() => workspace.servers.value.find(item => item.serverId === route.params.serverId) ?? null);
 const target = computed(() => server.value?.hostId ? { serverId: server.value.serverId, hostId: server.value.hostId } : null);
-const items = ref<HostModItem[]>([]);
-const loading = ref(false);
-const stale = ref(false);
-const error = ref<UserError | null>(null);
+const key = computed(() => {
+  const connection = server.value;
+  return connection?.hostId
+    ? `hostmods:${connection.serverId}:${connection.hostId}:${connection.recordVersion}`
+    : null;
+});
+const libraryQuery = useQuery(key, async () => {
+  const connection = server.value;
+  const hostTarget = target.value;
+  if (!connection || !hostTarget) throw new Error("缺少主机身份，无法读取主机 MOD 库");
+  const requestId = crypto.randomUUID();
+  const response = await listHostMods({ schemaVersion: 1, requestId, target: hostTarget, expectedRecordVersion: connection.recordVersion });
+  if (server.value?.serverId !== connection.serverId || server.value.hostId !== connection.hostId
+      || server.value.recordVersion !== connection.recordVersion) throw new Error("主机 MOD 库请求上下文已失效");
+  if (response.requestId !== requestId || response.recordVersion !== connection.recordVersion
+      || response.target.serverId !== hostTarget.serverId || response.target.hostId !== hostTarget.hostId) {
+    throw new Error("主机 MOD 库响应身份或版本不匹配");
+  }
+  return response;
+});
+const items = computed(() => libraryQuery.data.value?.items ?? []);
+const totalSize = computed(() => items.value.reduce((total, item) => total + (item.sizeBytes ?? 0), 0));
+const usedCount = computed(() => items.value.filter(item => item.usedBy.length > 0).length);
+const loading = libraryQuery.loading;
+const error = libraryQuery.error;
+const mutationError = ref("");
+const cancelBusy = ref(false);
+const cancelMessage = ref("");
+const refresh = libraryQuery.refresh;
 const message = ref("");
 const addOpen = ref(false);
 const workshopInput = ref("");
@@ -29,75 +57,17 @@ const queryBusy = ref(false);
 const queryError = ref("");
 const candidates = ref<WorkshopItem[]>([]);
 const addingWorkshopId = ref<string | null>(null);
-const task = ref<TaskSnapshot | null>(null);
+const task = computed<TaskSnapshot | null>(() => {
+  const selected = target.value;
+  if (!selected) return null;
+  const tasks = taskStore.tasks.value
+    .filter(item => item.operation === "hostModPrepare" && "hostId" in item.target
+      && item.target.serverId === selected.serverId && item.target.hostId === selected.hostId)
+    .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
+  return tasks.find(item => ["queued", "running"].includes(item.status)) ?? tasks[0] ?? null;
+});
 const deleteTarget = ref<HostModItem | null>(null);
 const deleteBusy = ref(false);
-let epoch = 0;
-let loadSequence = 0;
-let pollTimer: ReturnType<typeof setTimeout> | undefined;
-
-function current(sequence: number, capturedEpoch: number) {
-  return sequence === loadSequence && capturedEpoch === epoch && target.value !== null;
-}
-
-async function refresh() {
-  const connection = server.value;
-  const hostTarget = target.value;
-  if (!connection || !hostTarget) return;
-  const capturedEpoch = epoch;
-  const sequence = ++loadSequence;
-  loading.value = true;
-  error.value = null;
-  try {
-    const requestId = crypto.randomUUID();
-    const response = await listHostMods({ schemaVersion: 1, requestId, target: hostTarget, expectedRecordVersion: connection.recordVersion });
-    if (!current(sequence, capturedEpoch)) return;
-    if (response.requestId !== requestId || response.recordVersion !== connection.recordVersion
-        || response.target.serverId !== hostTarget.serverId || response.target.hostId !== hostTarget.hostId) {
-      throw new Error("主机 MOD 库响应身份或版本不匹配");
-    }
-    items.value = response.items;
-    stale.value = false;
-  } catch (cause) {
-    if (current(sequence, capturedEpoch)) {
-      error.value = describeError(cause);
-      stale.value = items.value.length > 0;
-    }
-  } finally {
-    if (current(sequence, capturedEpoch)) loading.value = false;
-  }
-}
-
-function stopPolling() {
-  if (pollTimer) clearTimeout(pollTimer);
-  pollTimer = undefined;
-}
-
-function scheduleTaskPoll(operationId: string, capturedEpoch: number) {
-  stopPolling();
-  pollTimer = setTimeout(async () => {
-    const connection = server.value;
-    const hostTarget = target.value;
-    if (!connection || !hostTarget || capturedEpoch !== epoch) return;
-    try {
-      const requestId = crypto.randomUUID();
-      const response = await getHostModTask({ schemaVersion: 1, requestId, target: hostTarget,
-        expectedRecordVersion: connection.recordVersion, operationId });
-      if (capturedEpoch !== epoch || !target.value) return;
-      task.value = response.task;
-      if (["queued", "running"].includes(response.task.status)) scheduleTaskPoll(operationId, capturedEpoch);
-      else if (response.task.status === "succeeded") {
-        message.value = "主机 MOD 库已更新";
-        addOpen.value = false;
-        candidates.value = [];
-        await refresh();
-      }
-    } catch (cause) {
-      if (capturedEpoch === epoch) error.value = describeError(cause);
-    }
-  }, 1500);
-}
-
 async function query() {
   const connection = server.value;
   const hostTarget = target.value;
@@ -128,18 +98,33 @@ async function addCandidate(item: WorkshopItem) {
   const operationId = crypto.randomUUID();
   addingWorkshopId.value = item.workshopId;
   queryError.value = "";
-  task.value = null;
   try {
     const requestId = crypto.randomUUID();
     const response = await prepareHostMods({ schemaVersion: 1, requestId, target: hostTarget,
       expectedRecordVersion: connection.recordVersion, operationId, workshopIds: [item.workshopId] });
     if (response.requestId !== requestId || response.task.operationId !== operationId) throw new Error("主机 MOD 准备响应身份不匹配");
-    task.value = response.task;
-    scheduleTaskPoll(operationId, epoch);
+    taskStore.receive(response.task);
   } catch (cause) {
     queryError.value = describeError(cause).message;
   } finally {
     addingWorkshopId.value = null;
+  }
+}
+
+async function cancelPrepare() {
+  const connection = server.value, hostTarget = target.value, current = task.value;
+  if (!connection || !hostTarget || !current || cancelBusy.value || !["queued", "running"].includes(current.status)) return;
+  cancelBusy.value = true;
+  cancelMessage.value = "";
+  try {
+    const response = await cancelHostModTask({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      target: hostTarget, expectedRecordVersion: connection.recordVersion, operationId: current.operationId });
+    taskStore.receive(response.task);
+    cancelMessage.value = "取消请求已提交，等待任务安全结束。";
+  } catch (cause) {
+    mutationError.value = describeError(cause).message;
+  } finally {
+    cancelBusy.value = false;
   }
 }
 
@@ -149,7 +134,7 @@ async function remove() {
   const item = deleteTarget.value;
   if (!connection || !hostTarget || !item || deleteBusy.value) return;
   deleteBusy.value = true;
-  error.value = null;
+  mutationError.value = "";
   try {
     const requestId = crypto.randomUUID();
     const response = await deleteHostMod({ schemaVersion: 1, requestId, target: hostTarget,
@@ -159,11 +144,20 @@ async function remove() {
     message.value = "已删除未被使用的主机 MOD 版本";
     await refresh();
   } catch (cause) {
-    error.value = describeError(cause);
+    mutationError.value = describeError(cause).message;
   } finally {
     deleteBusy.value = false;
   }
 }
+
+watch(task, (next, previous) => {
+  if (next?.status === "succeeded" && previous?.status !== "succeeded") {
+    message.value = "主机 MOD 库已更新";
+    addOpen.value = false;
+    candidates.value = [];
+    void refresh();
+  }
+}, { flush: "sync" });
 
 function openAdd() {
   workshopInput.value = "";
@@ -173,17 +167,12 @@ function openAdd() {
 }
 
 watch([() => server.value?.serverId, () => server.value?.recordVersion, () => workspace.preview.value], () => {
-  epoch++;
-  stopPolling();
-  items.value = [];
-  task.value = null;
   message.value = "";
-  error.value = null;
+  mutationError.value = "";
+  cancelMessage.value = "";
   deleteTarget.value = null;
-  if (server.value?.hostId) void refresh();
 }, { immediate: true });
 watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
-onBeforeUnmount(() => { epoch++; stopPolling(); });
 </script>
 
 <template>
@@ -194,14 +183,24 @@ onBeforeUnmount(() => { epoch++; stopPolling(); });
       </template>
     </PageHeader>
     <p v-if="message" class="success-message" role="status">{{ message }}</p>
+    <section v-if="items.length" class="summary-line">
+      <div><span class="metric-number">{{items.length}}</span><span>个内容版本</span></div>
+      <span class="summary-divider"/>
+      <div><span class="metric-number">{{usedCount}}</span><span>个被实例使用</span></div>
+      <span class="summary-divider"/>
+      <div><span>{{formatBytes(totalSize)}}</span><span>主机库占用</span></div>
+    </section>
     <div v-if="error" class="environment-error" role="alert">
       <strong>{{ error.message }}</strong>
       <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
     </div>
+    <div v-if="mutationError" class="environment-error" role="alert"><strong>{{ mutationError }}</strong></div>
     <div v-if="task" class="creation-task-state" :class="task.status">
       <StatusLabel :tone="task.status === 'failed' || task.status === 'interrupted' ? 'danger' : task.status === 'succeeded' ? 'success' : 'warning'"
-        :label="task.status === 'failed' ? '准备失败' : task.status === 'interrupted' ? '准备中断' : task.status === 'succeeded' ? '已加入主机库' : '准备 MOD 中'" />
-      <span>{{ task.status === 'failed' ? task.error?.message : task.status === 'interrupted' ? '任务未继续运行，请重试添加' : task.status === 'succeeded' ? '内容已固定，可供所有专服选择' : task.stage }}</span>
+        :label="task.status === 'failed' ? '准备失败' : task.status === 'interrupted' ? '准备中断' : task.status === 'succeeded' ? '已加入主机库' : task.status === 'cancelled' ? '已取消' : '准备 MOD 中'" />
+      <span>{{ task.status === 'failed' ? task.error?.message : task.status === 'interrupted' ? '任务未继续运行，请重试添加' : task.status === 'succeeded' ? '内容已固定，可供所有专服选择' : task.status === 'cancelled' ? '任务已取消' : task.stage }}<template v-if="task.queuePosition"> · 排队第 {{ task.queuePosition }} 位</template></span>
+      <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
+      <button v-if="task.cancelAllowed && ['queued','running'].includes(task.status)" class="button subtle" type="button" :disabled="cancelBusy" @click="cancelPrepare">{{ cancelBusy ? "提交中…" : "取消任务" }}</button>
     </div>
     <div v-if="loading && !items.length" class="empty-state" role="status"><h2>正在读取主机 MOD 库</h2></div>
     <div v-else-if="!items.length" class="empty-state">

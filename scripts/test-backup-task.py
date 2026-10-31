@@ -28,6 +28,12 @@ class BackupTaskTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="backup-task-")
         self.root = Path(self.temp.name) / "famine-hub"
         self.root.mkdir(mode=0o700)
+        (self.root / "locks").mkdir(mode=0o700)
+        registry_path = self.root / "registry.json"
+        registry_path.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST,
+            "registryRevision": 0, "instances": [{"instanceId": INSTANCE, "lifecycle": "ready",
+            "pendingTaskId": None}], "heavyQueue": []}))
+        registry_path.chmod(0o600)
         self.tasks = self.root / "backup-tasks"
         self.root_patch = patch.object(MODULE, "ROOT", self.root)
         self.tasks_patch = patch.object(MODULE, "TASKS", self.tasks)
@@ -68,6 +74,11 @@ class BackupTaskTests(unittest.TestCase):
         self.assertEqual(first["taskId"], OPERATION)
         self.assertEqual(first["operation"], "backupCreate")
         self.assertEqual(first["status"], "queued")
+        registry = json.loads((self.root / "registry.json").read_text())
+        self.assertEqual(registry["instances"][0]["pendingTaskId"], OPERATION)
+        self.assertEqual(registry["heavyQueue"][0]["taskId"], OPERATION)
+        self.assertEqual(registry["heavyQueue"][0]["operation"], "backupCreate")
+        self.assertEqual(MODULE.queue_position(OPERATION), 1)
         self.assertEqual(again["sequence"], first["sequence"])
         self.assertTrue((self.tasks / OPERATION / "request.json").is_file())
         self.assertTrue((self.tasks / OPERATION / "worker.py").is_file())
@@ -100,6 +111,20 @@ class BackupTaskTests(unittest.TestCase):
         with self.assertRaises(MODULE.Rejected) as failure:
             MODULE.start(second, "archive source")
         self.assertEqual(failure.exception.code, "BACKUP_TASK_BUSY")
+
+    def test_cancel_request_is_written_for_an_active_backup(self):
+        task_id = "77777777-7777-4777-8777-777777777777"
+        directory = self.tasks / task_id
+        directory.mkdir(parents=True, mode=0o700)
+        MODULE.atomic_json(directory / "status.json", {"schemaVersion": 1, "taskId": task_id,
+            "operationId": task_id, "target": {"hostId": HOST, "instanceId": INSTANCE},
+            "operation": "backupCreate", "status": "queued", "stage": "queued", "sequence": 1,
+            "createdAt": MODULE.now(), "cancelAllowed": True})
+        request = {"schemaVersion": 1, "action": "cancel", "requestId": REQUEST_ID,
+                   "operationId": task_id, "hostId": HOST, "instanceId": INSTANCE}
+        state = MODULE.cancel(request)
+        self.assertEqual(state["status"], "queued")
+        self.assertTrue((directory / "cancel.request").is_file())
 
     def test_quasihot_admission_does_not_require_verified_docker_runtime(self):
         self.request["captureMode"] = "quasiHot"

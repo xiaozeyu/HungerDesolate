@@ -1,8 +1,11 @@
 import importlib.util
 import hashlib
 import json
+import os
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,8 +36,9 @@ class ModsApplyTests(unittest.TestCase):
             path.mkdir(parents=True, mode=0o700, exist_ok=True)
             path.chmod(0o700)
         self.write(self.root / "host.json", {"schemaVersion": 1, "hostId": HOST})
-        self.write(self.root / "registry.json", {"schemaVersion": 1, "hostId": HOST,
-            "instances": [{"instanceId": INSTANCE, "lifecycle": "ready"}]})
+        self.write(self.root / "registry.json", {"schemaVersion": 1, "hostId": HOST, "registryRevision": 0,
+            "instances": [{"instanceId": INSTANCE, "lifecycle": "ready", "pendingTaskId": None}],
+            "heavyQueue": []})
         self.write(self.instance / "manifest.json", {"schemaVersion": 1, "hostId": HOST,
             "instanceId": INSTANCE, "configRevision": 3, "composeProject": "fh_" + INSTANCE.replace("-", ""),
             "cavesEnabled": False})
@@ -219,6 +223,99 @@ class ModsApplyTests(unittest.TestCase):
         self.assertEqual(token_path.read_text(), "current-token\n")
         self.assertEqual(admin_path.read_text(), "STEAM_1\n")
         self.assertEqual(world_path.read_bytes(), world_before)
+
+    def test_controller_holds_locks_and_runs_worker_with_lease(self):
+        root = self.root
+        tasks = root / "mod-apply-tasks"
+        task_id = "99999999-9999-4999-8999-999999999999"
+        task_dir = tasks / task_id
+        task_dir.mkdir(parents=True, mode=0o700)
+        (root / "instances" / INSTANCE / "locks").mkdir(parents=True, mode=0o700, exist_ok=True)
+        (root / "locks").mkdir(mode=0o700, exist_ok=True)
+        registry = {"schemaVersion": 1, "hostId": HOST, "registryRevision": 0,
+            "instances": [{"instanceId": INSTANCE, "lifecycle": "ready", "pendingTaskId": task_id}],
+            "heavyQueue": [{"taskId": task_id, "operation": "modApply", "instanceId": INSTANCE,
+                            "requestedAtUnixSeconds": 1, "ownerToken": "owner", "generation": 1}]}
+        (root / "registry.json").write_text(json.dumps(registry)); (root / "registry.json").chmod(0o600)
+        request = {"operationId": task_id, "instanceId": INSTANCE}
+        (task_dir / "request.json").write_text(json.dumps(request)); (task_dir / "request.json").chmod(0o600)
+        status = {"schemaVersion": 1, "taskId": task_id, "operationId": task_id,
+            "target": {"serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE},
+            "operation": "modApply", "status": "queued", "stage": "queued", "sequence": 1,
+            "createdAt": MODULE.now(), "cancelAllowed": True}
+        (task_dir / "status.json").write_text(json.dumps(status)); (task_dir / "status.json").chmod(0o600)
+        worker = (task_dir / "worker.py")
+        worker.write_text(
+            "import json, os, pathlib\n"
+            "root = pathlib.Path(os.environ['TEST_ROOT'])\n"
+            "(root / 'lease.txt').write_text(os.environ.get('FAMINE_CONTROLLER_LEASE', ''))\n"
+            "path = root / 'mod-apply-tasks' / '99999999-9999-4999-8999-999999999999' / 'status.json'\n"
+            "state = json.loads(path.read_text())\n"
+            "state['status'] = 'succeeded'\nstate['sequence'] = 2\n"
+            "path.write_text(json.dumps(state))\n")
+        worker.chmod(0o700)
+        old = os.environ.get("TEST_ROOT")
+        os.environ["TEST_ROOT"] = str(root)
+        try:
+            with patch.object(MODULE, "ROOT", root), patch.object(MODULE, "TASKS", tasks), \
+                 patch.object(MODULE, "CONTROLLER_TASKS", {"modApply": tasks}), \
+                 patch.object(MODULE.time, "sleep", lambda _seconds: None):
+                MODULE.controller_main()
+        finally:
+            if old is None: os.environ.pop("TEST_ROOT", None)
+            else: os.environ["TEST_ROOT"] = old
+        self.assertEqual((root / "lease.txt").read_text(), task_id)
+        saved = json.loads((root / "registry.json").read_text())
+        self.assertEqual(saved["heavyQueue"], [])
+        self.assertIsNone(saved["instances"][0]["pendingTaskId"])
+
+    def test_cancel_request_is_written_for_an_active_task(self):
+        tasks = self.root / "mod-apply-tasks"
+        task_id = "77777777-7777-4777-8777-777777777777"
+        directory = tasks / task_id
+        directory.mkdir(parents=True, mode=0o700)
+        MODULE.atomic_json(directory / "status.json", {"schemaVersion": 1, "taskId": task_id,
+            "operationId": task_id, "target": {"serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE},
+            "operation": "modApply", "status": "queued", "stage": "queued", "sequence": 1,
+            "createdAt": MODULE.now(), "cancelAllowed": True})
+        request = {"schemaVersion": 1, "action": "cancel", "requestId": REQUEST, "serverId": SERVER,
+                   "hostId": HOST, "instanceId": INSTANCE, "operationId": task_id}
+        with patch.object(MODULE, "ROOT", self.root), patch.object(MODULE, "TASKS", tasks):
+            state = MODULE.cancel(request)
+        self.assertEqual(state["status"], "queued")
+        self.assertTrue((directory / "cancel.request").is_file())
+
+    def test_admission_records_pending_task_and_heavy_queue_then_releases(self):
+        request = {**self.request, "operationId": "77777777-7777-4777-8777-777777777777"}
+        with patch.object(MODULE, "ROOT", self.root):
+            MODULE.admit_queue(request)
+            registry = json.loads((self.root / "registry.json").read_text())
+            self.assertEqual(registry["instances"][0]["pendingTaskId"], request["operationId"])
+            self.assertEqual(registry["heavyQueue"][0]["taskId"], request["operationId"])
+            self.assertEqual(registry["heavyQueue"][0]["operation"], "modApply")
+            self.assertEqual(MODULE.queue_position(request["operationId"]), 1)
+            MODULE.release_queue(request["operationId"])
+            registry = json.loads((self.root / "registry.json").read_text())
+            self.assertIsNone(registry["instances"][0]["pendingTaskId"])
+            self.assertEqual(registry["heavyQueue"], [])
+            self.assertIsNone(MODULE.queue_position(request["operationId"]))
+
+    def test_heavy_lock_waits_for_the_current_owner_instead_of_rejecting(self):
+        with tempfile.TemporaryDirectory(prefix="mods-lock-") as temporary:
+            path = Path(temporary) / "heavy.lock"
+            first = MODULE.acquire_lock(path)
+            acquired = []
+            waiter = threading.Thread(target=lambda: acquired.append(MODULE.acquire_lock(path, wait=True)))
+            waiter.start()
+            time.sleep(0.05)
+            with self.assertRaises(MODULE.Rejected) as failure:
+                MODULE.acquire_lock(path)
+            self.assertEqual(failure.exception.code, "MOD_APPLY_BUSY")
+            os.close(first)
+            waiter.join(timeout=2)
+            self.assertFalse(waiter.is_alive())
+            self.assertEqual(len(acquired), 1)
+            os.close(acquired[0])
 
 
 if __name__ == "__main__":

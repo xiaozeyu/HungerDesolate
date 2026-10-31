@@ -14,9 +14,9 @@ import InstanceOverviewPage from "./pages/InstanceOverviewPage.vue";
 import WorldPage from "./pages/WorldPage.vue";
 import ModsPage from "./pages/ModsPage.vue";
 import BackupsPage from "./pages/BackupsPage.vue";
-import UpdatesPage from "./pages/UpdatesPage.vue";
 import DiagnosticsPage from "./pages/DiagnosticsPage.vue";
 import SettingsPage from "./pages/SettingsPage.vue";
+import TaskCenterPage from "./pages/TaskCenterPage.vue";
 export const router = createRouter({
     history: createWebHashHistory(),
     routes: [
@@ -32,9 +32,9 @@ export const router = createRouter({
             { name: "world", title: "世界", component: WorldPage },
             { name: "mods", title: "MOD", component: ModsPage },
             { name: "backups", title: "备份", component: BackupsPage },
-            { name: "updates", title: "更新", component: UpdatesPage },
             { name: "diagnostics", title: "诊断", component: DiagnosticsPage },
         ].map(page => ({ path: `/hosts/:serverId/instances/:instanceId/${page.name}`, component: page.component, meta: { title: page.title } })),
+        { path: "/tasks", component: TaskCenterPage, meta: { title: "任务记录" } },
         { path: "/settings", component: SettingsPage, meta: { title: "应用设置" } },
         { path: "/:pathMatch(.*)*", redirect: "/hosts" },
     ],

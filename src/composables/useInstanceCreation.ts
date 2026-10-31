@@ -1,5 +1,5 @@
-import { onBeforeUnmount, reactive, ref, shallowRef, watch, type Ref } from "vue";
-import { createInstance, getInstanceCreateStatus, listInstanceReleases, type InstanceCreateDraft, type InstanceCreateInput, type InstanceCreateTaskRequest, type InstanceReleaseCatalogResponse } from "../api/instances";
+import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch, type Ref } from "vue";
+import { createInstance, listInstanceReleases, type InstanceCreateDraft, type InstanceCreateInput, type InstanceCreateTaskRequest, type InstanceReleaseCatalogResponse } from "../api/instances";
 import { validateCreationInput } from "../lib/instanceCreation";
 import { describeError, type UserError } from "../lib/commandError";
 import type { ServerSummary, TaskSnapshot, InstanceTarget } from "../types/contracts";
@@ -7,14 +7,18 @@ import { useTasks } from "./useTasks";
 
 export function useInstanceCreation(server:Readonly<Ref<ServerSummary|null>>, revision:Readonly<Ref<number>>, open:Readonly<Ref<boolean>>, emit?:(event:"creationSucceeded",target:InstanceTarget)=>void) {
   const fields=reactive<InstanceCreateDraft>({displayName:"",autostart:true,startAfterCreate:false,portPolicy:"auto",cavesEnabled:true});
-  const task=shallowRef<TaskSnapshot|null>(null), releaseCatalog=shallowRef<InstanceReleaseCatalogResponse|null>(null), error=shallowRef<UserError|null>(null), releaseError=shallowRef<UserError|null>(null);
-  const selectedReleaseId=ref(""), releaseLoading=ref(false), loading=ref(false), creating=ref(false), taskStore=useTasks();
-  let epoch=0, releaseSequence=0, pollTimer:ReturnType<typeof setTimeout>|undefined;
-  function stopPolling(){if(pollTimer){clearTimeout(pollTimer);pollTimer=undefined;}}
+  const taskStore=useTasks();
+  const currentOperationId=ref("");
+  const task=computed<TaskSnapshot|null>(() => currentOperationId.value
+    ? taskStore.tasks.value.find(item => item.operationId===currentOperationId.value && item.operation==="instanceCreate") ?? null
+    : null);
+  const releaseCatalog=shallowRef<InstanceReleaseCatalogResponse|null>(null), error=shallowRef<UserError|null>(null), releaseError=shallowRef<UserError|null>(null);
+  const selectedReleaseId=ref(""), releaseLoading=ref(false), loading=ref(false), creating=ref(false);
+  let epoch=0, releaseSequence=0;
   const releaseOptions=()=>releaseCatalog.value?.releases??[];
   const selectedRelease=()=>releaseOptions().find(item=>item.releaseId===selectedReleaseId.value)??null;
   const releaseReady=()=>!releaseLoading.value&&!releaseError.value&&!!releaseCatalog.value?.catalogDigest&&!!selectedRelease()?.verified;
-  function invalidateContext(){epoch++;releaseSequence++;stopPolling();task.value=null;releaseCatalog.value=null;selectedReleaseId.value="";error.value=null;releaseError.value=null;releaseLoading.value=false;loading.value=false;creating.value=false;}
+  function invalidateContext(){epoch++;releaseSequence++;currentOperationId.value="";releaseCatalog.value=null;selectedReleaseId.value="";error.value=null;releaseError.value=null;releaseLoading.value=false;loading.value=false;creating.value=false;}
   watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.recordVersion,()=>revision.value,()=>open.value],()=>{
     invalidateContext();
     if(open.value) { Object.assign(fields,{displayName:"",autostart:true,startAfterCreate:false,portPolicy:"auto",cavesEnabled:true}); void refreshReleaseCatalog(); }
@@ -43,27 +47,18 @@ export function useInstanceCreation(server:Readonly<Ref<ServerSummary|null>>, re
     }catch(cause){if(current())releaseError.value=describeError(cause);}
     finally{if(current())releaseLoading.value=false;}
   }
-  function applyTask(next:TaskSnapshot|null,target:ServerSummary,operationId:string,ticket:number,delay:number){
-    task.value=next;
-    if(next)taskStore.receive(next);
-    if(next&&["queued","running"].includes(next.status)){
-      creating.value=true;
-      pollTimer=setTimeout(()=>void refreshTask(target,operationId,ticket),delay);
-      return;
+  watch(task, next => {
+    if (!next) return;
+    if (["queued", "running"].includes(next.status)) { creating.value = true; return; }
+    creating.value = false;
+    if (next.status === "succeeded" && next.result?.verification === "passed") {
+      const ticket = epoch;
+      setTimeout(() => {
+        if (open.value && epoch === ticket && emit) emit("creationSucceeded", next.target as InstanceTarget);
+      }, 1000);
     }
-    creating.value=false;
-    if(next?.status==="succeeded"&&next.result?.verification==="passed"){
-      setTimeout(()=>{if(open.value&&epoch===ticket&&emit)emit("creationSucceeded",next.target as InstanceTarget);},1000);
-    }
-  }
-  async function refreshTask(target:ServerSummary,operationId:string,ticket:number){
-    if(!open.value||epoch!==ticket)return;
-    try{
-      const response=await getInstanceCreateStatus({schemaVersion:1,requestId:crypto.randomUUID(),target:{serverId:target.serverId,hostId:target.hostId!},expectedRecordVersion:target.recordVersion,operationId});
-      if(!open.value||epoch!==ticket)return;
-      applyTask(response.task,target,operationId,ticket,1500);
-    }catch(cause){if(open.value&&epoch===ticket){creating.value=false;error.value=describeError(cause);}}
-  }
+  }, { flush: "sync" });
+
   async function create(){
     const target=server.value, release=selectedRelease(), catalogDigest=releaseCatalog.value?.catalogDigest;
     if(!open.value||loading.value||creating.value||!target?.hostId||!releaseReady()||!release||!catalogDigest)return;
@@ -72,11 +67,11 @@ export function useInstanceCreation(server:Readonly<Ref<ServerSummary|null>>, re
     const input:InstanceCreateInput={displayName:fields.displayName.trim(),autostart:fields.autostart,startAfterCreate:fields.startAfterCreate,portPolicy:fields.portPolicy,cavesEnabled:fields.cavesEnabled};
     const request:InstanceCreateTaskRequest={schemaVersion:1,requestId:crypto.randomUUID(),target:{serverId:target.serverId,hostId:target.hostId},expectedRecordVersion:target.recordVersion,expectedRegistryRevision:revision.value,operationId,input:{...input,releaseId:release.releaseId,releaseCatalogDigest:catalogDigest}};
     const current=()=>open.value&&epoch===ticket&&server.value?.serverId===request.target.serverId&&server.value.hostId===request.target.hostId&&server.value.recordVersion===request.expectedRecordVersion&&revision.value===request.expectedRegistryRevision;
-    loading.value=true;task.value=null;error.value=null;
-    try{const response=await createInstance(request);if(!current())return;applyTask(response.task,target,operationId,ticket,500);}
+    loading.value=true;currentOperationId.value="";error.value=null;
+    try{const response=await createInstance(request);if(response.task)taskStore.receive(response.task);if(!current())return;if(response.task){currentOperationId.value=response.task.operationId;creating.value=["queued","running"].includes(response.task.status);}}
     catch(cause){if(current())error.value=describeError(cause);}
     finally{if(current())loading.value=false;}
   }
-  onBeforeUnmount(()=>{stopPolling();invalidateContext();});
+  onBeforeUnmount(()=>{invalidateContext();});
   return {fields,task,releaseCatalog,releaseError,releaseLoading,releaseReady,selectedReleaseId,releaseOptions,error,loading,creating,create,refreshReleaseCatalog};
 }

@@ -8,16 +8,17 @@ import StatusLabel from "../components/StatusLabel.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
+import { useOperations } from "../composables/useOperations";
 import { useInstanceList } from "../composables/useInstanceList";
 import { useTasks } from "../composables/useTasks";
 import { instanceState, canInspectInstance, gameModeLabel, formatBeijingDateTime } from "../lib/instanceList";
-import { creationTaskErrorLabel, creationTaskStageLabel, isCreationTask } from "../lib/instanceCreationTask";
+import { stageLabel, taskOperationLabel } from "../lib/operationView";
 import { deleteInstance, previewInstanceDelete, type InstanceDeletePreview } from "../api/instances";
 import { describeError } from "../lib/commandError";
 import type { UserError } from "../lib/commandError";
 import type { InstanceSummary } from "../types/contracts";
 import type { TaskSnapshot } from "../types/contracts";
-const route=useRoute(), router=useRouter(), workspace=useWorkspace();
+const route=useRoute(), router=useRouter(), workspace=useWorkspace(), operations=useOperations();
 const server=computed(()=>workspace.servers.value.find(item=>item.serverId===route.params.serverId) ?? null);
 const {data,error,loading,stale,refresh}=useInstanceList(server,workspace.preview);
 const taskStore=useTasks();
@@ -40,11 +41,12 @@ function enter(instance:InstanceSummary){
   void router.push(`/hosts/${server.value.serverId}/instances/${instance.instanceId}/overview`);
 }
 function taskFor(instance:InstanceSummary){
-  const task=[...taskStore.tasks.value.values()].find(task=>isCreationTask(task)
-    && "hostId" in task.target
-    && task.target.hostId===instance.hostId
-    && "instanceId" in task.target && task.target.instanceId===instance.instanceId);
-  return task?.status==="succeeded"?undefined:task;
+  const tasks=[...taskStore.tasks.value]
+    .filter(task=>"hostId" in task.target && task.target.hostId===instance.hostId
+      && "instanceId" in task.target && task.target.instanceId===instance.instanceId)
+    .sort((left,right)=>(Date.parse(right.createdAt)||0)-(Date.parse(left.createdAt)||0));
+  return tasks.find(task=>["queued","running"].includes(task.status))
+    ?? tasks.find(task=>["failed","interrupted"].includes(task.status));
 }
 function canDeleteInstance(instance:InstanceSummary){return !workspace.preview.value && !stale.value && !loading.value
   && !["deleting","deleteFailed","retired"].includes(instance.lifecycle);}
@@ -70,22 +72,30 @@ async function openDelete(instance:InstanceSummary){
 async function deleteSelectedInstance(){
   const instance=deleteTarget.value,target=server.value,snapshot=data.value,plan=deletePlan.value;
   if(!instance||!target?.hostId||!snapshot||!plan||!plan.allowed||deleteBusy.value||deleteName.value!==instance.displayName)return;
+  if(!deleteOperationId.value)deleteOperationId.value=crypto.randomUUID();
+  const operationId=deleteOperationId.value;
+  const instanceTarget={serverId:target.serverId,hostId:instance.hostId,instanceId:instance.instanceId};
   deleteBusy.value=true;deleteError.value="";
-  try{
-    if(!deleteOperationId.value)deleteOperationId.value=crypto.randomUUID();
-    const requestId=crypto.randomUUID();
-    const response=await deleteInstance({schemaVersion:1,requestId,
-      target:{serverId:target.serverId,hostId:instance.hostId,instanceId:instance.instanceId},
-      expectedRecordVersion:target.recordVersion,expectedRegistryRevision:snapshot.registryRevision,
-      planId:plan.planId,operationId:deleteOperationId.value,typedName:deleteName.value});
-    if(response.requestId!==requestId||response.recordVersion!==target.recordVersion
-      ||response.target.serverId!==target.serverId||response.target.hostId!==instance.hostId||response.target.instanceId!==instance.instanceId
-      ||!response.removed||response.registryRevision<=snapshot.registryRevision)
-      throw new Error("删除结果目标不匹配");
-    if(server.value?.serverId!==target.serverId||server.value.recordVersion!==target.recordVersion)return;
-    deleteTarget.value=null;deletePlan.value=null;deleteName.value="";await refresh();
-  }catch(cause){deleteDiagnostics.value=describeError(cause);deleteError.value=deleteDiagnostics.value.message;}
-  finally{deleteBusy.value=false;}
+  const outcome=await operations.run({
+    kind:"instanceDelete",target:instanceTarget,title:`删除专服 ${instance.displayName}`,stage:"删除并归档",
+    work:async setStage=>{
+      const requestId=crypto.randomUUID();
+      const response=await deleteInstance({schemaVersion:1,requestId,
+        target:instanceTarget,
+        expectedRecordVersion:target.recordVersion,expectedRegistryRevision:snapshot.registryRevision,
+        planId:plan.planId,operationId,typedName:deleteName.value});
+      setStage("验证删除结果");
+      if(response.requestId!==requestId||response.recordVersion!==target.recordVersion
+        ||response.target.serverId!==target.serverId||response.target.hostId!==instance.hostId||response.target.instanceId!==instance.instanceId
+        ||!response.removed||response.registryRevision<=snapshot.registryRevision)
+        throw new Error("删除结果目标不匹配");
+      return response;
+    },
+  });
+  deleteBusy.value=false;
+  if(server.value?.serverId!==target.serverId||server.value.recordVersion!==target.recordVersion)return;
+  if(outcome.error){deleteDiagnostics.value=outcome.error;deleteError.value=outcome.error.message;return;}
+  deleteTarget.value=null;deletePlan.value=null;deleteName.value="";await refresh();
 }
 function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACTIVE_TASK:"实例仍有未结束任务",TASK_STATUS_MISSING:"任务状态缺失，结果待核实",CONTAINER_RUNNING:"实例仍有运行中的容器",CONTAINER_REMOVING:"实例容器正在删除，请等待 Docker 状态稳定",BACKUP_REQUIRED:"发现世界数据，需先完成保护备份",TASK_STATUS_UNKNOWN:"无法核对任务状态",RESOURCE_IDENTITY_INVALID:"Docker 资源归属不匹配",DATA_UNSAFE:"实例目录权限或文件类型不安全",DATA_CONFLICT:"归档目标已存在"};return labels[code]??"删除条件未满足";}
 </script>
@@ -100,7 +110,7 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
     <template v-else-if="data">
       <section class="summary-line"><div><span class="metric-number">{{instances.length}}</span><span>个专服</span></div><span class="summary-divider"/><div><span>{{running}} 个运行中</span><span v-if="unknown">{{unknown}} 个未核实</span></div><StatusLabel v-if="stale" tone="warning" label="结果已过期"/></section>
       <div v-if="!instances.length" class="empty-state"><ServerCog :size="28"/><h2>暂无专服</h2></div>
-      <div v-else class="table-wrap"><table><thead><tr><th>名称</th><th>模式</th><th>洞穴</th><th>状态</th><th>玩家</th><th>版本</th><th>最近运行采集</th><th/></tr></thead><tbody><tr v-for="item in instances" :key="item.instanceId"><td><div class="table-primary"><ServerCog :size="17"/><strong>{{item.displayName}}</strong></div><small v-if="!item.manifestAvailable" class="table-sub">配置未完成</small></td><td>{{gameModeLabel(item.gameMode)}}</td><td>{{item.cavesEnabled === null ? '未知' : item.cavesEnabled ? '启用' : '关闭'}}</td><td><StatusLabel :tone="instanceState(item).tone" :label="instanceState(item).label"/><small v-if="taskFor(item)" class="table-sub">{{taskFor(item)!.status==='failed' ? creationTaskErrorLabel(taskFor(item)!.error?.code) : creationTaskStageLabel(taskFor(item)!.stage)}}</small><button v-if="taskFor(item)" class="text-button" type="button" @click="selectedTask=taskFor(item)??null"><FileText :size="14"/>任务记录</button></td><td>{{item.runtimeStatus==='stopped'?'—':item.players===null?(item.maxPlayers===null?'未知':`未知 / ${item.maxPlayers}`):`${item.players} / ${item.maxPlayers ?? '未知'}`}}</td><td class="mono">{{item.installedBuild ?? '未知'}}</td><td class="muted-text">{{formatBeijingDateTime(item.lastSyncedAt)}}</td><td class="table-action"><button v-if="canDeleteInstance(item)" class="icon-button" type="button" :aria-label="`预览删除专服 ${item.displayName}`" title="预览删除专服" @click="openDelete(item)" ><Trash2 :size="15"/></button><button class="text-button" :disabled="stale || !canInspectInstance(item)" @click="enter(item)">进入 <ArrowRight :size="15"/></button></td></tr></tbody></table></div>
+      <div v-else class="table-wrap"><table><thead><tr><th>名称</th><th>模式</th><th>洞穴</th><th>状态</th><th>玩家</th><th>版本</th><th>最近运行采集</th><th/></tr></thead><tbody><tr v-for="item in instances" :key="item.instanceId"><td><div class="table-primary"><ServerCog :size="17"/><strong>{{item.displayName}}</strong></div><small v-if="!item.manifestAvailable" class="table-sub">配置未完成</small></td><td>{{gameModeLabel(item.gameMode)}}</td><td>{{item.cavesEnabled === null ? '未知' : item.cavesEnabled ? '启用' : '关闭'}}</td><td><StatusLabel :tone="instanceState(item).tone" :label="instanceState(item).label"/><small v-if="taskFor(item)" class="table-sub">{{taskOperationLabel(taskFor(item)!.operation)}} · {{stageLabel(taskFor(item)!.stage)}}</small><button v-if="taskFor(item)" class="text-button" type="button" @click="selectedTask=taskFor(item)??null"><FileText :size="14"/>任务记录</button></td><td>{{item.runtimeStatus==='stopped'?'—':item.players===null?(item.maxPlayers===null?'未知':`未知 / ${item.maxPlayers}`):`${item.players} / ${item.maxPlayers ?? '未知'}`}}</td><td class="mono">{{item.installedBuild ?? '未知'}}</td><td class="muted-text">{{formatBeijingDateTime(item.lastSyncedAt)}}</td><td class="table-action"><button v-if="canDeleteInstance(item)" class="icon-button" type="button" :aria-label="`预览删除专服 ${item.displayName}`" title="预览删除专服" @click="openDelete(item)" ><Trash2 :size="15"/></button><button class="text-button" :disabled="stale || !canInspectInstance(item)" @click="enter(item)">进入 <ArrowRight :size="15"/></button></td></tr></tbody></table></div>
     </template>
     <div v-else-if="!error" class="empty-state"><ServerCog :size="28"/><h2>尚未读取专服</h2></div>
     <AppDialog :open="!!deleteTarget" title="删除专服" description="只移除已核实归属且未运行的 Docker 容器与网络；启动失败且反复重启的受管容器会先强制停止。实例目录会完整移入 retired 归档；不删除 DST 镜像和其他实例资源。" @update:open="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
@@ -117,9 +127,9 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
       </div>
       <template #footer><button class="button" :disabled="deleteBusy" @click="deleteTarget=null;deletePlan=null">取消</button><button v-if="deletePlan?.allowed" class="button danger" :disabled="deleteBusy || deleteName!==deleteTarget?.displayName" @click="deleteSelectedInstance">{{deleteBusy?'正在删除…':'确认并归档删除'}}</button></template>
     </AppDialog>
-    <AppDialog :open="!!selectedTask" title="创建任务记录" @update:open="value=>{if(!value)selectedTask=null}">
+    <AppDialog :open="!!selectedTask" title="任务记录" @update:open="value=>{if(!value)selectedTask=null}">
       <div v-if="selectedTask" class="form-stack">
-        <p><StatusLabel :tone="selectedTask.status==='failed'?'danger':selectedTask.status==='succeeded'?'success':'warning'" :label="selectedTask.status==='failed'?'失败':selectedTask.status==='succeeded'?'成功':selectedTask.status==='interrupted'?'待核实':'进行中'"/> {{creationTaskStageLabel(selectedTask.stage)}}</p>
+        <p><StatusLabel :tone="selectedTask.status==='failed'?'danger':selectedTask.status==='succeeded'?'success':'warning'" :label="selectedTask.status==='failed'?'失败':selectedTask.status==='succeeded'?'成功':selectedTask.status==='interrupted'?'待核实':'进行中'"/> {{taskOperationLabel(selectedTask.operation)}} · {{stageLabel(selectedTask.stage)}}</p>
         <p v-if="selectedTask.error?.message" class="environment-error">{{selectedTask.error.message}}</p>
         <pre v-if="typeof selectedTask.error?.details.composeDiagnostic==='string'">{{selectedTask.error.details.composeDiagnostic}}</pre>
         <pre v-if="typeof selectedTask.error?.details.dockerDiagnostic==='string'">{{selectedTask.error.details.dockerDiagnostic}}</pre>

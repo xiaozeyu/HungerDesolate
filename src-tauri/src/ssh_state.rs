@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use std::{
     fs::{File, OpenOptions},
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -42,6 +42,8 @@ pub fn now() -> CommandResult<u64> {
 }
 
 pub fn mutation_guard(database: &Path) -> CommandResult<File> {
+    const WAIT: Duration = Duration::from_secs(2);
+    const RETRY: Duration = Duration::from_millis(25);
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -49,16 +51,22 @@ pub fn mutation_guard(database: &Path) -> CommandResult<File> {
         .write(true)
         .open(database.with_extension("credentials.lock"))
         .map_err(|_| CommandError::storage("localConnectionMutation"))?;
-    file.try_lock().map_err(|_| {
-        CommandError::new(
-            "CONNECTION_BUSY",
-            "conflict",
-            "localConnectionMutation",
-            "其他连接或凭据操作尚未结束",
-            "等待操作完成后重试",
-        )
-    })?;
-    Ok(file)
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(RETRY),
+            Err(_) => {
+                return Err(CommandError::new(
+                    "CONNECTION_BUSY",
+                    "conflict",
+                    "localConnectionMutation",
+                    "其他连接或凭据操作尚未结束",
+                    "等待操作完成后重试",
+                ))
+            }
+        }
+    }
 }
 pub fn checked(
     connection: &Connection,
@@ -541,14 +549,14 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn local_file_lock_prevents_parallel_credential_mutation() -> TestResult {
+    fn local_file_lock_waits_for_parallel_credential_mutation() -> TestResult {
         let database = Database::new()?;
         let guard = mutation_guard(&database.path)?;
-        assert!(
-            matches!(mutation_guard(&database.path),Err(error) if error.code=="CONNECTION_BUSY")
-        );
+        let path = database.path.clone();
+        let waiter = std::thread::spawn(move || mutation_guard(&path).map(|_| ()));
+        std::thread::sleep(std::time::Duration::from_millis(50));
         drop(guard);
-        assert!(mutation_guard(&database.path).is_ok());
+        assert!(waiter.join().expect("lock waiter thread").is_ok());
         Ok(())
     }
     #[test]

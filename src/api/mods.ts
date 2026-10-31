@@ -20,6 +20,11 @@ export function applyInstanceMods(request: {
 }): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot }> {
   return call("apply_instance_mods", request);
 }
+export function cancelInstanceModApply(request: {
+  schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; operationId: string;
+}): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot }> {
+  return call("cancel_instance_mod_apply", request);
+}
 export function getInstanceModApplyTask(request: {
   schemaVersion: 1; requestId: string; target: InstanceTarget; expectedRecordVersion: number; operationId: string;
 }): Promise<{ schemaVersion: 1; requestId: string; target: InstanceTarget; task: TaskSnapshot }> {

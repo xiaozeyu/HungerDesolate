@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Eye, Library, Pencil, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
+import { Eye, Library, Package, Pencil, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
 import AppDialog from "../components/AppDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import { applyInstanceMods, getInstanceModApplyTask, listInstanceModApplyTasks,
-  listInstanceMods, previewInstanceMods, saveInstanceMods } from "../api/mods";
+import { applyInstanceMods, listInstanceModApplyTasks,
+  cancelInstanceModApply, listInstanceMods, previewInstanceMods, saveInstanceMods } from "../api/mods";
 import { getInstanceOverview } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
@@ -36,8 +36,17 @@ const loading = ref(false);
 const error = ref("");
 const hostLibraryOpen = ref(false), hostLibraryItems = ref<HostModItem[]>([]), hostLibraryLoading = ref(false), hostLibraryError = ref("");
 const savingWorkshopId = ref<string | null>(null);
-const applyTask = ref<TaskSnapshot | null>(null);
+const applyTask = computed<TaskSnapshot | null>(() => {
+  const selected = target.value;
+  if (!selected) return null;
+  const key = `${selected.serverId}:${selected.hostId}:${selected.instanceId}`;
+  const tasks = taskStore.tasks.value.filter(task => applyTaskBelongsHere(task, key))
+    .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
+  return tasks.find(task => ["queued", "running"].includes(task.status)) ?? tasks[0] ?? null;
+});
 const applyTaskError = ref("");
+const cancelBusy = ref(false);
+const cancelMessage = ref("");
 const removeTarget = ref<InstanceModSummary | null>(null);
 const removeBusy = ref(false);
 const removeError = ref("");
@@ -65,10 +74,10 @@ let epoch = 0;
 let sequence = 0;
 let latestRequestId = "";
 const finalizedPrepareTasks = new Set<string>();
-let applyPollTimer: ReturnType<typeof setTimeout> | undefined;
 
 const enabledCount = computed(() => items.value.filter(item => item.desiredEnabled === true).length);
 const pendingCount = computed(() => items.value.filter(modNeedsApply).length);
+const disabledCount = computed(() => items.value.filter(item => item.desiredEnabled === false).length);
 
 function statusLabel(status: ModSchemaStatus) {
   return { available: "可配置", partial: "部分支持", noOptions: "无配置项", unavailable: "未准备", failed: "解析失败" }[status];
@@ -128,8 +137,8 @@ function resetContext() {
   hostLibraryItems.value = [];
   hostLibraryLoading.value = false;
   hostLibraryError.value = "";
-  applyTask.value = null;
   applyTaskError.value = "";
+  cancelMessage.value = "";
   serverApplyPreview.value = null;
   applyBusy.value = false;
   createProtectionBackup.value = false;
@@ -147,8 +156,6 @@ function resetContext() {
   applyPreviewRevision.value = null;
   applyPreviewRuntime.value = null;
   finalizedPrepareTasks.clear();
-  if (applyPollTimer) clearTimeout(applyPollTimer);
-  applyPollTimer = undefined;
 }
 async function openHostLibrary() {
   hostLibraryOpen.value = true;
@@ -544,16 +551,24 @@ function acceptApplyTask(task: TaskSnapshot, targetKey: string) {
   if (task.schemaVersion !== 1 || !applyTaskBelongsHere(task, targetKey)) {
     throw new Error("MOD 应用任务目标无效");
   }
-  applyTask.value = task;
   taskStore.receive(task);
-  if (["queued", "running"].includes(task.status)) scheduleApplyPoll(targetKey, task.operationId);
-  else {
-    if (applyPollTimer) clearTimeout(applyPollTimer);
-    applyPollTimer = undefined;
-    if (task.status === "succeeded") {
-      applyPreviewOpen.value = false;
-      void refresh();
-    }
+}
+
+async function cancelApply() {
+  const instanceTarget = target.value, connection = server.value, currentTask = applyTask.value;
+  if (!instanceTarget || !connection || !currentTask || cancelBusy.value || !["queued", "running"].includes(currentTask.status)) return;
+  cancelBusy.value = true;
+  applyTaskError.value = "";
+  cancelMessage.value = "";
+  try {
+    const response = await cancelInstanceModApply({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      target: instanceTarget, expectedRecordVersion: connection.recordVersion, operationId: currentTask.operationId });
+    taskStore.receive(response.task);
+    cancelMessage.value = "取消请求已提交，等待任务安全结束。";
+  } catch (cause) {
+    applyTaskError.value = describeError(cause).message;
+  } finally {
+    cancelBusy.value = false;
   }
 }
 
@@ -578,37 +593,10 @@ async function refreshApplyTasks() {
       taskStore.receive(task);
     }
     const current = response.items.find(task => ["queued", "running"].includes(task.status)) ?? response.items[0] ?? null;
-    if (current) acceptApplyTask(current, targetKey);
+    if (current) taskStore.receive(current);
   } catch (cause) {
     if (requestEpoch === epoch) applyTaskError.value = describeError(cause).message;
   }
-}
-
-function scheduleApplyPoll(targetKey: string, operationId: string) {
-  if (applyPollTimer) clearTimeout(applyPollTimer);
-  const requestEpoch = epoch;
-  const connection = server.value;
-  const instanceTarget = target.value;
-  if (!connection || !instanceTarget) return;
-  const recordVersion = connection.recordVersion;
-  applyPollTimer = setTimeout(async () => {
-    try {
-      const requestId = crypto.randomUUID();
-      const response = await queueSsh(() => getInstanceModApplyTask({ schemaVersion: 1,
-        requestId, target: instanceTarget, expectedRecordVersion: recordVersion, operationId }));
-      if (requestEpoch !== epoch || !target.value
-        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-        || server.value?.recordVersion !== recordVersion) return;
-      if (response.schemaVersion !== 1 || response.requestId !== requestId
-          || response.task.operationId !== operationId || !applyTaskBelongsHere(response.task, targetKey)) {
-        throw new Error("MOD 应用任务响应目标无效");
-      }
-      acceptApplyTask(response.task, targetKey);
-    } catch (cause) {
-      if (requestEpoch === epoch) applyTaskError.value = describeError(cause).message;
-      if (requestEpoch === epoch) scheduleApplyPoll(targetKey, operationId);
-    }
-  }, 2500);
 }
 
 function applyStageLabel(task: TaskSnapshot) {
@@ -637,14 +625,15 @@ async function applyMods() {
       requestId, target: instanceTarget, expectedRecordVersion: recordVersion,
       expectedRevision, desiredDigest: preview.desiredDigest, operationId,
       createProtectionBackup: createProtectionBackup.value }));
-    if (requestEpoch !== epoch || !target.value
-      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-      || server.value?.recordVersion !== recordVersion) return;
     if (response.schemaVersion !== 1 || response.requestId !== requestId
         || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
         || response.target.instanceId !== instanceTarget.instanceId || response.task.operationId !== operationId) {
       throw new Error("MOD 应用任务接纳响应身份无效");
     }
+    taskStore.receive(response.task);
+    if (requestEpoch !== epoch || !target.value
+      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
+      || server.value?.recordVersion !== recordVersion) return;
     acceptApplyTask(response.task, targetKey);
   } catch (cause) {
     if (requestEpoch === epoch && target.value
@@ -656,6 +645,13 @@ async function applyMods() {
       && server.value?.recordVersion === recordVersion) applyBusy.value = false;
   }
 }
+
+watch(applyTask, (next, previous) => {
+  if (next?.status === "succeeded" && previous?.status !== "succeeded") {
+    applyPreviewOpen.value = false;
+    void refresh();
+  }
+}, { flush: "sync" });
 
 async function refreshAll() {
   await refresh();
@@ -671,9 +667,6 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
   void refresh();
   void refreshApplyTasks();
 }, { immediate: true });
-onBeforeUnmount(() => {
-  if (applyPollTimer) clearTimeout(applyPollTimer);
-});
 </script>
 
 <template>
@@ -700,13 +693,21 @@ onBeforeUnmount(() => {
         <strong>{{ applyTask.status === 'succeeded' ? 'MOD 应用完成' : applyTask.status === 'failed' ? 'MOD 应用失败' : applyTask.status === 'interrupted' ? 'MOD 应用中断' : '正在应用 MOD' }}</strong>
         <span>{{ applyStageLabel(applyTask) }}</span>
         <span v-if="applyTask.status === 'failed'" class="task-failure-detail">{{ applyTask.error?.message ?? '任务错误详情暂不可用' }} <span class="mono">{{ applyTask.error?.code }}</span></span>
+        <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
       </div>
-      <span class="muted-text mono">{{ applyTask.progress.kind === 'determinate' ? `${applyTask.progress.completed}/${applyTask.progress.total}` : '处理中' }}</span>
+      <div class="task-panel-actions">
+        <span class="muted-text mono">{{ applyTask.progress.kind === 'determinate' ? `${applyTask.progress.completed}/${applyTask.progress.total}` : '处理中' }}</span>
+        <button v-if="applyTask.cancelAllowed && ['queued', 'running'].includes(applyTask.status)" class="button subtle" type="button" :disabled="cancelBusy" @click="cancelApply">{{ cancelBusy ? "提交中…" : "取消任务" }}</button>
+      </div>
     </section>
     <section v-if="revision !== null" class="summary-line">
+      <div><span class="metric-number">{{ items.length }}</span><span>个 MOD</span></div>
+      <span class="summary-divider" />
       <div><span class="metric-number">{{ enabledCount }}</span><span>个已启用</span></div>
       <span class="summary-divider" />
       <div><span class="metric-number warning-number">{{ pendingCount }}</span><span>个待应用</span></div>
+      <span class="summary-divider" />
+      <div><span class="metric-number">{{ disabledCount }}</span><span>个已禁用</span></div>
       <span class="summary-divider" />
       <div class="muted-text">配置版本 {{ revision }}</div>
     </section>
@@ -723,10 +724,10 @@ onBeforeUnmount(() => {
     <div v-else-if="!loading && items.length === 0" class="empty-state"><h2>尚未发现 MOD</h2></div>
     <div v-else class="table-wrap">
       <table>
-        <thead><tr><th>Workshop ID</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th class="table-action">操作</th></tr></thead>
+        <thead><tr><th>MOD</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th class="table-action">操作</th></tr></thead>
         <tbody>
           <tr v-for="item in items" :key="item.workshopId">
-            <td class="mono">{{ item.workshopId }}</td>
+            <td><div class="table-primary"><Package :size="17"/><strong>{{ item.schema.metadata.name ?? item.workshopId }}</strong></div><small class="table-sub mono">Workshop · {{ item.workshopId }}</small></td>
             <td><StatusLabel :tone="item.desiredEnabled === null ? 'warning' : item.desiredEnabled ? 'success' : 'muted'" :label="item.desiredEnabled === null ? '已移出期望' : item.desiredEnabled ? '启用' : '禁用'" /></td>
             <td>
               <StatusLabel :tone="modNeedsApply(item) ? 'warning' : 'success'" :label="modNeedsApply(item) ? '待应用' : '一致'" />

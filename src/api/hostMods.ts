@@ -31,6 +31,11 @@ export function prepareHostMods(request: {
   return call("prepare_host_mods", request);
 }
 
+export function cancelHostModTask(request: {
+  schemaVersion: 1; requestId: string; target: HostTarget; expectedRecordVersion: number; operationId: string;
+}): Promise<{ schemaVersion: 1; requestId: string; target: HostTarget; task: TaskSnapshot }> {
+  return call("cancel_host_mod_task", request);
+}
 export function getHostModTask(request: {
   schemaVersion: 1; requestId: string; target: HostTarget; expectedRecordVersion: number; operationId: string;
 }): Promise<{ schemaVersion: 1; requestId: string; target: HostTarget; task: TaskSnapshot }> {

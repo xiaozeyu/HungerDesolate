@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { RefreshCw, Terminal, AlertCircle } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
@@ -7,20 +7,38 @@ import StatusLabel from "../components/StatusLabel.vue";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { getInstanceDiagnostics, type DiagnosticsResponse } from "../api/diagnostics";
-import { describeError } from "../lib/commandError";
 import { formatBytes } from "../lib/environmentView";
-import type { UserError } from "../lib/commandError";
+import { useQuery } from "../lib/queryClient";
 
 const { server, target, instanceName } = usePageTarget();
 const workspace = useWorkspace();
-const data = ref<DiagnosticsResponse | null>(null);
-const loading = ref(false);
-const error = ref<UserError | null>(null);
-const stale = ref(false);
 const selectedShard = ref<"master" | "caves">("master");
-let epoch = 0;
-let sequence = 0;
-
+const key = computed(() => {
+  const connection = server.value, current = target.value;
+  return connection && current
+    ? `diagnostics:${current.serverId}:${current.hostId}:${current.instanceId}:${connection.recordVersion}`
+    : null;
+});
+const query = useQuery<DiagnosticsResponse>(key, async () => {
+  const connection = server.value, current = target.value;
+  if (!connection || !current) throw new Error("缺少专服连接");
+  const requestId = crypto.randomUUID();
+  const response = await getInstanceDiagnostics({ schemaVersion: 1, requestId, target: current,
+    expectedRecordVersion: connection.recordVersion, logLimit: 200 });
+  if (server.value?.recordVersion !== connection.recordVersion
+      || target.value?.instanceId !== current.instanceId) throw new Error("诊断请求上下文已失效");
+  if (response.requestId !== requestId || response.recordVersion !== connection.recordVersion
+      || response.target.serverId !== current.serverId || response.target.hostId !== current.hostId
+      || response.target.instanceId !== current.instanceId) {
+    throw new Error("诊断响应身份或版本不匹配");
+  }
+  return response;
+});
+const data = query.data;
+const loading = query.loading;
+const error = query.error;
+const stale = query.stale;
+const refresh = query.refresh;
 const shardLog = computed(() => data.value?.logs.find(item => item.shard === selectedShard.value) ?? null);
 const health = computed(() => data.value?.health ?? null);
 const runtimeLabel = computed(() => {
@@ -33,47 +51,10 @@ const formatTime = (value: string | null) => value ? new Date(value).toLocaleStr
 const warningLabel = (value: string) => value === "DOCKER_CONTAINERS_UNAVAILABLE" ? "无法读取 Docker 容器"
   : value.startsWith("SHARD_CONTAINER_MISSING:") ? `${shardLabel(value.slice(24) as "master" | "caves")} 容器缺失`
   : value;
-
-async function refresh() {
-  const connection = server.value, currentTarget = target.value;
-  if (!connection || !currentTarget || workspace.preview.value) return;
-  const ticket = ++sequence, requestEpoch = epoch;
-  const requestId = crypto.randomUUID();
-  loading.value = true;
-  error.value = null;
-  try {
-    const response = await getInstanceDiagnostics({ schemaVersion: 1, requestId, target: currentTarget,
-      expectedRecordVersion: connection.recordVersion, logLimit: 200 });
-    if (ticket !== sequence || requestEpoch !== epoch || target.value === null
-        || server.value?.recordVersion !== connection.recordVersion) return;
-    if (response.requestId !== requestId || response.recordVersion !== connection.recordVersion
-        || response.target.serverId !== currentTarget.serverId || response.target.hostId !== currentTarget.hostId
-        || response.target.instanceId !== currentTarget.instanceId) {
-      throw new Error("诊断响应身份或版本不匹配");
-    }
-    data.value = response;
-    stale.value = false;
-    if (!response.logs.some(item => item.shard === selectedShard.value)) selectedShard.value = response.logs[0]?.shard ?? "master";
-  } catch (cause) {
-    if (requestEpoch === epoch) {
-      error.value = describeError(cause);
-      stale.value = data.value !== null;
-    }
-  } finally {
-    if (requestEpoch === epoch) loading.value = false;
-  }
-}
-
-watch([() => server.value?.serverId, () => server.value?.recordVersion, () => workspace.preview.value], () => {
-  epoch++;
-  sequence++;
-  data.value = null;
-  error.value = null;
-  stale.value = false;
-  selectedShard.value = "master";
-  void refresh();
-}, { immediate: true });
-onBeforeUnmount(() => { epoch++; sequence++; });
+watch(data, response => {
+  if (!response) return;
+  if (!response.logs.some(item => item.shard === selectedShard.value)) selectedShard.value = response.logs[0]?.shard ?? "master";
+}, { flush: "post" });
 </script>
 
 <template>

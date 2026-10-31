@@ -6,6 +6,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { useWorkspace } from "../composables/useWorkspace";
 import { describeError } from "../lib/commandError";
 import PageHeader from "../components/PageHeader.vue";
+import StatusLabel from "../components/StatusLabel.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import AppDialog from "../components/AppDialog.vue";
 import ServerForm from "../components/ServerForm.vue";
@@ -13,6 +14,14 @@ import SshConnectionPanel from "../components/SshConnectionPanel.vue";
 import type { DeleteServerRequest, ServerSummary } from "../types/contracts";
 const route = useRoute(); const router = useRouter(); const workspace = useWorkspace();
 const server = computed(() => workspace.servers.value.find(item => item.serverId === route.params.serverId) ?? null);
+const authLabel = computed(() => server.value?.authKind === "key" ? "SSH 密钥" : "密码");
+const stateLabel = computed(() => server.value?.connectionState === "connected" ? "已连接"
+  : server.value?.connectionState === "connecting" ? "连接中"
+  : server.value?.connectionState === "unreachable" ? "不可达"
+  : server.value?.connectionState === "trustRequired" ? "待确认指纹" : "未连接");
+const stateTone = computed<"success"|"warning"|"danger"|"muted">(() => server.value?.connectionState === "connected" ? "success"
+  : server.value?.connectionState === "unreachable" ? "danger"
+  : server.value?.connectionState === "trustRequired" || server.value?.connectionState === "connecting" ? "warning" : "muted");
 const saving = ref(false); const savedMessage = ref("");
 const sshBusy = ref(false);
 const connectedServerId = ref("");
@@ -42,6 +51,13 @@ async function remove() {
   <div class="page">
     <PageHeader :eyebrow="server?.displayName ?? '主机连接'" title="连接设置"/>
     <PreviewNotice/>
+    <section v-if="server" class="summary-line">
+      <div><span class="metric-number">{{server.host}}</span><span>SSH {{server.sshPort}}</span></div>
+      <span class="summary-divider"/>
+      <div><span>{{server.username}}</span><span>{{authLabel}}</span></div>
+      <span class="summary-divider"/>
+      <StatusLabel :tone="stateTone" :label="stateLabel"/>
+    </section>
     <p v-if="savedMessage" class="success-message" role="status">{{savedMessage}}</p>
     <p v-if="connectedServerId" class="success-message" role="status">登录验证通过<button class="text-button" @click="router.push(`/hosts/${connectedServerId}/environment`)">进入主机环境</button></p>
     <p v-if="workspace.error.value" class="error-strip" role="alert">{{workspace.error.value}}</p>

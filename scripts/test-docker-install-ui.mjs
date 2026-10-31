@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createServer } from "vite";
 import { createRenderer, defineComponent, nextTick, ref } from "vue";
 
-let vite, hosts, useHostEnvironment;
+let vite, hosts, useHostEnvironment, dockerTasks;
 const virtualId = "\0docker-install-test-hosts";
 before(async () => {
   vite = await createServer({
@@ -22,6 +22,8 @@ before(async () => {
   });
   hosts = (await vite.ssrLoadModule("virtual:test-hosts")).handlers;
   ({ useHostEnvironment } = await vite.ssrLoadModule("/src/composables/useHostEnvironment.ts"));
+  const { useDockerTasks } = await vite.ssrLoadModule("/src/composables/useDockerTasks.ts");
+  dockerTasks = useDockerTasks();
 });
 after(async () => { await vite?.close(); });
 const hostId = "33333333-3333-4333-8333-333333333333";
@@ -107,7 +109,7 @@ test("lost admission response can still discover the accepted task", async () =>
 
 test("a response for a different task cannot replace the tracked operation", async () => {
   const view=await mount();
-  view.state.dockerTask.value=task();
+  dockerTasks.receive("server-a",hostId,task());
   hosts.getDockerInstallationStatus=async request => {
     assert.equal(request.operationId,operationId);
     return {...envelope(request),hostId,task:{...task(),taskId:"44444444-4444-4444-8444-444444444444"}};
@@ -125,7 +127,7 @@ test("late admission response cannot update a different host or reset its busy s
   hosts.startDockerInstallation=input => {request=input;return reply.promise;};
   try {
     const pending=view.state.startDockerInstall();
-    view.server.value={serverId:"server-b",hostId,recordVersion:3};
+    view.server.value={serverId:"server-b",hostId:"55555555-5555-4555-8555-555555555555",recordVersion:3};
     await flush();
     reply.resolve({...envelope(request),hostId,task:task()});
     await pending;

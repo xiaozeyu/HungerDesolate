@@ -1147,6 +1147,46 @@ pub fn apply_status(
     })
 }
 
+pub fn apply_cancel(
+    database: &Path,
+    request: ApplyTaskRequest,
+) -> CommandResult<DownloadTaskResponse> {
+    if request.schema_version != 1 {
+        return Err(error("SCHEMA_UNSUPPORTED", "MOD 应用取消请求版本无效"));
+    }
+    let connection = apply_connection(
+        &request.target,
+        &request.request_id,
+        request.expected_record_version,
+    )?;
+    crate::server_input::validate_id(
+        &request.operation_id,
+        "cancelInstanceModApply",
+        "operationId",
+    )?;
+    with_verified_session(database, &connection, |session, host_id| {
+        check_apply_identity(host_id, &request.target)?;
+        let value = invoke_apply(
+            session,
+            &serde_json::json!({
+                "schemaVersion":1,"action":"cancel","requestId":request.request_id,
+                "operationId":request.operation_id,"serverId":request.target.server_id,
+                "hostId":request.target.host_id,"instanceId":request.target.instance_id
+            }),
+        )?;
+        let task = value
+            .get("task")
+            .cloned()
+            .ok_or_else(|| error("MOD_APPLY_PROTOCOL_INVALID", "MOD 应用取消失败"))?;
+        Ok(DownloadTaskResponse {
+            schema_version: 1,
+            request_id: request.request_id,
+            target: request.target,
+            task,
+        })
+    })
+}
+
 pub fn apply_tasks(
     database: &Path,
     request: ListRequest,

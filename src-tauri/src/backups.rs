@@ -1006,6 +1006,39 @@ pub fn status(database: &Path, request: TaskStatusRequest) -> CommandResult<Valu
     })
 }
 
+pub fn cancel(database: &Path, request: TaskStatusRequest) -> CommandResult<Value> {
+    if request.schema_version != 1 {
+        return Err(error("SCHEMA_UNSUPPORTED", "备份任务取消请求版本不受支持"));
+    }
+    valid_target(&request.target)?;
+    valid_request_id(&request.request_id)?;
+    crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
+    let connection = connection(
+        &request.request_id,
+        &request.target,
+        request.expected_record_version,
+    );
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "备份主机身份不一致"));
+        }
+        let remote = invoke_task(
+            session,
+            &json!({
+                "schemaVersion": 1, "action": "cancel", "requestId": request.request_id,
+                "operationId": request.operation_id, "hostId": request.target.host_id,
+                "instanceId": request.target.instance_id,
+            }),
+        )?;
+        task_response(
+            remote,
+            &request.request_id,
+            &request.target,
+            &request.operation_id,
+        )
+    })
+}
+
 pub fn list_tasks(database: &Path, request: TaskListRequest) -> CommandResult<Vec<Value>> {
     if request.schema_version != 1 {
         return Err(error("SCHEMA_UNSUPPORTED", "备份任务查询版本不受支持"));
@@ -1374,6 +1407,39 @@ pub fn restore_status(database: &Path, request: RestoreTaskStatusRequest) -> Com
             session,
             &json!({"schemaVersion":1,"action":"restoreStatus","requestId":request.request_id,
             "operationId":request.operation_id,"hostId":request.target.host_id,"instanceId":request.target.instance_id}),
+        )?;
+        restore_task_response(
+            remote,
+            &request.request_id,
+            &request.target,
+            &request.operation_id,
+        )
+    })
+}
+
+pub fn restore_cancel(database: &Path, request: RestoreTaskStatusRequest) -> CommandResult<Value> {
+    if request.schema_version != 1 {
+        return Err(error("SCHEMA_UNSUPPORTED", "恢复任务取消请求版本不受支持"));
+    }
+    valid_target(&request.target)?;
+    valid_request_id(&request.request_id)?;
+    crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
+    let connection = connection(
+        &request.request_id,
+        &request.target,
+        request.expected_record_version,
+    );
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "备份主机身份不一致"));
+        }
+        let remote = invoke_task(
+            session,
+            &json!({
+                "schemaVersion": 1, "action": "restoreCancel", "requestId": request.request_id,
+                "operationId": request.operation_id, "hostId": request.target.host_id,
+                "instanceId": request.target.instance_id,
+            }),
         )?;
         restore_task_response(
             remote,

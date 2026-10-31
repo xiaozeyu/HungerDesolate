@@ -330,6 +330,20 @@ pub async fn apply_instance_mods(
 }
 
 #[tauri::command]
+pub async fn cancel_instance_mod_apply(
+    state: State<'_, AppState>,
+    request: crate::mods::ApplyTaskRequest,
+) -> CommandResult<crate::mods::DownloadTaskResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "cancelInstanceModApply",
+        safe_request_id(&request.request_id),
+        move || crate::mods::apply_cancel(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn get_instance_mod_apply_task(
     state: State<'_, AppState>,
     request: crate::mods::ApplyTaskRequest,
@@ -409,6 +423,20 @@ pub async fn get_instance_backup_task(
         "getInstanceBackupTask",
         safe_request_id(&request.request_id),
         move || crate::backups::status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_instance_backup(
+    state: State<'_, AppState>,
+    request: crate::backups::TaskStatusRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "cancelInstanceBackup",
+        safe_request_id(&request.request_id),
+        move || crate::backups::cancel(&path, request),
     )
     .await
 }
@@ -524,6 +552,20 @@ pub async fn get_instance_restore_task(
         "getInstanceRestoreTask",
         safe_request_id(&request.request_id),
         move || crate::backups::restore_status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_instance_restore(
+    state: State<'_, AppState>,
+    request: crate::backups::RestoreTaskStatusRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "cancelInstanceRestore",
+        safe_request_id(&request.request_id),
+        move || crate::backups::restore_cancel(&path, request),
     )
     .await
 }
@@ -778,6 +820,20 @@ pub async fn get_host_mod_task(
         "getHostModTask",
         safe_request_id(&request.request_id),
         move || crate::host_mods::task(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_host_mod_task(
+    state: State<'_, AppState>,
+    request: crate::host_mods::TaskRequest,
+) -> CommandResult<crate::host_mods::TaskResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "cancelHostModTask",
+        safe_request_id(&request.request_id),
+        move || crate::host_mods::cancel(&path, request),
     )
     .await
 }

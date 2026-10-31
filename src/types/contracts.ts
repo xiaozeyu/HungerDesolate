@@ -132,6 +132,7 @@ export interface TaskSnapshot {
     startedAt: string | null;
     finishedAt: string | null;
     cancelAllowed: boolean;
+    queuePosition?: number;
     observation: "live" | "stale" | "reconciling";
     journal?: {sequence:number;status:TaskStatus;stage:string;at:string}[];
     result?: TaskResult | null;

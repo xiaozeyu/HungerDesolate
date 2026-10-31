@@ -23,6 +23,26 @@ INSTANCE_ID = "22222222-2222-4222-8222-222222222222"
 
 
 class RestoreTaskStateTests(unittest.TestCase):
+    def test_cancel_request_is_written_for_an_active_restore(self):
+        task_id = "44444444-4444-4444-8444-444444444444"
+        with tempfile.TemporaryDirectory(prefix="restore-cancel-") as temporary:
+            root = Path(temporary) / "hub"
+            tasks = root / "restore-tasks"
+            directory = tasks / task_id
+            directory.mkdir(parents=True, mode=0o700)
+            MODULE.atomic_json(directory / "status.json", {"schemaVersion": 1, "taskId": task_id,
+                "operationId": task_id, "target": {"hostId": HOST_ID, "instanceId": INSTANCE_ID},
+                "operation": "backupRestore", "status": "queued", "stage": "queued", "sequence": 1,
+                "createdAt": MODULE.now(), "cancelAllowed": True})
+            (directory / "status.json").chmod(0o600)
+            (directory / "journal.jsonl").write_text("")
+            request = {"schemaVersion": 1, "action": "restoreCancel", "requestId": task_id,
+                       "operationId": task_id, "hostId": HOST_ID, "instanceId": INSTANCE_ID}
+            with patch.object(MODULE, "ROOT", root), patch.object(MODULE, "TASKS", tasks):
+                state = MODULE.cancel(request)
+            self.assertEqual(state["status"], "queued")
+            self.assertTrue((directory / "cancel.request").is_file())
+
     def test_runtime_degradation_comparison_ignores_port_order_but_requires_same_failure(self):
         left = {"check": "udpListeners", "shard": "caves", "missingPorts": [11001, 27017]}
         right = {"check": "udpListeners", "shard": "caves", "missingPorts": [27017, 11001]}
@@ -161,7 +181,7 @@ class RestoreTaskStateTests(unittest.TestCase):
             queued = {"status": "queued", "operationId": request["operationId"]}
             with patch.object(MODULE, "ROOT", root), patch.object(MODULE, "TASKS", tasks), \
                  patch.object(MODULE.os, "geteuid", return_value=0), patch.object(MODULE, "safe_dir"), \
-                 patch.object(MODULE, "verify_instance"), patch.object(MODULE, "load", return_value=queued), \
+                 patch.object(MODULE, "verify_instance"), patch.object(MODULE, "load", return_value=queued),                  patch.object(MODULE, "admit_queue"), \
                  patch.object(MODULE.subprocess, "run", return_value=launch) as run, \
                  patch.object(MODULE, "RESTORE_SOURCE", "worker source", create=True), \
                  patch.object(MODULE, "ARCHIVE_SOURCE", "archive source", create=True), \
@@ -176,7 +196,7 @@ class RestoreTaskStateTests(unittest.TestCase):
             self.assertEqual((operation_dir / "release-source.py").read_text(), "release source")
             self.assertEqual((operation_dir / "mods-apply-source.py").read_text(), "mods apply source")
             self.assertEqual((operation_dir / "mods-download-source.py").read_text(), "mods download source")
-            self.assertIn(str(operation_dir / "worker.py"), run.call_args.args[0])
+            self.assertIn(str(root / "queue-controller.py"), run.call_args.args[0])
 
     def test_restore_worker_bundle_includes_archive_and_release_helpers(self):
         with tempfile.TemporaryDirectory(prefix="restore-bundle-") as temporary:

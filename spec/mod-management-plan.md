@@ -246,7 +246,7 @@ release 内容逻辑不可变，运行 UGC 与它分离。UGC 的 Steam 元数�
 - 准备失败：活动部署不变，保留任务与可清理 staging。
 - 停服或备份失败：不提交新部署；若曾运行，按证据恢复原运行状态。
 - 发布部分提交/SSH 断开：controller 按 journal 与实际文件对账，禁止盲目重做 rename。
-- 新 MOD 已启动后失败：停止新组合，恢复旧 MOD + 旧配置 + 冷备份世界 + 对应 DST 产物，再启动验证；不能只把 MOD 目录切回。
+- 新 MOD 已启动后失败：请求了保护备份时，停止新组合，恢复旧 MOD + 旧配置 + 冷备份世界 + 对应 DST 产物，再启动验证；未请求备份时不做自动恢复，任务失败并提示检查部署状态；不能只把 MOD 目录切回。
 - 缺产物、保护点不完整或恢复失败：保留停止和现场，提供明确恢复动作，不循环启动新旧组合。
 - 成功恢复旧组合仍保留原任务 failed，结果为“更新失败，已恢复原部署”。
 
@@ -320,9 +320,9 @@ ModsSnapshot 分离 desired、deployed、prepared、observed、updateCheck；至
 
 ## 11. 2026-10-23：应用与禁用/移除代码闭环
 
-- `preview_apply_instance_mods` 返回远端权威差异与恢复阻断；`apply_instance_mods` 接纳持久任务并按 target、revision、desired digest 幂等复核。
-- worker 在维护锁下生成独立 Master/Caves UGC MOD Release，对发布副本重新计算各条目摘要并校验 `dedicated_server_mods_setup.lua`；保存冷保护备份后发布配置、Release、活动快照和 Compose，重建原分片。对原本运行的实例核验 DST 进程；原本停止则维持停止状态。
-- 失败及任务中断对账恢复保护备份中的 MOD/世界配置、活动 Release、Compose 和数据目录。普通备份与恢复 worker 同步保存/恢复 MOD desired/deployed 快照及活动 MOD Release。
+- `preview_apply_instance_mods` 返回远端权威差异与恢复阻断；`apply_instance_mods` 接纳持久任务并按 target、revision、desired digest、`createProtectionBackup` 幂等复核。
+- worker 在维护锁下生成独立 Master/Caves UGC MOD Release，对发布副本重新计算各条目摘要并校验 `dedicated_server_mods_setup.lua`；按 `createProtectionBackup` 决定是否在发布前保存冷保护备份，再发布配置、Release、活动快照和 Compose，重建原分片。对原本运行的实例核验 DST 进程；原本停止则维持停止状态。
+- 请求备份时，失败及任务中断对账恢复保护备份中的 MOD/世界配置、活动 Release、Compose 和数据目录；未请求备份时不做自动恢复，任务失败并提示检查部署状态。普通备份与恢复 worker 同步保存/恢复 MOD desired/deployed 快照及活动 MOD Release。
 - 列表支持启用、禁用和移除。禁用/移除仅修改 desired，用户需再次预览并应用；移除确认显示存档数据风险。
-- 隔离测试覆盖 MOD 内容副本校验、应用差异、恢复验收门禁、desired-only MOD 恢复、备份与 MOD Release Compose。
+- 隔离测试覆盖 MOD 内容副本校验、应用差异、desired-only MOD 恢复、备份与 MOD Release Compose。
 - **未完成实机验收**：Linux 主机恢复任务成功并写出主机级验收证据之前，应用仍被阻断。目标 DST build 的 `-ugc_directory`、setup 文件挂载、Master/Caves 实际 MOD 加载、网络/Workshop 更新行为以及应用失败注入仍需在 Linux amd64 主机验证。运行验证当前证明进程已启动，不证明游戏已加载期望 MOD 集合。

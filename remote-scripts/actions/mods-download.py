@@ -392,11 +392,11 @@ def content_files(root):
         for name in list(directories):
             info = (current_path / name).lstat()
             if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                    or info.st_uid not in (0, 1000) or info.st_mode & 0o022): reject("MOD_CONTENT_UNSAFE")
+                    or info.st_uid not in (0, 1000, os.geteuid()) or info.st_mode & 0o022): reject("MOD_CONTENT_UNSAFE")
         for name in filenames:
             path = current_path / name; info = path.lstat()
             if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
-                    or info.st_uid not in (0, 1000) or info.st_mode & 0o022): reject("MOD_CONTENT_UNSAFE")
+                    or info.st_uid not in (0, 1000, os.geteuid()) or info.st_mode & 0o022): reject("MOD_CONTENT_UNSAFE")
             relative = path.relative_to(root).as_posix()
             if not relative or relative.startswith("../") or "\\" in relative: reject("MOD_CONTENT_UNSAFE")
             digest = hashlib.sha256()
@@ -420,6 +420,41 @@ def content_files(root):
         reject("MOD_CONTENT_INVALID")
     digest = hashlib.sha256(canonical(entries)).hexdigest()
     return entries, total, digest
+
+
+def publish_host_artifact(workshop_id, content_digest, manifest, content_path):
+    mods_root = ROOT / "mods"
+    prepared_root = mods_root / "prepared" / workshop_id
+    safe_dir(mods_root, create=True)
+    safe_dir(mods_root / "prepared", create=True)
+    safe_dir(prepared_root, create=True)
+    final = prepared_root / content_digest
+    if final.exists() or final.is_symlink():
+        safe_dir(final)
+        old = read_json(final / "manifest.json", 4 * 1024 * 1024)
+        if old.get("contentDigest") != content_digest:
+            reject("MOD_PREPARED_ARTIFACT_CONFLICT")
+        _, old_size, old_digest = content_files(final / "content")
+        if old_digest != content_digest or old_size != old.get("sizeBytes"):
+            reject("MOD_PREPARED_ARTIFACT_INVALID")
+        return
+    staging = prepared_root / (".publish-" + uuid.uuid4().hex)
+    staging.mkdir(mode=0o700)
+    try:
+        shutil.copytree(content_path, staging / "content")
+        atomic_json(staging / "manifest.json", manifest)
+        for current, _, names in os.walk(staging / "content"):
+            os.chown(current, 0, 0)
+            os.chmod(current, 0o555)
+            for name in names:
+                path = Path(current) / name
+                os.chown(path, 0, 0)
+                os.chmod(path, 0o444)
+        os.chmod(staging / "manifest.json", 0o600)
+        os.rename(staging, final)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def worker(task_id):
@@ -545,6 +580,13 @@ def worker(task_id):
                         os.chmod(path, 0o444)
                 os.chmod(candidate / "manifest.json", 0o600)
                 os.rename(candidate, final)
+            publish_host_artifact(workshop_id, content_digest, {
+                "schemaVersion": 1, "workshopId": workshop_id,
+                "contentDigest": content_digest, "dstReleaseId": context["dstReleaseId"],
+                "fetcherImage": context["image"], "preparedAt": now(),
+                "fileCount": len(files), "sizeBytes": size_bytes,
+                "sourceHandle": source_handles.get(workshop_id),
+            }, final / "content")
             if workshop_id in candidate_ids:
                 candidate_root = instance / "mods" / "candidates"
                 safe_dir(instance / "mods", create=True)

@@ -1,21 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Eye, Pencil, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
+import { Eye, Library, Pencil, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
 import AppDialog from "../components/AppDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import { applyInstanceMods, getInstanceModApplyTask, getInstanceModTask, listInstanceModApplyTasks, listInstanceModTasks,
-  listInstanceMods, listModApplyProtectionBackups, prepareInstanceMods, previewInstanceMods, saveInstanceMods } from "../api/mods";
+import { applyInstanceMods, getInstanceModApplyTask, listInstanceModApplyTasks,
+  listInstanceMods, previewInstanceMods, saveInstanceMods } from "../api/mods";
 import { getInstanceOverview } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { describeError } from "../lib/commandError";
 import type { InstanceModSummary, ModSchemaStatus } from "../types/mods";
-import { getWorkshopMetadata } from "../api/workshop";
-import type { WorkshopItem } from "../types/workshop";
-import { normalizeWorkshopIds } from "../lib/workshopInput";
-import { compareWorkshopRevision, type ModUpdateHint } from "../lib/modUpdateCheck";
+import { listHostMods, type HostModItem } from "../api/hostMods";
 import { createSerialQueue } from "../lib/serialQueue";
+import { formatBytes } from "../lib/environmentView";
 import { useTasks } from "../composables/useTasks";
 import type { TaskSnapshot } from "../types/contracts";
 import {
@@ -27,7 +25,6 @@ import {
 } from "../lib/modConfiguration";
 import type { ModFieldGroup } from "../lib/modConfiguration";
 import { buildModApplyPreview, mergeModApplyBlockers, modNeedsApply, type ModApplyPreview } from "../lib/modApplyPreview";
-import { buildPreparedModSave } from "../lib/preparedModBinding";
 
 const workspace = useWorkspace();
 const { server, target, instanceName } = usePageTarget();
@@ -37,14 +34,8 @@ const items = ref<InstanceModSummary[]>([]);
 const revision = ref<number | null>(null);
 const loading = ref(false);
 const error = ref("");
-const addOpen = ref(false);
-const workshopInput = ref("");
-const workshopItems = ref<WorkshopItem[]>([]);
-const workshopBusy = ref(false);
-const workshopError = ref("");
+const hostLibraryOpen = ref(false), hostLibraryItems = ref<HostModItem[]>([]), hostLibraryLoading = ref(false), hostLibraryError = ref("");
 const savingWorkshopId = ref<string | null>(null);
-const preparingWorkshopId = ref<string | null>(null);
-const prepareTask = ref<TaskSnapshot | null>(null);
 const applyTask = ref<TaskSnapshot | null>(null);
 const applyTaskError = ref("");
 const removeTarget = ref<InstanceModSummary | null>(null);
@@ -67,24 +58,17 @@ const applyPreviewError = ref("");
 const applyPreview = ref<ModApplyPreview | null>(null);
 const serverApplyPreview = ref<import("../api/mods").ModApplyPreviewResponse | null>(null);
 const applyBusy = ref(false);
+const createProtectionBackup = ref(false);
 const applyPreviewRevision = ref<number | null>(null);
 const applyPreviewRuntime = ref<string | null>(null);
-const updateCheckBusy = ref(false);
-const updateCheckError = ref("");
-const updateCheckResults = ref<Record<string, { hint: ModUpdateHint; checkedAt: string; sourceHandle: string | null }>>({});
 let epoch = 0;
 let sequence = 0;
 let latestRequestId = "";
-let workshopSequence = 0;
-let updateSequence = 0;
-let candidateFetchActive = false;
 const finalizedPrepareTasks = new Set<string>();
-let taskPollTimer: ReturnType<typeof setTimeout> | undefined;
 let applyPollTimer: ReturnType<typeof setTimeout> | undefined;
 
 const enabledCount = computed(() => items.value.filter(item => item.desiredEnabled === true).length);
 const pendingCount = computed(() => items.value.filter(modNeedsApply).length);
-const checkableModsCount = computed(() => items.value.filter(item => item.desiredEnabled === true && !!item.preparedDigest).length);
 
 function statusLabel(status: ModSchemaStatus) {
   return { available: "可配置", partial: "部分支持", noOptions: "无配置项", unavailable: "未准备", failed: "解析失败" }[status];
@@ -135,23 +119,20 @@ async function refresh(): Promise<boolean> {
 function resetContext() {
   epoch += 1;
   sequence += 1;
-  workshopSequence += 1;
-  updateSequence += 1;
   latestRequestId = "";
   items.value = [];
   revision.value = null;
   error.value = "";
   savingWorkshopId.value = null;
-  preparingWorkshopId.value = null;
-  workshopBusy.value = false;
-  workshopItems.value = [];
-  workshopError.value = "";
-  addOpen.value = false;
-  prepareTask.value = null;
+  hostLibraryOpen.value = false;
+  hostLibraryItems.value = [];
+  hostLibraryLoading.value = false;
+  hostLibraryError.value = "";
   applyTask.value = null;
   applyTaskError.value = "";
   serverApplyPreview.value = null;
   applyBusy.value = false;
+  createProtectionBackup.value = false;
   removeTarget.value = null;
   removeBusy.value = false;
   removeError.value = "";
@@ -165,94 +146,81 @@ function resetContext() {
   applyPreview.value = null;
   applyPreviewRevision.value = null;
   applyPreviewRuntime.value = null;
-  updateCheckBusy.value = false;
-  updateCheckError.value = "";
-  updateCheckResults.value = {};
-  candidateFetchActive = false;
   finalizedPrepareTasks.clear();
-  if (taskPollTimer) clearTimeout(taskPollTimer);
-  taskPollTimer = undefined;
   if (applyPollTimer) clearTimeout(applyPollTimer);
   applyPollTimer = undefined;
 }
-function openWorkshopDialog() {
-  workshopInput.value = "";
-  workshopItems.value = [];
-  workshopError.value = "";
-  addOpen.value = true;
+async function openHostLibrary() {
+  hostLibraryOpen.value = true;
+  await loadHostLibrary();
 }
-async function resolveWorkshop() {
-  const connection = server.value;
-  const instanceTarget = target.value;
-  if (!connection || !instanceTarget || workspace.preview.value) return;
-  const parsed = normalizeWorkshopIds(workshopInput.value);
-  if (parsed.error) { workshopError.value = parsed.error; return; }
-  const ticket = ++workshopSequence;
+
+async function loadHostLibrary() {
+  const connection = server.value, instanceTarget = target.value;
+  if (!connection?.hostId || !instanceTarget || hostLibraryLoading.value) return;
   const requestEpoch = epoch;
   const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
-  workshopBusy.value = true;
-  workshopError.value = "";
+  const recordVersion = connection.recordVersion;
+  hostLibraryLoading.value = true;
+  hostLibraryError.value = "";
   try {
-    const response = await queueSsh(() => getWorkshopMetadata({
-      schemaVersion: 1,
-      requestId: crypto.randomUUID(),
-      serverId: connection.serverId,
-      expectedRecordVersion: connection.recordVersion,
-      workshopIds: parsed.ids,
-    }));
-    if (ticket !== workshopSequence || requestEpoch !== epoch || target.value === null
-      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-      || server.value?.recordVersion !== connection.recordVersion) return;
-    if (response.schemaVersion !== 1 || response.serverId !== connection.serverId
-      || response.recordVersion !== connection.recordVersion) throw new Error("Workshop 查询响应身份不匹配");
-    workshopItems.value = response.items;
+    const requestId = crypto.randomUUID();
+    const response = await listHostMods({ schemaVersion: 1, requestId,
+      target: { serverId: connection.serverId, hostId: connection.hostId }, expectedRecordVersion: recordVersion });
+    if (requestEpoch !== epoch || target.value === null
+        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
+        || server.value?.recordVersion !== recordVersion) return;
+    if (response.requestId !== requestId || response.recordVersion !== recordVersion
+        || response.target.serverId !== connection.serverId || response.target.hostId !== connection.hostId) {
+      throw new Error("主机 MOD 库响应身份或版本不匹配");
+    }
+    hostLibraryItems.value = response.items;
   } catch (cause) {
-    if (ticket === workshopSequence && requestEpoch === epoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === connection.recordVersion) workshopError.value = describeError(cause).message;
+    if (requestEpoch === epoch) hostLibraryError.value = describeError(cause).message;
   } finally {
-    if (ticket === workshopSequence && requestEpoch === epoch) workshopBusy.value = false;
+    if (requestEpoch === epoch) hostLibraryLoading.value = false;
   }
 }
-async function addWorkshopItem(item: WorkshopItem) {
-  const connection = server.value;
-  const instanceTarget = target.value;
-  if (!connection || !instanceTarget || revision.value === null || item.result !== 1 || workspace.preview.value) return;
-  const savedEpoch = epoch;
-  const savedTarget = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
-  const savedRecordVersion = connection.recordVersion;
-  const expectedRevision = revision.value;
-  const existing = items.value.filter(current => current.desiredEnabled !== null).map(current => ({
+
+async function addHostLibraryItem(item: HostModItem) {
+  const connection = server.value, instanceTarget = target.value, expectedRevision = revision.value;
+  if (!connection || !instanceTarget || expectedRevision === null || savingWorkshopId.value !== null) return;
+  const existing = items.value.find(current => current.workshopId === item.workshopId && current.desiredEnabled !== null);
+  if (existing?.artifactDigest === item.contentDigest) return;
+  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  const recordVersion = connection.recordVersion;
+  const requestEpoch = epoch;
+  const mods = items.value.filter(current => current.desiredEnabled !== null).map(current => ({
     workshopId: current.workshopId,
     enabled: current.desiredEnabled === true,
     configurationOptions: current.desiredConfiguration ?? {},
-    artifactDigest: current.artifactDigest,
+    artifactDigest: current.workshopId === item.workshopId ? item.contentDigest : current.artifactDigest,
   }));
-  if (!existing.some(current => current.workshopId === item.workshopId)) {
-    existing.push({ workshopId: item.workshopId, enabled: true, configurationOptions: {}, artifactDigest: null });
-  }
+  if (!existing) mods.push({ workshopId: item.workshopId, enabled: true, configurationOptions: {}, artifactDigest: item.contentDigest });
   savingWorkshopId.value = item.workshopId;
-  workshopError.value = "";
+  taskError.value = "";
   try {
-    const response = await queueSsh(() => saveInstanceMods({ schemaVersion: 1, requestId: crypto.randomUUID(), target: instanceTarget,
-      expectedRecordVersion: connection.recordVersion, expectedRevision, operationId: crypto.randomUUID(), mods: existing }));
-    if (epoch !== savedEpoch || target.value === null
-      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== savedTarget
-      || server.value?.recordVersion !== savedRecordVersion) return;
-    if (response.schemaVersion !== 1 || response.target.serverId !== instanceTarget.serverId
-      || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId
-      || response.verifiedRevision <= revision.value) throw new Error("MOD 保存响应身份或版本不匹配");
-    addOpen.value = false;
+    const requestId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const response = await saveInstanceMods({ schemaVersion: 1, requestId, target: instanceTarget,
+      expectedRecordVersion: recordVersion, expectedRevision, operationId, mods });
+    if (requestEpoch !== epoch || target.value === null
+        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
+        || server.value?.recordVersion !== recordVersion) return;
+    if (response.requestId !== requestId || response.operationId !== operationId
+        || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
+        || response.target.instanceId !== instanceTarget.instanceId || response.verifiedRevision <= expectedRevision) {
+      throw new Error("MOD 保存响应身份或版本不匹配");
+    }
+    hostLibraryOpen.value = false;
     await refresh();
-    await refreshPrepareTasks();
   } catch (cause) {
-    if (epoch === savedEpoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget
-      && server.value?.recordVersion === savedRecordVersion) workshopError.value = describeError(cause).message;
+    if (requestEpoch === epoch && target.value
+        && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) {
+      hostLibraryError.value = describeError(cause).message;
+    }
   } finally {
-    if (epoch === savedEpoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget
-      && server.value?.recordVersion === savedRecordVersion) savingWorkshopId.value = null;
+    if (requestEpoch === epoch) savingWorkshopId.value = null;
   }
 }
 
@@ -491,26 +459,25 @@ function modActionChangeLabel(change: NonNullable<ModApplyPreview["changes"]>[nu
   return change.actionLabel;
 }
 
-async function openApplyPreview() {
+async function openApplyPreview(autoApply = false) {
   const connection = server.value;
   const instanceTarget = target.value;
   const expectedRevision = revision.value;
   if (!connection || !instanceTarget || expectedRevision === null || workspace.preview.value
-      || loading.value || applyPreviewLoading.value) return;
+      || loading.value || applyPreviewLoading.value
+      || !!applyTask.value && ['queued', 'running'].includes(applyTask.value.status)) return;
   const requestEpoch = epoch;
   const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
   const recordVersion = connection.recordVersion;
-  const requestIds = { overview: crypto.randomUUID(), backups: crypto.randomUUID(), apply: crypto.randomUUID() };
+  const requestIds = { overview: crypto.randomUUID(), apply: crypto.randomUUID() };
   applyPreviewOpen.value = true;
   applyPreviewLoading.value = true;
   applyPreviewError.value = "";
   applyPreview.value = null;
   serverApplyPreview.value = null;
   try {
-    const [overview, backups, serverPreview] = await Promise.all([
+    const [overview, serverPreview] = await Promise.all([
       queueSsh(() => getInstanceOverview(instanceTarget, requestIds.overview, recordVersion)),
-      queueSsh(() => listModApplyProtectionBackups({ schemaVersion: 1, requestId: requestIds.backups,
-        target: instanceTarget, expectedRecordVersion: recordVersion, expectedRevision })),
       queueSsh(() => previewInstanceMods({ schemaVersion: 1, requestId: requestIds.apply,
         target: instanceTarget, expectedRecordVersion: recordVersion, expectedRevision })),
     ]);
@@ -525,11 +492,6 @@ async function openApplyPreview() {
       || overview.data.manifestSummary.configRevision !== expectedRevision) {
       throw new Error("运行概览与 MOD 配置版本不一致，请刷新后重试");
     }
-    if (backups.schemaVersion !== 1 || backups.requestId !== requestIds.backups
-      || backups.configRevision !== expectedRevision || backups.target.serverId !== instanceTarget.serverId
-      || backups.target.hostId !== instanceTarget.hostId || backups.target.instanceId !== instanceTarget.instanceId) {
-      throw new Error("保护备份快照身份或版本不匹配");
-    }
     if (serverPreview.schemaVersion !== 1 || serverPreview.requestId !== requestIds.apply
       || serverPreview.target.serverId !== instanceTarget.serverId || serverPreview.target.hostId !== instanceTarget.hostId
       || serverPreview.target.instanceId !== instanceTarget.instanceId || serverPreview.configRevision !== expectedRevision
@@ -539,11 +501,9 @@ async function openApplyPreview() {
     const freshItems = items.value;
     const preview = buildModApplyPreview({
       mods: freshItems,
-      backups: backups.items,
       runtimeStatus: overview.data.runtime?.status ?? overview.data.identity.runtimeStatus,
       cavesEnabled: overview.data.manifestSummary.cavesEnabled,
       worldDesiredVsDeployed: overview.data.desiredVsDeployed,
-      restoreAcceptancePassed: backups.restoreAcceptancePassed,
     });
     preview.blockers = mergeModApplyBlockers(preview, serverPreview.blockers);
     preview.canApply = preview.canApply && serverPreview.allowed && serverPreview.blockers.length === 0;
@@ -551,6 +511,12 @@ async function openApplyPreview() {
     serverApplyPreview.value = serverPreview;
     applyPreviewRevision.value = expectedRevision;
     applyPreviewRuntime.value = overview.data.runtime?.status ?? overview.data.identity.runtimeStatus;
+    if (autoApply) {
+      if (applyPreview.value.canApply) {
+        applyPreviewOpen.value = false;
+        await applyMods();
+      }
+    }
   } catch (cause) {
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
@@ -562,105 +528,12 @@ async function openApplyPreview() {
   }
 }
 
-async function checkModUpdates() {
-  const connection = server.value;
-  const instanceTarget = target.value;
-  const expectedRevision = revision.value;
-  if (!connection || !instanceTarget || expectedRevision === null || workspace.preview.value
-      || updateCheckBusy.value || loading.value) return;
-  const candidates = items.value.filter(item => item.desiredEnabled === true && item.preparedDigest);
-  if (!candidates.length) {
-    updateCheckError.value = "没有已准备且启用的 MOD 可检查";
-    return;
-  }
-  const requestEpoch = epoch;
-  const ticket = ++updateSequence;
-  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
-  const recordVersion = connection.recordVersion;
-  const checkedAt = new Date().toISOString();
-  updateCheckBusy.value = true;
-  updateCheckError.value = "";
-  const isCurrentCheck = () => ticket === updateSequence && requestEpoch === epoch
-    && target.value !== null && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-    && server.value?.recordVersion === recordVersion && revision.value === expectedRevision;
-  try {
-    for (let offset = 0; offset < candidates.length; offset += 100) {
-      const batch = candidates.slice(offset, offset + 100);
-      const requestId = crypto.randomUUID();
-      const response = await queueSsh(() => getWorkshopMetadata({
-        schemaVersion: 1, requestId, serverId: connection.serverId,
-        expectedRecordVersion: recordVersion, workshopIds: batch.map(item => item.workshopId),
-      }));
-      if (!isCurrentCheck()) return;
-      if (response.schemaVersion !== 1 || response.requestId !== requestId
-        || response.serverId !== connection.serverId || response.recordVersion !== recordVersion) {
-        throw new Error("Workshop 更新检查响应身份不匹配");
-      }
-      const metadata = new Map(response.items.map(item => [item.workshopId, item]));
-      const next = { ...updateCheckResults.value };
-      for (const item of batch) {
-        const current = metadata.get(item.workshopId);
-        next[item.workshopId] = {
-          hint: current?.result === 1 ? compareWorkshopRevision(current.contentHandle, item.preparedSourceHandle) : "unknown",
-          checkedAt,
-          sourceHandle: current?.contentHandle ?? null,
-        };
-      }
-      updateCheckResults.value = next;
-    }
-  } catch (cause) {
-    if (isCurrentCheck()) updateCheckError.value = describeError(cause).message;
-  } finally {
-    if (ticket === updateSequence && requestEpoch === epoch
-      && target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === recordVersion) updateCheckBusy.value = false;
-  }
-}
-
-function updateHintLabel(workshopId: string) {
-  const result = updateCheckResults.value[workshopId];
-  if (!result) return "未检查";
-  const item = items.value.find(current => current.workshopId === workshopId);
-  const candidateCurrent = !!item?.candidateDigest && !!result.sourceHandle
-    && result.sourceHandle === item.candidateSourceHandle;
-  const candidateIsCurrentContent = candidateCurrent && item?.candidateDigest === item.preparedDigest;
-  if (candidateIsCurrentContent || result.hint === "unchanged") return "已是最新";
-  if (candidateCurrent && item?.candidateVersion
-      && item.candidateVersion !== item.deployedVersion) return `${displayVersion(item.candidateVersion)} 可用`;
-  if (candidateCurrent) return "内容有更新，版本号未声明";
-  return result.hint === "candidate"
-    ? item?.preparedSourceHandle ? "发现更新，可获取版本" : "首次获取版本基线"
-    : "无法判断";
-}
-function updateHintTone(workshopId: string) {
-  const result = updateCheckResults.value[workshopId];
-  return result?.hint === "candidate" && updateHintLabel(workshopId) !== "已是最新" ? "warning"
-    : result?.hint === "unchanged" || updateHintLabel(workshopId) === "已是最新" ? "success" : "muted";
-}
-function updateCandidateHandle(workshopId: string) {
-  const result = updateCheckResults.value[workshopId];
-  const item = items.value.find(current => current.workshopId === workshopId);
-  if (!result?.sourceHandle) return null;
-  return result.sourceHandle === item?.candidateSourceHandle
-    || result.sourceHandle === item?.preparedSourceHandle ? null : result.sourceHandle;
-}
-function hasCurrentCandidate(workshopId: string) {
-  const result = updateCheckResults.value[workshopId];
-  const item = items.value.find(current => current.workshopId === workshopId);
-  return !!result?.sourceHandle && !!item?.candidateDigest
-    && item.candidateSourceHandle === result.sourceHandle;
-}
 function displayVersion(value: string | null) {
   if (!value) return "版本未知";
   const normalized = value.trim();
   return /^v/i.test(normalized) ? normalized : `v${normalized}`;
 }
 const applyPreviewStale = computed(() => applyPreviewRevision.value !== null && revision.value !== applyPreviewRevision.value);
-
-function taskBelongsHere(task: TaskSnapshot, targetKey: string) {
-  return task.operation === "modPrepare" && "instanceId" in task.target
-    && `${task.target.serverId}:${task.target.hostId}:${task.target.instanceId}` === targetKey;
-}
 
 function applyTaskBelongsHere(task: TaskSnapshot, targetKey: string) {
   return task.operation === "modApply" && "instanceId" in task.target
@@ -680,8 +553,6 @@ function acceptApplyTask(task: TaskSnapshot, targetKey: string) {
     if (task.status === "succeeded") {
       applyPreviewOpen.value = false;
       void refresh();
-      void refreshPrepareTasks();
-      void refreshApplyTasks();
     }
   }
 }
@@ -764,7 +635,8 @@ async function applyMods() {
   try {
     const response = await queueSsh(() => applyInstanceMods({ schemaVersion: 1,
       requestId, target: instanceTarget, expectedRecordVersion: recordVersion,
-      expectedRevision, desiredDigest: preview.desiredDigest, operationId }));
+      expectedRevision, desiredDigest: preview.desiredDigest, operationId,
+      createProtectionBackup: createProtectionBackup.value }));
     if (requestEpoch !== epoch || !target.value
       || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
       || server.value?.recordVersion !== recordVersion) return;
@@ -785,286 +657,21 @@ async function applyMods() {
   }
 }
 
-function acceptPrepareTask(task: TaskSnapshot, targetKey: string) {
-  if (task.schemaVersion !== 1 || !taskBelongsHere(task, targetKey)) throw new Error("MOD 任务响应目标无效");
-  prepareTask.value = task;
-  taskStore.receive(task);
-  if (["queued", "running"].includes(task.status)) scheduleTaskPoll(targetKey, task.operationId);
-  else {
-    if (taskPollTimer) clearTimeout(taskPollTimer);
-    taskPollTimer = undefined;
-    if (task.status === "succeeded" && !finalizedPrepareTasks.has(task.operationId)) {
-      finalizedPrepareTasks.add(task.operationId);
-      while (finalizedPrepareTasks.size > 100) finalizedPrepareTasks.delete(finalizedPrepareTasks.values().next().value!);
-      void completePreparedTask(task, targetKey, epoch).then(completed => {
-        if (!completed) finalizedPrepareTasks.delete(task.operationId);
-      });
-    } else if (task.status === "failed" || task.status === "interrupted") {
-      candidateFetchActive = false;
-    }
-  }
-}
-
-async function completePreparedTask(task: TaskSnapshot, targetKey: string, requestEpoch: number): Promise<boolean> {
-  const candidateFetch = candidateFetchActive || !!task.result?.preparedMods?.some(item => item.updateCandidate);
-  candidateFetchActive = false;
-  const connection = server.value;
-  const instanceTarget = target.value;
-  if (!connection || !instanceTarget) return false;
-  if (!await refresh()) return false;
-  if (requestEpoch !== epoch || !target.value
-      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-      || server.value?.recordVersion !== connection.recordVersion) return false;
-
-  const plan = buildPreparedModSave(items.value, task.result?.preparedMods ?? []);
-  if (plan.conflicts.length) {
-    taskError.value = `内容已准备，但 ${plan.conflicts.join("、")} 的期望状态已变化，未覆盖现有配置`;
-  }
-  if (plan.changedWorkshopIds.length) {
-    const expectedRevision = revision.value;
-    if (expectedRevision === null) return false;
-    const operationId = crypto.randomUUID();
-    const requestId = crypto.randomUUID();
-    savingWorkshopId.value = plan.changedWorkshopIds[0];
-    taskError.value = "";
-    try {
-      const response = await queueSsh(() => saveInstanceMods({ schemaVersion: 1, requestId,
-        target: instanceTarget, expectedRecordVersion: connection.recordVersion, expectedRevision,
-        operationId, mods: plan.mods }));
-      if (requestEpoch !== epoch || !target.value
-          || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-          || server.value?.recordVersion !== connection.recordVersion) return false;
-      if (response.schemaVersion !== 1 || response.requestId !== requestId || response.operationId !== operationId
-          || response.verifiedRevision <= expectedRevision || response.target.serverId !== instanceTarget.serverId
-          || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId) {
-        throw new Error("固定内容绑定响应身份或版本无效");
-      }
-      if (!await refresh()) return false;
-    } catch (cause) {
-      if (requestEpoch === epoch && target.value
-          && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-          && server.value?.recordVersion === connection.recordVersion) taskError.value = describeError(cause).message;
-      return false;
-    } finally {
-      if (requestEpoch === epoch && target.value
-          && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-          && server.value?.recordVersion === connection.recordVersion) savingWorkshopId.value = null;
-    }
-  }
-  if (candidateFetch && requestEpoch === epoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === connection.recordVersion) await checkModUpdates();
-  return true;
-}
-
 async function refreshAll() {
   await refresh();
-  await refreshPrepareTasks();
   await refreshApplyTasks();
 }
 
-async function refreshPrepareTasks() {
-  const connection = server.value;
-  const instanceTarget = target.value;
-  if (!connection || !instanceTarget || workspace.preview.value) return;
-  const requestEpoch = epoch;
-  const requestId = crypto.randomUUID();
-  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
-  try {
-    const response = await queueSsh(() => listInstanceModTasks({ schemaVersion: 1, requestId, target: instanceTarget,
-      expectedRecordVersion: connection.recordVersion }));
-    if (requestEpoch !== epoch || target.value === null
-      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-      || server.value?.recordVersion !== connection.recordVersion) return;
-    if (response.schemaVersion !== 1 || response.requestId !== requestId
-      || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
-      || response.target.instanceId !== instanceTarget.instanceId) throw new Error("MOD 任务列表身份不匹配");
-    const tasks = response.items.filter(task => taskBelongsHere(task, targetKey));
-    for (const task of tasks) taskStore.receive(task);
-    const current = tasks.find(task => task.status === "queued" || task.status === "running") ?? tasks[0] ?? null;
-    if (current) acceptPrepareTask(current, targetKey);
-  } catch (cause) {
-    if (requestEpoch === epoch) taskError.value = describeError(cause).message;
-  }
-}
-
-function scheduleTaskPoll(targetKey: string, operationId: string) {
-  if (taskPollTimer) clearTimeout(taskPollTimer);
-  const requestEpoch = epoch;
-  const connection = server.value;
-  const instanceTarget = target.value;
-  if (!connection || !instanceTarget) return;
-  const recordVersion = connection.recordVersion;
-  taskPollTimer = setTimeout(async () => {
-    try {
-      const requestId = crypto.randomUUID();
-      const response = await queueSsh(() => getInstanceModTask({ schemaVersion: 1, requestId, target: instanceTarget,
-        expectedRecordVersion: recordVersion, operationId }));
-      if (requestEpoch !== epoch || target.value === null
-        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-        || server.value?.recordVersion !== recordVersion) return;
-      if (response.schemaVersion !== 1 || response.requestId !== requestId || response.task.operationId !== operationId
-        || !taskBelongsHere(response.task, targetKey)) throw new Error("MOD 任务查询响应身份无效");
-      acceptPrepareTask(response.task, targetKey);
-    } catch (cause) {
-      if (requestEpoch === epoch) taskError.value = describeError(cause).message;
-      if (requestEpoch === epoch) scheduleTaskPoll(targetKey, operationId);
-    }
-  }, 3000);
-}
-
-async function adoptModCandidate(item: InstanceModSummary) {
-  const connection = server.value;
-  const instanceTarget = target.value;
-  const expectedRevision = revision.value;
-  if (!connection || !instanceTarget || expectedRevision === null || !item.candidateDigest
-      || !hasCurrentCandidate(item.workshopId) || item.candidateDigest === item.desiredArtifactDigest
-      || workspace.preview.value || savingWorkshopId.value !== null) return;
-  const savedEpoch = epoch;
-  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
-  const requestId = crypto.randomUUID();
-  const operationId = crypto.randomUUID();
-  savingWorkshopId.value = item.workshopId;
-  taskError.value = "";
-  try {
-    const mods = items.value.filter(current => current.desiredEnabled !== null).map(current => ({
-      workshopId: current.workshopId,
-      enabled: current.desiredEnabled === true,
-      configurationOptions: current.desiredConfiguration ?? {},
-      artifactDigest: current.workshopId === item.workshopId
-        ? item.candidateDigest : current.artifactDigest,
-    }));
-    const response = await queueSsh(() => saveInstanceMods({
-      schemaVersion: 1, requestId, target: instanceTarget,
-      expectedRecordVersion: connection.recordVersion, expectedRevision, operationId, mods,
-    }));
-    if (savedEpoch !== epoch || target.value === null
-        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-        || server.value?.recordVersion !== connection.recordVersion) return;
-    if (response.schemaVersion !== 1 || response.requestId !== requestId
-        || response.operationId !== operationId || response.verifiedRevision <= expectedRevision
-        || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
-        || response.target.instanceId !== instanceTarget.instanceId) {
-      throw new Error("MOD 候选版本保存响应身份或版本不匹配");
-    }
-    await refresh();
-    await checkModUpdates();
-  } catch (cause) {
-    if (savedEpoch === epoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === connection.recordVersion) taskError.value = describeError(cause).message;
-  } finally {
-    if (savedEpoch === epoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === connection.recordVersion) savingWorkshopId.value = null;
-  }
-}
-
-async function prepareMod(item: InstanceModSummary, sourceHandle?: string) {
-  const connection = server.value;
-  const instanceTarget = target.value;
-  if (!connection || !instanceTarget || revision.value === null || item.desiredEnabled !== true
-    || (!sourceHandle && item.preparedDigest) || savingWorkshopId.value !== null
-    || preparingWorkshopId.value !== null || workspace.preview.value
-    || prepareTask.value && ["queued", "running"].includes(prepareTask.value.status)) return;
-  const requestEpoch = epoch;
-  const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
-  const operationId = crypto.randomUUID();
-  taskError.value = "";
-  candidateFetchActive = !!sourceHandle;
-  preparingWorkshopId.value = item.workshopId;
-  try {
-    const metadataRequestId = crypto.randomUUID();
-    const metadata = await queueSsh(() => getWorkshopMetadata({
-      schemaVersion: 1, requestId: metadataRequestId, serverId: connection.serverId,
-      expectedRecordVersion: connection.recordVersion, workshopIds: [item.workshopId],
-    }));
-    if (requestEpoch !== epoch || target.value === null
-        || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-        || server.value?.recordVersion !== connection.recordVersion) return;
-    if (metadata.schemaVersion !== 1 || metadata.requestId !== metadataRequestId
-        || metadata.serverId !== connection.serverId || metadata.recordVersion !== connection.recordVersion) {
-      throw new Error("Workshop 候选版本响应身份无效");
-    }
-    const currentSourceHandle = metadata.items.find(entry => entry.workshopId === item.workshopId)?.contentHandle ?? undefined;
-    if (sourceHandle && currentSourceHandle !== sourceHandle) {
-      throw new Error("Workshop 内容已再次更新，请重新检查后获取");
-    }
-    const pinnedSourceHandle = sourceHandle ?? currentSourceHandle;
-    const requestId = crypto.randomUUID();
-    const response = await queueSsh(() => prepareInstanceMods({ schemaVersion: 1, requestId, target: instanceTarget,
-      expectedRecordVersion: connection.recordVersion, expectedRevision: revision.value!, operationId,
-      workshopIds: [item.workshopId], sourceHandles: pinnedSourceHandle ? { [item.workshopId]: pinnedSourceHandle } : {},
-      candidateWorkshopIds: sourceHandle ? [item.workshopId] : [] }));
-    if (requestEpoch !== epoch || target.value === null
-      || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== targetKey
-      || server.value?.recordVersion !== connection.recordVersion) return;
-    if (response.schemaVersion !== 1 || response.requestId !== requestId
-      || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
-      || response.target.instanceId !== instanceTarget.instanceId || response.task.operationId !== operationId) {
-      throw new Error("MOD 准备任务响应身份不匹配");
-    }
-    acceptPrepareTask(response.task, targetKey);
-  } catch (cause) {
-    candidateFetchActive = false;
-    if (requestEpoch === epoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) taskError.value = describeError(cause).message;
-  } finally {
-    if (requestEpoch === epoch && target.value
-      && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) preparingWorkshopId.value = null;
-  }
-}
-
-function prepareStageLabel(task: TaskSnapshot) {
-  const labels: Record<string, string> = { queued: "等待任务", prepare: "复核 MOD 与 Release", download: "下载 Workshop 内容", verify: "校验并固定内容", finalize: "完成准备", worker: "任务恢复中" };
-  return labels[task.stage] ?? "准备 MOD 内容";
-}
-function prepareFailureLabel(task: TaskSnapshot) {
-  const error = task.error;
-  if (!error) return "任务错误详情暂不可用";
-  const labels: Record<string, string> = {
-    MOD_STEAMCMD_DOWNLOAD_FAILED: "SteamCMD 未能完成 Workshop 下载",
-    MOD_STEAMCMD_TIMEOUT: "SteamCMD Workshop 下载超时",
-    MOD_WORKSHOP_CONTENT_INVALID: "下载结束，但 Workshop 内容不完整",
-    MOD_WORKSHOP_OUTPUT_CONFLICT: "Workshop 下载输出目录冲突",
-    MOD_WORKSHOP_STEAMCMD_MISSING: "Release 镜像缺少 SteamCMD 文件",
-    MOD_WORKSHOP_CONTAINER_FAILED: "下载容器启动或执行失败",
-    MOD_WORKSHOP_DOWNLOAD_FAILED: "Workshop 下载失败",
-  };
-  const exitCode = error.details?.exitCode;
-  const suffix = Number.isSafeInteger(exitCode) ? `（${error.code}，退出码 ${exitCode}）` : `（${error.code}）`;
-  const failureKinds: Record<string, string> = {
-    daemon: "Docker daemon 不可用",
-    network: "Docker bridge 网络启动失败",
-    mount: "任务目录 bind mount 失败",
-    image: "下载工具镜像不可用",
-    permission: "宿主权限或安全策略拒绝启动",
-    runtime: "Docker 容器运行时启动失败",
-    unknown: "Docker 未返回可识别的失败类别",
-  };
-  const kind = error.details?.failureKind;
-  const label = error.code === "MOD_WORKSHOP_CONTAINER_FAILED" && typeof kind === "string"
-    ? failureKinds[kind] ?? labels[error.code]
-    : labels[error.code] ?? "MOD 准备失败";
-  return `${label}${suffix}`;
-}
 function runtimeLabel(status: string | null) {
   return status === "running" ? "运行中" : status === "stopped" ? "已停止"
     : status === "degraded" ? "部分异常" : status === "starting" ? "启动中" : "未知";
 }
-function taskIncludesWorkshop(task: TaskSnapshot | null, workshopId: string) {
-  if (!task || !task.result || typeof task.result !== "object" || !("requestedWorkshopIds" in task.result)) return false;
-  const requested = task.result.requestedWorkshopIds;
-  return Array.isArray(requested) && requested.includes(workshopId);
-}
 watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""}:${target.value?.hostId ?? ""}:${target.value?.instanceId ?? ""}:${workspace.preview.value}`, () => {
   resetContext();
   void refresh();
-  void refreshPrepareTasks();
   void refreshApplyTasks();
 }, { immediate: true });
 onBeforeUnmount(() => {
-  if (taskPollTimer) clearTimeout(taskPollTimer);
   if (applyPollTimer) clearTimeout(applyPollTimer);
 });
 </script>
@@ -1073,11 +680,11 @@ onBeforeUnmount(() => {
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="MOD">
       <template #actions>
-        <button class="button" :disabled="workspace.preview.value || !target || loading || applyPreviewLoading || savingWorkshopId !== null"
-          @click="openApplyPreview"><Eye :size="15"/>应用预览</button>
-        <button class="button" :disabled="workspace.preview.value || !target || !checkableModsCount || loading || updateCheckBusy"
-          @click="checkModUpdates">{{ updateCheckBusy ? '检查中…' : '检查更新' }}</button>
-        <button class="button primary" :disabled="workspace.preview.value || !target" @click="openWorkshopDialog">添加 MOD</button>
+        <button class="button" :disabled="workspace.preview.value || !target || loading || applyPreviewLoading || savingWorkshopId !== null
+          || !!applyTask && ['queued', 'running'].includes(applyTask.status)
+          "
+          @click="openApplyPreview(true)"><Eye :size="15"/>应用更改</button>
+        <button class="button" :disabled="workspace.preview.value || !target || loading" @click="openHostLibrary"><Library :size="15"/>主机库</button>
         <button class="button" :disabled="loading || !target" @click="refreshAll">
           <RefreshCw :size="16" :class="{ spinning: loading }" />
           刷新
@@ -1088,20 +695,11 @@ onBeforeUnmount(() => {
     <div v-if="error" class="inline-error">{{ error }}</div>
     <div v-if="taskError" class="error-strip">{{ taskError }}</div>
     <div v-if="applyTaskError" class="error-strip">{{ applyTaskError }}</div>
-    <div v-if="updateCheckError" class="error-strip">{{ updateCheckError }}</div>
-    <section v-if="prepareTask" class="mod-task-state" aria-live="polite">
-      <div>
-        <strong>{{ prepareTask.status === 'succeeded' ? 'MOD 内容已准备' : prepareTask.status === 'failed' ? 'MOD 准备失败' : prepareTask.status === 'interrupted' ? 'MOD 任务中断' : '正在准备 MOD 内容' }}</strong>
-        <span>{{ prepareStageLabel(prepareTask) }}</span>
-        <span v-if="prepareTask.status === 'failed'" class="task-failure-detail">{{ prepareFailureLabel(prepareTask) }}</span>
-      </div>
-      <span class="muted-text mono">{{ prepareTask.progress.kind === 'determinate' ? `${prepareTask.progress.completed}/${prepareTask.progress.total}` : '处理中' }}</span>
-    </section>
     <section v-if="applyTask" class="mod-task-state" aria-live="polite">
       <div>
         <strong>{{ applyTask.status === 'succeeded' ? 'MOD 应用完成' : applyTask.status === 'failed' ? 'MOD 应用失败' : applyTask.status === 'interrupted' ? 'MOD 应用中断' : '正在应用 MOD' }}</strong>
         <span>{{ applyStageLabel(applyTask) }}</span>
-        <span v-if="applyTask.status === 'failed'" class="task-failure-detail">{{ applyTask.error?.code ?? '任务错误详情暂不可用' }}</span>
+        <span v-if="applyTask.status === 'failed'" class="task-failure-detail">{{ applyTask.error?.message ?? '任务错误详情暂不可用' }} <span class="mono">{{ applyTask.error?.code }}</span></span>
       </div>
       <span class="muted-text mono">{{ applyTask.progress.kind === 'determinate' ? `${applyTask.progress.completed}/${applyTask.progress.total}` : '处理中' }}</span>
     </section>
@@ -1112,12 +710,20 @@ onBeforeUnmount(() => {
       <span class="summary-divider" />
       <div class="muted-text">配置版本 {{ revision }}</div>
     </section>
+    <section v-if="revision !== null" class="mod-apply-options">
+      <label class="mod-backup-choice">
+        <input v-model="createProtectionBackup" type="checkbox"
+          :disabled="workspace.preview.value || !!applyTask && ['queued', 'running'].includes(applyTask.status)"/>
+        应用前创建冷备份
+      </label>
+      <span v-if="!createProtectionBackup" class="muted-text">不创建时，应用失败无法自动恢复原部署</span>
+    </section>
 
     <div v-if="loading && items.length === 0" class="empty-state"><h2>正在读取 MOD</h2></div>
     <div v-else-if="!loading && items.length === 0" class="empty-state"><h2>尚未发现 MOD</h2></div>
     <div v-else class="table-wrap">
       <table>
-        <thead><tr><th>Workshop ID</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th>更新检查</th><th>内容</th><th class="table-action">操作</th></tr></thead>
+        <thead><tr><th>Workshop ID</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th class="table-action">操作</th></tr></thead>
         <tbody>
           <tr v-for="item in items" :key="item.workshopId">
             <td class="mono">{{ item.workshopId }}</td>
@@ -1128,19 +734,6 @@ onBeforeUnmount(() => {
             </td>
             <td><StatusLabel :tone="statusTone(item.schema.status)" :label="statusLabel(item.schema.status)" /></td>
             <td class="mono">{{ displayVersion(item.schema.metadata.version) }}</td>
-            <td>
-              <StatusLabel :tone="updateHintTone(item.workshopId)" :label="updateHintLabel(item.workshopId)" />
-              <div v-if="updateCheckResults[item.workshopId]?.hint === 'candidate' && updateCandidateHandle(item.workshopId)" class="table-inline-actions">
-                <button class="text-button" :disabled="workspace.preview.value || preparingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status)"
-                  @click="prepareMod(item, updateCandidateHandle(item.workshopId) ?? undefined)">{{ item.preparedSourceHandle ? '获取版本' : '建立基线' }}</button>
-              </div>
-              <div v-if="hasCurrentCandidate(item.workshopId) && item.candidateDigest !== item.desiredArtifactDigest" class="table-inline-actions">
-                <small v-if="item.candidateVersion" class="table-sub">可用 {{ displayVersion(item.candidateVersion) }}</small>
-                <button class="text-button" :disabled="workspace.preview.value || savingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status)"
-                  @click="adoptModCandidate(item)">采用版本</button>
-              </div>
-            </td>
-            <td><StatusLabel :tone="item.preparedDigest ? 'success' : 'warning'" :label="item.preparedDigest ? '已准备' : '未准备'" /></td>
             <td class="table-action">
               <button v-if="item.desiredEnabled !== null" class="icon-button" type="button"
                 :aria-label="item.desiredEnabled ? `禁用 ${item.schema.metadata.name ?? item.workshopId}` : `启用 ${item.schema.metadata.name ?? item.workshopId}`"
@@ -1151,11 +744,6 @@ onBeforeUnmount(() => {
                 :aria-label="`移除 ${item.schema.metadata.name ?? item.workshopId}`" title="移除 MOD"
                 :disabled="workspace.preview.value || savingWorkshopId !== null || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
                 @click="removeTarget = item; removeError = ''"><Trash2 :size="15"/></button>
-              <button v-if="item.desiredEnabled === true && !item.preparedDigest" class="text-button"
-                :disabled="workspace.preview.value || savingWorkshopId !== null || preparingWorkshopId !== null || !!prepareTask && ['queued', 'running'].includes(prepareTask.status) || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
-                @click="prepareMod(item)">{{ taskIncludesWorkshop(prepareTask, item.workshopId) && prepareTask?.status === 'running' ? '准备中…' : '准备内容' }}</button>
-              <span v-if="item.preparedDigest" class="muted-text">固定内容</span>
-              <span v-else class="muted-text">启用后可准备</span>
               <button v-if="canEditConfiguration(item)" class="icon-button" type="button"
                 :aria-label="`编辑 ${item.schema.metadata.name ?? item.workshopId} 配置`"
                 title="编辑配置" :disabled="workspace.preview.value || configSaving || loading"
@@ -1166,39 +754,30 @@ onBeforeUnmount(() => {
       </table>
     </div>
 
-    <AppDialog v-model:open="addOpen" title="添加 MOD">
-      <div class="form-field">
-        <label for="workshop-input">Workshop ID 或链接</label>
-        <textarea id="workshop-input" v-model="workshopInput" rows="4" placeholder="每行一个 ID 或链接" />
-      </div>
-      <div v-if="workshopError" class="error-strip">{{ workshopError }}</div>
-      <div v-if="workshopItems.length" class="table-wrap">
+    <AppDialog v-model:open="hostLibraryOpen" title="从主机 MOD 库添加">
+      <div v-if="hostLibraryError" class="error-strip">{{ hostLibraryError }}</div>
+      <div v-if="hostLibraryLoading" class="muted-text" role="status">读取主机 MOD 库…</div>
+      <div v-else-if="!hostLibraryItems.length" class="empty-state"><h2>主机 MOD 库为空</h2><p class="muted-text">请先在主机级“MOD 库”添加内容。</p></div>
+      <div v-else class="table-wrap">
         <table>
-          <thead><tr><th>图片</th><th>条目</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>Workshop ID</th><th>内容摘要</th><th>大小</th><th class="table-action">操作</th></tr></thead>
           <tbody>
-            <tr v-for="item in workshopItems" :key="item.workshopId">
-              <td>
-                <img v-if="item.previewUrl" class="workshop-thumbnail" :src="item.previewUrl" :alt="item.title ?? item.workshopId" loading="lazy" />
-                <span v-else class="muted-text">无</span>
-              </td>
-              <td><strong>{{ item.title ?? item.workshopId }}</strong><small class="table-sub mono">{{ item.workshopId }}</small></td>
-              <td><StatusLabel :tone="item.result === 1 ? 'success' : 'danger'" :label="item.result === 1 ? '可用' : '不可用'" /></td>
-              <td class="mono">{{ item.timeUpdated ?? '未知' }}</td>
-              <td>
+            <tr v-for="item in hostLibraryItems" :key="`${item.workshopId}:${item.contentDigest}`">
+              <td class="mono">{{ item.workshopId }}</td>
+              <td class="mono">{{ item.contentDigest.slice(0, 12) }}</td>
+              <td>{{ item.sizeBytes === null ? "未知" : formatBytes(item.sizeBytes) }}</td>
+              <td class="table-action">
                 <button class="text-button"
-                  :disabled="savingWorkshopId === item.workshopId || item.result !== 1 || items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null)"
-                  @click="addWorkshopItem(item)">
-                  {{ savingWorkshopId === item.workshopId ? '保存中…' : items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null) ? '已在列表' : '加入列表' }}
+                  :disabled="savingWorkshopId === item.workshopId || items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null && current.artifactDigest === item.contentDigest)"
+                  @click="addHostLibraryItem(item)">
+                  {{ savingWorkshopId === item.workshopId ? "保存中…" : items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null && current.artifactDigest === item.contentDigest) ? "已在实例" : items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null) ? "更新到此版本" : "加入实例" }}
                 </button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <template #footer>
-        <button class="button" type="button" @click="addOpen = false">关闭</button>
-        <button class="button primary" type="button" :disabled="workshopBusy || workspace.preview.value" @click="resolveWorkshop">{{ workshopBusy ? '查询中…' : '查询' }}</button>
-      </template>
+      <template #footer><button class="button" type="button" @click="hostLibraryOpen = false">关闭</button></template>
     </AppDialog>
 
     <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod?.schema.metadata.name ?? editingMod?.workshopId ?? ''}`">
@@ -1270,13 +849,12 @@ onBeforeUnmount(() => {
           </div>
         </section>
         <section v-if="applyPreview.changes.length" class="mod-apply-section">
-          <h3>冷保护备份</h3>
-          <div v-if="applyPreview.protectionBackup" class="mod-protection-backup">
-            <StatusLabel tone="success" label="可恢复" />
-            <span>{{ applyPreview.protectionBackup.createdAt }}</span>
-            <span class="mono">{{ applyPreview.protectionBackup.backupId }}</span>
-          </div>
-          <p v-else class="mod-preview-warning">尚无可用冷保护点；应用任务必须先创建并验证冷备份。</p>
+          <h3>应用前备份</h3>
+          <label class="mod-backup-choice">
+            <input v-model="createProtectionBackup" type="checkbox"/>
+            应用前创建冷备份
+          </label>
+          <p v-if="!createProtectionBackup" class="muted-text">不创建时，应用失败无法自动恢复原部署</p>
         </section>
         <div v-if="applyPreview.warnings.length" class="mod-preview-warning-list">
           <p v-for="warning in applyPreview.warnings" :key="warning">{{ warning }}</p>
@@ -1289,7 +867,7 @@ onBeforeUnmount(() => {
       <template #footer>
         <button class="button" type="button" @click="applyPreviewOpen = false">关闭</button>
         <button class="button primary" type="button" :disabled="applyPreviewLoading || !applyPreview || applyPreviewStale"
-          @click="openApplyPreview">重新核对</button>
+          @click="openApplyPreview(false)">重新核对</button>
         <button class="button primary" type="button" :disabled="applyPreviewLoading || applyBusy || !applyPreview?.canApply
           || !serverApplyPreview || applyPreviewStale || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
           @click="applyMods">{{ applyBusy ? '正在提交…' : '应用 MOD' }}</button>

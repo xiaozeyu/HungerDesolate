@@ -156,3 +156,28 @@ S0 与 S2–S4 尚未全部完成；S2 已实现连接、只读身份检查和 B
 - ✅ 恢复动作按钮已添加（具体实现待补充）
 - ⚠️ Release 验证进度反馈不足
 - ⚠️ 断线重试按钮未实现
+
+## 2026-10-31：创建检查与创建合并
+
+- 删除公开 `preview_instance_create` command 与前端预览/检查步骤；“创建专服”只调用一次 `create_instance`。
+- `create_instance` 在同一个已验证 SSH 会话内先执行原只读检查脚本，检查通过后把本次端口计划交给注册锁内的接纳事务；阻断项以 `CREATE_BLOCKED` + `details.blockers` 返回。
+- 创建请求不再接收 `planId`、`expectedPorts`、建议实例/目录；`operationId` 同时作为远端接纳的 `planId` 以保持同 operationId 幂等。
+- `InstanceCreateDialog` 移除创建摘要、预览端口和“重新检查并创建”按钮；提交期间禁用表单，任务开始后只显示任务阶段、失败诊断和 journal。
+- 测试更新：Rust `instance_creation`/`instance_task` 覆盖输入白名单、检查端口与阻断项；前端 `instanceCreation.test.ts` 与 `scripts/test-instance-create-ui.mjs` 覆盖单次提交、阻断项、失败任务和成功轮询。
+
+## 2026-10-31：世界配置检查与应用合并
+
+- 删除公开 `preview_world_apply` command 与前端“应用世界配置预览”对话框；`WorldPage` 的“保存并应用”保存成功后只调用一次 `apply_world_config`。
+- `apply_world_config` 在同一个已验证 SSH 会话内先执行只读应用检查，检查通过后把固定后的 `desiredDigest`/`activeReleaseId` 交给应用事务；阻断项以 `WORLD_APPLY_BLOCKED` + `details.blockers` 返回。
+- 应用请求不再接收 `desiredDigest`、`activeReleaseId`；响应新增 `warnings`，前端将“release 未通过隔离运行验证”“已有存档时世界生成选项只对新世界生效”等警告显示在操作反馈中。
+- 移除页头的“预览应用”入口；错误区按白名单显示应用阻断项，不再打开预览窗口。
+- 测试更新：Rust `world_config` 覆盖检查载荷与阻断项；`scripts/test-world-config.py` 远端脚本测试和 `scripts/test-world-config-ui.mjs` 流程守卫保持通过。
+
+## 2026-10-31：MOD 应用冷备份改为手动选择
+
+- MOD 页面新增“应用前创建冷备份”开关，默认关闭；关闭时提示应用失败无法自动恢复原部署。`applyInstanceMods` 增加 `createProtectionBackup`。
+- 远端 `mods-apply.py` 仅在请求备份时停服后创建冷保护备份；未请求时跳过备份阶段并直接发布。任务结果 `protectionBackupId` 为 null。
+- 未创建备份时失败不做自动恢复，错误信息与恢复步骤明确提示检查部署状态；`remoteChanged` 按是否已发布计算。
+- 预览不再要求实例已有冷备份（移除 `MOD_PROTECTION_BACKUP_REQUIRED` 阻断和 `has_cold_protection` 检查），前端不再请求备份列表；同时移除 `MOD_RESTORE_ACCEPTANCE_REQUIRED` 门槛，MOD 应用不再因缺少恢复验收或备份被阻断。
+- 修复工作区中已删除 `verify_gate` 定义但 worker 仍调用的残留引用。
+- 测试更新：Rust `mods` 校验 `createProtectionBackup` 必填并透传；`scripts/test-mods-apply.py` 覆盖无既有备份仍可预览、启动必须显式选择备份、错误文案；`modApplyPreview.test.ts` 移除备份前置条件；`scripts/test-mods-apply-ui.mjs` 守卫页面开关与请求字段。

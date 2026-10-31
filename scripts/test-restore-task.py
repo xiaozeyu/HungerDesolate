@@ -165,23 +165,30 @@ class RestoreTaskStateTests(unittest.TestCase):
                  patch.object(MODULE.subprocess, "run", return_value=launch) as run, \
                  patch.object(MODULE, "RESTORE_SOURCE", "worker source", create=True), \
                  patch.object(MODULE, "ARCHIVE_SOURCE", "archive source", create=True), \
-                 patch.object(MODULE, "RELEASE_SOURCE", "release source", create=True):
+                 patch.object(MODULE, "RELEASE_SOURCE", "release source", create=True), \
+                 patch.object(MODULE, "MODS_APPLY_SOURCE", "mods apply source", create=True), \
+                 patch.object(MODULE, "MODS_DOWNLOAD_SOURCE", "mods download source", create=True):
                 state = MODULE.start(request)
 
             operation_dir = tasks / request["operationId"]
             self.assertEqual(state["status"], "queued")
             self.assertTrue((operation_dir / "worker.py").is_file())
             self.assertEqual((operation_dir / "release-source.py").read_text(), "release source")
+            self.assertEqual((operation_dir / "mods-apply-source.py").read_text(), "mods apply source")
+            self.assertEqual((operation_dir / "mods-download-source.py").read_text(), "mods download source")
             self.assertIn(str(operation_dir / "worker.py"), run.call_args.args[0])
 
     def test_restore_worker_bundle_includes_archive_and_release_helpers(self):
         with tempfile.TemporaryDirectory(prefix="restore-bundle-") as temporary:
             directory = Path(temporary)
-            MODULE.write_worker_bundle(directory, "worker source", "archive source", "release source")
+            MODULE.write_worker_bundle(directory, "worker source", "archive source", "release source",
+                                       "mods apply source", "mods download source")
 
             self.assertEqual((directory / "worker.py").read_text(), "worker source")
             self.assertEqual((directory / "archive-source.py").read_text(), "archive source")
             self.assertEqual((directory / "release-source.py").read_text(), "release source")
+            self.assertEqual((directory / "mods-apply-source.py").read_text(), "mods apply source")
+            self.assertEqual((directory / "mods-download-source.py").read_text(), "mods download source")
             self.assertEqual(stat.S_IMODE((directory / "release-source.py").stat().st_mode), 0o600)
 
     def test_missing_mod_snapshot_is_restored_as_no_mods_not_current_state(self):

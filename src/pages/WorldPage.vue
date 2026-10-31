@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
-import { Eye, RefreshCw, RotateCw, Save } from "@lucide/vue";
-import AppDialog from "../components/AppDialog.vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
+import { RefreshCw, Save } from "@lucide/vue";
 import AppSelect from "../components/AppSelect.vue";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import { applyWorldConfig, getWorldConfig, previewWorldApply, saveWorldConfig, type WorldApplyPreview } from "../api/world";
+import { applyWorldConfig, getWorldConfig, saveWorldConfig } from "../api/world";
 import { useWorkspace } from "../composables/useWorkspace";
 import { usePageTarget } from "../composables/usePageTarget";
 import { describeError, type UserError } from "../lib/commandError";
@@ -18,7 +17,6 @@ import type { DstWorldCategory, DstWorldShard, WorldConfig, WorldSettings } from
 const workspace = useWorkspace();
 const { server, instance, target, instanceName } = usePageTarget();
 const data = ref<WorldConfig | null>(null);
-const applyPreview = ref<WorldApplyPreview|null>(null), previewBusy = ref(false);
 const applyBusy = ref(false);
 const draft = reactive<WorldSettings>(defaultWorldSettings(false));
 const baseDesired = ref<WorldSettings | null>(null), baseRevision = ref(0);
@@ -170,36 +168,36 @@ function validateDraft(): string | null {
   return null;
 }
 
-async function save() {
+async function save(): Promise<boolean> {
   const instanceTarget = target.value, connection = server.value, currentConfig = data.value;
   if (saving.value) {
     saveMessage.value = "保存请求正在处理中，请等待结果。";
-    return;
+    return false;
   }
   if (!instanceTarget || !connection || !currentConfig) {
     saveMessage.value = "尚未读取到可保存的专服配置，请先刷新。";
-    return;
+    return false;
   }
   if (loading.value) {
     saveMessage.value = "专服配置仍在读取，请稍后保存。";
-    return;
+    return false;
   }
   if (stale.value) {
     saveMessage.value = "当前配置读取已过期，请刷新后再保存。";
-    return;
+    return false;
   }
   if (workspace.preview.value) {
     saveMessage.value = "界面预览数据不能保存，请在桌面应用中编辑真实专服。";
-    return;
+    return false;
   }
   if (!hasChanges.value) {
     saveMessage.value = "当前配置没有更改，无需保存。";
-    return;
+    return false;
   }
   const validation = validateDraft();
   if (validation) {
     error.value = { code: "WORLD_CONFIG_INPUT_INVALID", message: validation, recoverySteps: [], field: null };
-    return;
+    return false;
   }
   const savedTarget = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
   const savedEpoch = epoch, version = draftVersion.value;
@@ -221,7 +219,7 @@ async function save() {
     });
     if (epoch !== savedEpoch || target.value === null
       || `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` !== savedTarget
-      || server.value?.recordVersion !== connection.recordVersion) return;
+      || server.value?.recordVersion !== connection.recordVersion) return false;
     if (response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
       || response.target.instanceId !== instanceTarget.instanceId || response.operationId !== operationId
       || response.data.revision !== response.verifiedRevision || response.verifiedRevision <= expectedRevision) {
@@ -238,64 +236,58 @@ async function save() {
       passwordValue.value = "";
     }
     pendingOperationId.value = "";
-    saveMessage.value = `期望配置已保存（版本 ${response.data.revision}），尚未应用到运行中的世界。`;
+    saveMessage.value = `期望配置已保存（版本 ${response.data.revision}）。`;
+    return true;
   } catch (cause) {
     if (epoch === savedEpoch && target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget) {
       error.value = describeError(cause);
       saveMessage.value = "";
     }
+    return false;
   } finally {
     if (epoch === savedEpoch) saving.value = false;
   }
 }
 
-async function previewApply() {
-  const instanceTarget=target.value,connection=server.value,config=data.value;
-  if(!instanceTarget||!connection||!config||loading.value||saving.value||hasChanges.value||stale.value)return;
-  const ticketEpoch=epoch,version=draftVersion.value,revision=baseRevision.value,domainRevision=config.revision,requestId=crypto.randomUUID();
-  previewBusy.value=true;error.value=null;
-  try {
-    const result=await previewWorldApply({
-      schemaVersion: 1, requestId, target: instanceTarget,
-      expectedRecordVersion: connection.recordVersion, expectedRevision: revision,
-    });
-    if(epoch!==ticketEpoch||draftVersion.value!==version||target.value?.instanceId!==instanceTarget.instanceId
-      ||server.value?.recordVersion!==connection.recordVersion||baseRevision.value!==revision||data.value?.revision!==domainRevision)return;
-    if(result.requestId!==requestId||result.revision!==revision||result.target.serverId!==instanceTarget.serverId
-      ||result.target.hostId!==instanceTarget.hostId||result.target.instanceId!==instanceTarget.instanceId)
-      throw new Error("配置应用预览身份或版本不匹配");
-    applyPreview.value=result;
-  }catch(cause){if(epoch===ticketEpoch)error.value=describeError(cause);}
-  finally{if(epoch===ticketEpoch)previewBusy.value=false;}
+async function saveAndApply() {
+  if (saving.value || applyBusy.value || loading.value || stale.value || !data.value || !target.value) return;
+  error.value = null;
+  if (hasChanges.value) {
+    if (!(await save())) return;
+    await nextTick();
+  }
+  if (hasChanges.value) return;
+  await applyWorld();
 }
 
 async function applyWorld() {
-  const instanceTarget = target.value, connection = server.value, preview = applyPreview.value;
-  if (!instanceTarget || !connection || !preview || !preview.allowed || applyBusy.value
-      || !preview.activeReleaseId || loading.value || saving.value || hasChanges.value || stale.value || workspace.preview.value) return;
-  const ticketEpoch = epoch, revision = preview.revision, desiredDigest = preview.desiredDigest;
+  const instanceTarget = target.value, connection = server.value, config = data.value;
+  if (!instanceTarget || !connection || !config || applyBusy.value
+      || loading.value || saving.value || hasChanges.value || stale.value || workspace.preview.value) return;
+  const ticketEpoch = epoch, revision = baseRevision.value;
   const requestId = crypto.randomUUID();
   applyBusy.value = true;
   error.value = null;
-  saveMessage.value = "正在部署世界配置…";
+  saveMessage.value = "正在检查并部署世界配置…";
   try {
     const result = await applyWorldConfig({
       schemaVersion: 1, requestId, target: instanceTarget,
       expectedRecordVersion: connection.recordVersion, expectedRevision: revision,
-      desiredDigest, activeReleaseId: preview.activeReleaseId, operationId: crypto.randomUUID(),
+      operationId: crypto.randomUUID(),
     });
     if (epoch !== ticketEpoch || target.value?.instanceId !== instanceTarget.instanceId
         || server.value?.recordVersion !== connection.recordVersion) return;
-    if (result.requestId !== requestId || result.revision !== revision || result.desiredDigest !== desiredDigest
-        || result.activeReleaseId !== preview.activeReleaseId
-        || result.runtimeVerified !== false || result.target.serverId !== instanceTarget.serverId
-        || result.target.hostId !== instanceTarget.hostId || result.target.instanceId !== instanceTarget.instanceId) {
+    if (result.requestId !== requestId || result.revision !== revision
+        || result.runtimeVerified !== false || !Array.isArray(result.warnings)
+        || result.warnings.length > 128
+        || !Array.isArray(result.runningShards) || result.runningShards.length > 2
+        || result.target.serverId !== instanceTarget.serverId || result.target.hostId !== instanceTarget.hostId
+        || result.target.instanceId !== instanceTarget.instanceId) {
       throw new Error("配置应用结果身份、版本或验证状态无效");
     }
-    applyPreview.value = null;
-    saveMessage.value = result.runningShards.length
+    saveMessage.value = [result.runningShards.length
       ? "世界配置已部署并重启原运行分片；隔离运行验证仍待完成。"
-      : "世界配置已部署，专服保持停止；隔离运行验证仍待完成。";
+      : "世界配置已部署，专服保持停止；隔离运行验证仍待完成。", ...result.warnings].join(" ");
     await refresh();
   } catch (cause) {
     if (epoch === ticketEpoch) {
@@ -319,13 +311,27 @@ function updateList(key: "adminList" | "whitelist" | "blocklist", value: string)
   draft.advanced[key] = listDraft(value);
 }
 
+const applyBlockerLabels: Record<string, string> = {
+  PROTECTION_BACKUP_REQUIRED: "发现现有世界数据；备份功能接入前不会覆盖这些数据",
+  WORLD_CONFIG_RENDER_UNSUPPORTED: "当前期望配置无法安全转换为 DST 配置文件",
+  WORLD_TOKEN_MISSING: "应用前需要设置 Klei Token",
+  WORLD_DEPLOYMENT_MISSING: "专服尚未完成容器部署",
+  WORLD_RELEASE_MISSING: "专服缺少活动 DST Release",
+};
+function applyBlockerLabel(code: string) {
+  return Object.hasOwn(applyBlockerLabels, code) ? applyBlockerLabels[code]! : "配置应用条件未满足";
+}
+const applyBlockers = computed(() => {
+  const value = error.value?.details?.blockers;
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+});
+
 watch([() => target.value?.serverId, () => target.value?.hostId, () => target.value?.instanceId,
   () => server.value?.recordVersion, () => workspace.preview.value], () => {
   epoch++;
   querySequence++;
   latestRequestId = "";
   data.value = null;
-  applyPreview.value=null;
   baseDesired.value = null;
   baseRevision.value = 0;
   stale.value = false;
@@ -339,8 +345,8 @@ watch([() => target.value?.serverId, () => target.value?.hostId, () => target.va
   if (target.value) void refresh();
 }, { immediate: true, flush: "sync" });
 
-watch(draft, () => { draftVersion.value++; pendingOperationId.value = ""; applyPreview.value=null; saveMessage.value = ""; }, { deep: true, flush: "sync" });
-watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperationId.value = ""; saveMessage.value = ""; }, { flush: "sync" });
+watch(draft, () => { draftVersion.value++; pendingOperationId.value = ""; if (!applyBusy.value) saveMessage.value = ""; }, { deep: true, flush: "sync" });
+watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperationId.value = ""; if (!applyBusy.value) saveMessage.value = ""; }, { flush: "sync" });
 </script>
 
 <template>
@@ -349,13 +355,13 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
       <template #actions>
         <StatusLabel v-if="status==='inSync'" tone="success" label="已应用"/>
         <StatusLabel v-else-if="status==='pending'" tone="warning" label="待应用"/>
-        <button class="button" :disabled="loading || saving || !target" @click="refresh"><RefreshCw :size="16"/>{{loading?'读取中…':'刷新'}}</button>
-        <button v-if="status==='pending'&&!hasChanges" class="button" :disabled="previewBusy || stale" @click="previewApply"><Eye :size="16"/>{{previewBusy?'预览中…':'预览应用'}}</button>
+        <button class="button" :disabled="loading || saving || applyBusy || !target" @click="refresh"><RefreshCw :size="16"/>{{loading?'读取中…':'刷新'}}</button>
       </template>
     </PageHeader>
     <PreviewNotice/>
     <div v-if="error" class="environment-error" role="alert">
       <strong>{{error.message}}</strong>
+      <ul v-if="applyBlockers.length"><li v-for="code in applyBlockers" :key="code">{{applyBlockerLabel(code)}}</li></ul>
       <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul>
     </div>
     <p v-if="saveMessage" class="success-message" role="status" aria-live="polite">{{saveMessage}}</p>
@@ -444,18 +450,9 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
       <div v-if="activeView!=='basic' && data?.validationWarnings.length" class="muted-text world-validation-warnings">{{data.validationWarnings.join('；')}}</div>
       <div class="world-page-actions">
         <span class="world-action-feedback" :class="{'world-action-error':!!error}" :role="error?'alert':'status'" aria-live="polite">{{error?.message || saveMessage || (loading?'正在读取配置…':stale?'读取结果已过期':hasChanges?'有未保存的更改':'没有未保存的更改')}}</span>
-        <button class="button primary" :disabled="saving || loading || stale || !data || !target" @click="save"><Save :size="16"/>{{saving?'保存中…':'保存期望配置'}}</button>
+        <button class="button" :disabled="saving || applyBusy || loading || stale || !data || !target" @click="save">仅保存</button>
+        <button class="button primary" :disabled="saving || applyBusy || loading || stale || !data || !target" @click="saveAndApply"><Save :size="16"/>{{saving?'保存中…':applyBusy?'检查并部署中…':'保存并应用'}}</button>
       </div>
     </template>
-    <AppDialog :open="!!applyPreview" title="应用世界配置预览" @update:open="value=>{if(!value)applyPreview=null}">
-      <div v-if="applyPreview" class="form-stack">
-        <dl class="creation-facts"><div><dt>配置版本</dt><dd>{{applyPreview.revision}}</dd></div><div><dt>世界存档</dt><dd>{{applyPreview.worldDataPresent?`${applyPreview.worldDataFileCount} 个文件`:"未发现现有存档文件"}}</dd></div><div><dt>Token</dt><dd>{{applyPreview.tokenStatus==='configured'?'已配置':'缺失'}}</dd></div><div><dt>世界生成选项</dt><dd>{{applyPreview.newWorldOptions.length}} 项会影响新世界生成</dd></div></dl>
-        <p v-if="applyPreview.backupRequirement==='required'">应用前需要创建并验证保护备份。</p>
-        <ul v-if="applyPreview.newWorldOptions.length"><li v-for="option in applyPreview.newWorldOptions.slice(0,12)" :key="`${option.shard}:${option.key}`">{{option.shard==='master'?'Master':'Caves'}} · {{option.label}}</li></ul>
-        <ul v-if="applyPreview.blockers.length" class="environment-error"><li v-for="blocker in applyPreview.blockers" :key="blocker">{{blocker==='PROTECTION_BACKUP_REQUIRED'?'发现现有世界数据；备份功能接入前不会覆盖这些数据':blocker==='WORLD_CONFIG_RENDER_UNSUPPORTED'?'当前期望配置无法安全转换为 DST 配置文件':blocker==='WORLD_TOKEN_MISSING'?'应用前需要设置 Klei Token':blocker==='WORLD_DEPLOYMENT_MISSING'?'专服尚未完成容器部署':blocker==='WORLD_RELEASE_MISSING'?'专服缺少活动 DST Release':'配置应用条件未满足'}}</li></ul>
-        <ul v-if="applyPreview.warnings.length"><li v-for="warning in applyPreview.warnings" :key="warning">{{warning}}</li></ul>
-      </div>
-      <template #footer><button class="button" :disabled="applyBusy" @click="applyPreview=null">关闭</button><button class="button primary" :disabled="applyBusy || !applyPreview?.allowed" @click="applyWorld"><RotateCw :size="16"/>{{applyBusy?'部署中…':'应用配置'}}</button></template>
-    </AppDialog>
   </div>
 </template>

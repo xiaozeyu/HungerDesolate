@@ -1,4 +1,3 @@
-import type { BackupSummary } from "../api/instances";
 import type { InstanceModSummary } from "../types/mods";
 
 export interface ModApplyChange {
@@ -12,33 +11,26 @@ export interface ModApplyChange {
 export interface ModApplyPreview {
   changes: ModApplyChange[];
   shards: Array<"master" | "caves">;
-  protectionBackup: BackupSummary | null;
   blockers: string[];
   warnings: string[];
   canApply: boolean;
 }
 
 const serverBlockerLabels: Record<string, string> = {
-  MOD_RESTORE_ACCEPTANCE_REQUIRED: "MOD 发布恢复验收尚未通过此 Linux 主机验收",
-  MOD_PROTECTION_BACKUP_REQUIRED: "缺少有效的冷保护备份，不能开始发布",
-  MOD_ARTIFACT_REQUIRED: "启用的 MOD 缺少固定内容，请先准备内容",
+  MOD_ARTIFACT_REQUIRED: "启用的 MOD 缺少主机库内容版本",
 };
 
 export function mergeModApplyBlockers(preview: ModApplyPreview, serverBlockers: string[]): string[] {
-  const blockers = preview.blockers.filter(blocker =>
-    !(serverBlockers.includes("MOD_RESTORE_ACCEPTANCE_REQUIRED")
-      && blocker === "MOD 发布恢复流程尚未通过此 Linux 主机验收"));
+  const blockers = [...preview.blockers];
   for (const code of serverBlockers) blockers.push(serverBlockerLabels[code] ?? `服务端阻断发布：${code}`);
   return [...new Set(blockers)];
 }
 
 export function buildModApplyPreview(input: {
   mods: InstanceModSummary[];
-  backups: BackupSummary[];
   runtimeStatus: string;
   cavesEnabled: boolean;
   worldDesiredVsDeployed?: string;
-  restoreAcceptancePassed: boolean;
 }): ModApplyPreview {
   const changes: ModApplyChange[] = [];
   const blockers: string[] = [];
@@ -87,7 +79,7 @@ export function buildModApplyPreview(input: {
   }
 
   if (changes.length === 0) {
-    return { changes, shards: [], protectionBackup: null, blockers, warnings, canApply: false };
+    return { changes, shards: [], blockers, warnings, canApply: false };
   }
   if (input.runtimeStatus === "unknown" || input.runtimeStatus === "starting") {
     blockers.push("无法确认专服运行状态，暂不能生成可执行预览");
@@ -95,21 +87,12 @@ export function buildModApplyPreview(input: {
   if (input.worldDesiredVsDeployed === "pending") {
     warnings.push("世界配置有待应用；MOD 单独发布会沿用当前已部署的世界配置");
   }
-  if (!input.restoreAcceptancePassed) {
-    blockers.push("MOD 发布恢复流程尚未通过此 Linux 主机验收");
-  }
-  const protectionBackup = input.backups
-    .filter(backup => backup.captureMode === "cold" && backup.verification === "verified"
-      && backup.restorability === "restorable" && !!backup.checksum)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
-  if (!protectionBackup) warnings.push("应用前必须成功创建并验证冷保护备份");
   return {
     changes,
     shards: input.cavesEnabled ? ["master", "caves"] : ["master"],
-    protectionBackup,
     blockers,
     warnings,
-    canApply: blockers.length === 0 && !!protectionBackup,
+    canApply: blockers.length === 0,
   };
 }
 

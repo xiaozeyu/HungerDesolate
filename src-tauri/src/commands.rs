@@ -246,6 +246,20 @@ pub async fn get_instance_overview(
 }
 
 #[tauri::command]
+pub async fn get_instance_diagnostics(
+    state: State<'_, AppState>,
+    request: crate::diagnostics::Request,
+) -> CommandResult<crate::diagnostics::Response> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getInstanceDiagnostics",
+        safe_request_id(&request.request_id),
+        move || crate::diagnostics::get(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn get_workshop_metadata(
     state: State<'_, AppState>,
     request: crate::workshop::Request,
@@ -283,48 +297,6 @@ pub async fn save_instance_mods(
         "saveInstanceMods",
         safe_request_id(&request.request_id),
         move || crate::mods::save(&path, request),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn prepare_instance_mods(
-    state: State<'_, AppState>,
-    request: crate::mods::PrepareRequest,
-) -> CommandResult<crate::mods::DownloadTaskResponse> {
-    let path = state.database_path.clone();
-    ssh_blocking(
-        "prepareInstanceMods",
-        safe_request_id(&request.request_id),
-        move || crate::mods::prepare(&path, request),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn get_instance_mod_task(
-    state: State<'_, AppState>,
-    request: crate::mods::DownloadTaskRequest,
-) -> CommandResult<crate::mods::DownloadTaskResponse> {
-    let path = state.database_path.clone();
-    ssh_blocking(
-        "getInstanceModTask",
-        safe_request_id(&request.request_id),
-        move || crate::mods::download_status(&path, request),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn list_instance_mod_tasks(
-    state: State<'_, AppState>,
-    request: crate::mods::ListRequest,
-) -> CommandResult<crate::mods::DownloadTaskListResponse> {
-    let path = state.database_path.clone();
-    ssh_blocking(
-        "listInstanceModTasks",
-        safe_request_id(&request.request_id),
-        move || crate::mods::download_tasks(&path, request),
     )
     .await
 }
@@ -671,19 +643,6 @@ pub async fn cleanup_credentials(
 }
 
 #[tauri::command]
-pub async fn preview_instance_create(
-    state: State<'_, AppState>,
-    request: crate::instance_creation::PreviewRequest,
-) -> CommandResult<crate::instance_creation::PreviewResponse> {
-    let path = state.database_path.clone();
-    let request_id = safe_request_id(&request.request_id);
-    ssh_blocking("previewInstanceCreate", request_id, move || {
-        crate::instance_creation::preview(&path, request)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn create_instance(
     state: State<'_, AppState>,
     request: crate::instance_task::StartRequest,
@@ -768,6 +727,76 @@ pub async fn get_world_config(
 }
 
 #[tauri::command]
+pub async fn list_host_mods(
+    state: State<'_, AppState>,
+    request: crate::host_mods::ListRequest,
+) -> CommandResult<crate::host_mods::ListResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listHostMods",
+        safe_request_id(&request.request_id),
+        move || crate::host_mods::list(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_host_mod(
+    state: State<'_, AppState>,
+    request: crate::host_mods::DeleteRequest,
+) -> CommandResult<crate::host_mods::DeleteResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "deleteHostMod",
+        safe_request_id(&request.request_id),
+        move || crate::host_mods::delete(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn prepare_host_mods(
+    state: State<'_, AppState>,
+    request: crate::host_mods::PrepareRequest,
+) -> CommandResult<crate::host_mods::TaskResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "prepareHostMods",
+        safe_request_id(&request.request_id),
+        move || crate::host_mods::prepare(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_host_mod_task(
+    state: State<'_, AppState>,
+    request: crate::host_mods::TaskRequest,
+) -> CommandResult<crate::host_mods::TaskResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getHostModTask",
+        safe_request_id(&request.request_id),
+        move || crate::host_mods::task(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_host_mod_tasks(
+    state: State<'_, AppState>,
+    request: crate::host_mods::TaskListRequest,
+) -> CommandResult<crate::host_mods::TaskListResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listHostModTasks",
+        safe_request_id(&request.request_id),
+        move || crate::host_mods::tasks(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn save_world_config(
     state: State<'_, AppState>,
     request: crate::world_config::SaveRequest,
@@ -777,20 +806,6 @@ pub async fn save_world_config(
         "saveWorldConfig",
         safe_request_id(&request.request_id),
         move || crate::world_config::save(&path, request),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn preview_world_apply(
-    state: State<'_, AppState>,
-    request: crate::world_config::PreviewApplyRequest,
-) -> CommandResult<crate::world_config::WorldApplyPreview> {
-    let path = state.database_path.clone();
-    ssh_blocking(
-        "previewWorldApply",
-        safe_request_id(&request.request_id),
-        move || crate::world_config::preview_apply(&path, request),
     )
     .await
 }
@@ -917,6 +932,20 @@ pub async fn build_dst_image(
         "buildDstImage",
         safe_request_id(&request.request_id),
         move || crate::image_build::build_dst_image(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn manage_build_cache(
+    state: State<'_, AppState>,
+    request: crate::build_cache::Request,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "manageBuildCache",
+        safe_request_id(&request.request_id),
+        move || crate::build_cache::manage(&path, request),
     )
     .await
 }

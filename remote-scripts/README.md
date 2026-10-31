@@ -20,9 +20,9 @@ Docker 安装预检只读 `/etc/os-release`、管理身份、dpkg/source 配置�
 
 安装 worker 在新软件源发布之前下载签名密钥并检查完整 PEM 包络与大小；不覆盖已有文件。下载网络超时、DNS/连接错误、HTTP 408/429/5xx 最多尝试三次，间隔 1、2 秒；证书、TLS、格式错误直接失败，仍使用系统 TLS 校验和固定官方地址。失败状态保留实际阶段及安全错误码。运行和已结束的旧任务继续使用创建时的脚本；更新桌面后重新预检并创建新任务才能应用修复，旧 `INSTALL_FAILED` 不能补推原始异常。
 
-`probes/instance-create-preview.py` 为只读创建规划：当前固定公网路线，核验完整主机身份与注册表版本，保守合并 registry/manifest 端口、Linux socket 和 Docker 发布配置；不写文件/创建容器/分配实例。端口与目录是未预留建议，部署兼容性门禁未通过前返回固定阻断。测试入口 `python3 scripts/test-instance-create-preview.py`；实际游戏联网和容量仍需阶段 0。
+`probes/instance-create-preview.py` 是 `create_instance` 内部的只读检查阶段：当前固定公网路线，核验完整主机身份与注册表版本，保守合并 registry/manifest 端口、Linux socket 和 Docker 发布配置；不写文件/创建容器/分配实例。检查得到的端口计划只在本命令内交给接纳事务，阻断项以固定代码返回。测试入口 `python3 scripts/test-instance-create-preview.py`；实际游戏联网和容量仍需阶段 0。
 
-`actions/instance-create-control.py` 只做创建任务接纳：在 `registry.lock` 内重新校验 hostId、registryRevision、预览端口计划和实际端口占用，原子写入 `creating` 实例、完整端口预留和受限 operation 回执。它不创建实例目录、不写 Token、不生成 Compose、不启动 Docker；这些动作必须由后续持久 controller/worker 完成。测试入口 `python3 scripts/test-instance-create-control.py`。
+`actions/instance-create-control.py` 只做创建任务接纳：在 `registry.lock` 内重新校验 hostId、registryRevision、检查阶段端口计划和实际端口占用，原子写入 `creating` 实例、完整端口预留和受限 operation 回执。它不创建实例目录、不写 Token、不生成 Compose、不启动 Docker；这些动作必须由后续持久 controller/worker 完成。测试入口 `python3 scripts/test-instance-create-control.py`。
 
 `actions/instance-create-task.py` 负责持久任务目录、幂等 request、status、journal、systemd transient unit 和 interrupted 对账；`actions/instance-create-worker.py` 负责阶段更新并在部署兼容性未验证时返回固定 `DEPLOYMENT_VALIDATION_REQUIRED`。测试入口 `python3 scripts/test-instance-create-task.py`。
 

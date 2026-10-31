@@ -95,7 +95,8 @@ td { padding: var(--space-4) var(--space-2); border-bottom: 1px solid var(--bord
 .mod-apply-section h3 { display: flex; align-items: baseline; gap: var(--space-2); margin: 0; font-size: 13px; }
 .mod-apply-change { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); font-size: 12px; }
 .mod-apply-change .mono:last-child { margin-left: auto; }
-.mod-protection-backup { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; font-size: 12px; }
+.mod-apply-options { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: calc(-1 * var(--space-3)) 0 var(--space-5); font-size: 13px; }
+.mod-backup-choice { display: inline-flex; align-items: center; gap: var(--space-2); }
 .mod-preview-warning-list, .mod-preview-blockers { display: grid; gap: var(--space-2); padding: var(--space-3); border-left: 3px solid var(--warning); background: var(--surface-muted); font-size: 12px; }
 .mod-preview-warning-list p, .mod-preview-blockers p { margin: 0; line-height: 1.5; }
 .mod-preview-blockers { border-left-color: var(--danger); }
@@ -215,12 +216,6 @@ svg { stroke-width: 1.75; }
 .creation-option-group legend { padding: 0 var(--space-1); color: var(--text-secondary); font-size: 12px; }
 .creation-form .creation-switch { display: flex; flex-direction: row; align-items: center; gap: var(--space-2); min-height: 32px; font-size: 13px; }
 .creation-preview-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); padding-bottom: var(--space-5); border-bottom: 1px solid var(--border); }
-.creation-preview-badges { display: flex; align-items: center; gap: var(--space-3); font-size: 12px; }
-.creation-preview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); margin-top: var(--space-5); }
-.creation-panel { min-width: 0; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface-muted); }
-.creation-panel-wide { grid-column: 1 / -1; }
-.creation-panel h4 { margin: 0 0 var(--space-3); font-size: 13px; font-weight: 600; }
-.creation-panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
 .creation-facts { margin: 0; }
 .creation-facts > div { display: grid; grid-template-columns: minmax(90px, .8fr) minmax(0, 1.5fr); gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); font-size: 12px; }
 .creation-facts > div:last-child { border-bottom: 0; }
@@ -283,9 +278,6 @@ svg { stroke-width: 1.75; }
 .world-action-feedback.world-action-error { color: var(--danger); }
 @media (max-width: 1040px) { .world-page-actions { margin-left: calc(-1 * var(--space-4)); margin-right: calc(-1 * var(--space-4)); padding-left: var(--space-4); padding-right: var(--space-4); } }
 @media (max-width: 720px) { .world-switch-grid, .world-shard-summary, .access-settings-grid, .access-list-group { grid-template-columns: 1fr; } .world-description-field { grid-column: auto; } .access-list-group .section-heading { grid-column: auto; } }
-.creation-ports { margin: 0; }
-.creation-ports table { min-width: 0; width: 100%; background: var(--surface); }
-.creation-ports th, .creation-ports td { padding: var(--space-2); }
 .creation-task-state { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-5); padding: var(--space-3) 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); font-size: 13px; }
 .creation-task-state .status-label { flex-shrink: 0; }
-@media (max-width: 720px) { .creation-settings-grid, .creation-preview-grid { grid-template-columns: 1fr; } .creation-panel-wide, .creation-field-wide { grid-column: auto; } .creation-preview-heading { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 720px) { .creation-settings-grid { grid-template-columns: 1fr; } .creation-field-wide { grid-column: auto; } .creation-preview-heading { align-items: flex-start; flex-direction: column; } }

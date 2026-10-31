@@ -525,6 +525,117 @@ def compose(instance, manifest, action, *arguments):
         reject("BACKUP_STOP_FAILED" if action == "stop" else "BACKUP_RESTART_FAILED")
 
 
+def load_restore_mod_helpers(directory):
+    apply_ns = {"__name__": "restore_mods_apply"}
+    exec(compile((directory / "mods-apply-source.py").read_text(encoding="utf-8"), "<mods-apply>", "exec"), apply_ns)
+    download_ns = {"__name__": "restore_mods_download"}
+    exec(compile((directory / "mods-download-source.py").read_text(encoding="utf-8"), "<mods-download>", "exec"), download_ns)
+    return apply_ns, download_ns
+
+
+def latest_host_mod(workshop_id):
+    root = ROOT / "mods" / "prepared" / workshop_id
+    if not root.is_dir():
+        return None
+    candidates = []
+    for item in root.iterdir():
+        if not item.is_dir() or not re.fullmatch(r"[0-9a-f]{64}", item.name):
+            continue
+        try:
+            manifest = read_json(item / "manifest.json", 4 * 1024 * 1024)
+        except (OSError, ValueError, TypeError):
+            continue
+        if (isinstance(manifest, dict) and manifest.get("workshopId") == workshop_id
+                and manifest.get("contentDigest") == item.name):
+            candidates.append((manifest.get("preparedAt", ""), item.name))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def rebuild_restore_mods(staging, instance_id, desired, new_revision, task_id, roles,
+                         original_active, apply_ns, download_ns):
+    if not isinstance(desired, dict) or not isinstance(desired.get("mods"), list):
+        return None, []
+    mods = []
+    warnings = []
+    for item in desired["mods"]:
+        if not isinstance(item, dict):
+            continue
+        workshop_id = str(item.get("workshopId", ""))
+        if not re.fullmatch(r"[0-9]{1,20}", workshop_id):
+            continue
+        digest = latest_host_mod(workshop_id)
+        if item.get("enabled") is True and digest is None:
+            warnings.append("MOD_MISSING:" + workshop_id)
+            continue
+        if digest is None:
+            digest = item.get("artifactDigest")
+        elif item.get("enabled") is True and item.get("artifactDigest") != digest:
+            warnings.append("MOD_VERSION_LATEST:" + workshop_id)
+        mods.append({"workshopId": workshop_id, "enabled": item.get("enabled") is True,
+                     "configurationOptions": item.get("configurationOptions", {}),
+                     "artifactDigest": digest})
+    desired["mods"] = mods
+    enabled = [item for item in mods if item["enabled"]]
+    active = dict(original_active)
+    active.pop("modsReleaseId", None)
+    active.pop("modsDigest", None)
+    active.pop("modsAppliedRevision", None)
+    if not enabled:
+        atomic_json(staging / "active-release.json", active)
+        atomic_json(staging / "deployed-mods.json", {"schemaVersion": 1, "instanceId": instance_id,
+            "revision": new_revision, "mods": mods, "modsReleaseId": None, "appliedAt": now()})
+        for shard in roles:
+            shard_root = staging / "config" / "Cluster_1" / shard.title()
+            shard_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            atomic_bytes(shard_root / "modoverrides.lua", apply_ns["modoverrides"](mods), 0o600)
+        return None, warnings
+    mod_release_id = str(uuid.uuid4())
+    (staging / "staging" / "mod-apply").mkdir(mode=0o700, parents=True, exist_ok=True)
+    release_stage = apply_ns["build_mod_release"](staging, mods, mod_release_id, task_id, download_ns)
+    destination = staging / "mods" / "releases" / mod_release_id
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    setup_release = release_stage.parent / "release-publish"
+    setup_release.mkdir(mode=0o700)
+    for shard in roles:
+        shutil.copytree(release_stage / shard.title(), setup_release / shard.title(), symlinks=False)
+    atomic_bytes(setup_release / "dedicated_server_mods_setup.lua", apply_ns["setup_script"](mods), 0o644)
+    for current, _, names in os.walk(setup_release):
+        os.chown(current, 1000, 1000); os.chmod(current, 0o755)
+        for name in names:
+            path = Path(current) / name
+            os.chown(path, 1000, 1000); os.chmod(path, 0o644)
+    os.chown(setup_release, 0, 0); os.chmod(setup_release, 0o755)
+    mods_digest = apply_ns["digest"](mods)
+    atomic_json(setup_release / "manifest.json", {"schemaVersion": 1, "modsReleaseId": mod_release_id,
+        "hostId": request_host_id(staging), "instanceId": instance_id, "desiredDigest": mods_digest,
+        "mods": [{"workshopId": item["workshopId"], "enabled": item["enabled"],
+                  "artifactDigest": item["artifactDigest"]} for item in mods],
+        "createdAt": now(), "sourceDigests": sorted({item["artifactDigest"] for item in enabled})})
+    try:
+        apply_ns["verify_mod_release"](setup_release, mods, roles, download_ns)
+    except Exception:
+        reject("MOD_RELEASE_INVALID")
+    os.rename(setup_release, destination)
+    for shard in roles:
+        shard_root = staging / "config" / "Cluster_1" / shard.title()
+        shard_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic_bytes(shard_root / "modoverrides.lua", apply_ns["modoverrides"](mods), 0o600)
+    active.update({"modsReleaseId": mod_release_id, "modsDigest": mods_digest, "modsAppliedRevision": new_revision})
+    atomic_json(staging / "active-release.json", active)
+    atomic_json(staging / "deployed-mods.json", {"schemaVersion": 1, "instanceId": instance_id,
+        "revision": new_revision, "modsDigest": mods_digest, "mods": mods,
+        "modsReleaseId": mod_release_id, "appliedAt": now()})
+    return mod_release_id, warnings
+
+
+def request_host_id(staging):
+    manifest = read_json(staging / "manifest.json", 65536)
+    return manifest.get("hostId")
+
+
 def _worker_impl(task_id):
     directory = TASKS / task_id
     state = load(task_id)
@@ -541,6 +652,7 @@ def _worker_impl(task_id):
     except OSError:
         reject("BACKUP_RELEASE_HELPER_MISSING")
     exec(compile(release_source, "<instance-release>", "exec"), release_namespace)
+    mods_apply_ns, mods_download_ns = load_restore_mod_helpers(directory)
     instance, manifest = verify_instance(request)
     runtime_before, roles = runtime(request["instanceId"], manifest)
     heavy = open(ROOT / "locks" / "heavy.lock", "a+b")
@@ -611,6 +723,14 @@ def _worker_impl(task_id):
         restore_desired = preserve_current_secret_refs(restore_desired, current_desired_world)
         restore_desired_mods, restore_deployed_mods = rebase_mod_states(
             restore_desired_mods, restore_deployed_mods, request["instanceId"], new_revision)
+        failure_step = "rebuildMods"
+        mods_warnings = []
+        restored_mods_release = None
+        if restore_desired_mods is not None:
+            restored_mods_release, mods_warnings = rebuild_restore_mods(
+                staging, request["instanceId"], restore_desired_mods, new_revision, task_id, roles,
+                original_active, mods_apply_ns, mods_download_ns)
+            restore_deployed_mods = read_json(staging / "deployed-mods.json", 2 * 1024 * 1024)
         failure_step = "restoreCredentials"
         preserved_lists = preserve_player_lists(instance)
         write_player_lists(staging, preserved_lists)
@@ -622,8 +742,7 @@ def _worker_impl(task_id):
         restored_active = restored_active_snapshot(staging, original_active)
         restored_mods_release = restored_active.get("modsReleaseId") if isinstance(restored_active, dict) else None
         if restored_mods_release is not None:
-            if (not valid_uuid(restored_mods_release)
-                    or "mods/releases/" + restored_mods_release + "/manifest.json" not in archive_paths):
+            if not valid_uuid(restored_mods_release):
                 reject("MOD_RELEASE_UNAVAILABLE")
             release_root = staging / "mods" / "releases" / restored_mods_release
             release_metadata = read_json(release_root / "manifest.json", 4 * 1024 * 1024)
@@ -712,8 +831,6 @@ def _worker_impl(task_id):
                              "active-release.json", "manifest.json", "compose.yaml"):
                 if (instance / relative).exists():
                     protection_roots.append(relative)
-            if active_release.get("modsReleaseId"):
-                protection_roots.append("mods/releases/" + active_release["modsReleaseId"])
             created = module["create_archive"](instance, protection_archive, identity, protection_roots)
             catalog = read_json(ROOT / "releases" / "catalog.json", 1024 * 1024)
             release = next((item for item in catalog.get("releases", []) if item.get("releaseId") == active_release.get("dstReleaseId") and item.get("verified") is True), None)
@@ -789,7 +906,7 @@ def _worker_impl(task_id):
             if stopped_after != "stopped":
                 reject("BACKUP_STOP_FAILED")
         set_status(directory, "running", "verify", completed="start" if runtime_before == "running" else "restoreCommit")
-        result_payload = {"protectionBackupId": protection_id if protection_created else None, "configRevision": manifest["configRevision"], "verification": "passed", "runtimeVerified": runtime_verified, "restoreAcceptanceRecorded": False}
+        result_payload = {"protectionBackupId": protection_id if protection_created else None, "configRevision": manifest["configRevision"], "verification": "passed", "runtimeVerified": runtime_verified, "restoreAcceptanceRecorded": False, "modsWarnings": mods_warnings}
         result = set_status(directory, "succeeded", "finalize", completed="verify", result=result_payload)
         shutil.rmtree(recovery, ignore_errors=True)
         shutil.rmtree(staging, ignore_errors=True)
@@ -896,12 +1013,15 @@ def worker(task_id):
         return state
 
 
-def write_worker_bundle(directory, worker_source, archive_source, release_source):
-    if not all(isinstance(value, str) for value in (worker_source, archive_source, release_source)):
+def write_worker_bundle(directory, worker_source, archive_source, release_source, mods_apply_source, mods_download_source):
+    if not all(isinstance(value, str) for value in (worker_source, archive_source, release_source,
+                                                    mods_apply_source, mods_download_source)):
         reject("BACKUP_CONTROLLER_BUNDLE_INVALID")
     atomic_bytes(directory / "worker.py", worker_source.encode("utf-8"), 0o700)
     atomic_bytes(directory / "archive-source.py", archive_source.encode("utf-8"), 0o600)
     atomic_bytes(directory / "release-source.py", release_source.encode("utf-8"), 0o600)
+    atomic_bytes(directory / "mods-apply-source.py", mods_apply_source.encode("utf-8"), 0o600)
+    atomic_bytes(directory / "mods-download-source.py", mods_download_source.encode("utf-8"), 0o600)
 
 
 def start(request):
@@ -927,7 +1047,10 @@ def start(request):
     worker_source = globals().get("RESTORE_SOURCE")
     archive_source = globals().get("ARCHIVE_SOURCE")
     release_source = globals().get("RELEASE_SOURCE")
-    write_worker_bundle(directory, worker_source, archive_source, release_source)
+    mods_apply_source = globals().get("MODS_APPLY_SOURCE")
+    mods_download_source = globals().get("MODS_DOWNLOAD_SOURCE")
+    write_worker_bundle(directory, worker_source, archive_source, release_source,
+                        mods_apply_source, mods_download_source)
     launch = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect", "--unit", unit, "--property=Type=exec", "/usr/bin/python3", "-I", str(worker_path), "worker", request["operationId"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
     if launch.returncode != 0:
         return set_status(directory, "failed", "queued", error=error_payload("BACKUP_CONTROLLER_START_FAILED", request, request["operationId"], False))

@@ -110,6 +110,8 @@ class ModsDownloadTests(unittest.TestCase):
         prepared = result["result"]["preparedMods"][0]
         artifact = self.instance / "mods" / "prepared" / "123456" / prepared["contentDigest"]
         self.assertTrue((artifact / "content" / "modinfo.lua").is_file())
+        host_artifact = self.root / "mods" / "prepared" / "123456" / prepared["contentDigest"]
+        self.assertTrue((host_artifact / "content" / "modinfo.lua").is_file())
         manifest = json.loads((artifact / "manifest.json").read_text())
         self.assertEqual(manifest["contentDigest"], prepared["contentDigest"])
         self.assertEqual(manifest["dstReleaseId"], RELEASE)

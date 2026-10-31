@@ -28,6 +28,8 @@ struct RemoteItem {
     result: Option<i64>,
     title: Option<String>,
     description: Option<String>,
+    creator_steam_id: Option<String>,
+    author: Option<String>,
     creator_app_id: Option<u32>,
     consumer_app_id: Option<u32>,
     time_created: Option<i64>,
@@ -54,6 +56,10 @@ impl RemoteItem {
             result: scalar_i64(object.get("result")),
             title: string_value(object.get("title")),
             description: string_value(object.get("short_description")),
+            creator_steam_id: scalar_string(object.get("creator")).filter(|value| {
+                value.len() == 17 && value.bytes().all(|byte| byte.is_ascii_digit())
+            }),
+            author: None,
             creator_app_id: scalar_i64(object.get("creator_appid"))
                 .and_then(|value| u32::try_from(value).ok()),
             consumer_app_id: scalar_i64(object.get("consumer_appid"))
@@ -99,6 +105,8 @@ pub struct Item {
     pub result: Option<i64>,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub creator_steam_id: Option<String>,
+    pub author: Option<String>,
     pub creator_app_id: Option<u32>,
     pub consumer_app_id: Option<u32>,
     pub time_created: Option<i64>,
@@ -147,6 +155,27 @@ fn ensure_tls_provider() -> CommandResult<()> {
         ));
     }
     Ok(())
+}
+
+fn fetch_author(client: &reqwest::blocking::Client, steam_id: &str) -> Option<String> {
+    let response = client
+        .get(format!(
+            "https://steamcommunity.com/profiles/{steam_id}/?xml=1"
+        ))
+        .send()
+        .ok()?;
+    let text = response.text().ok()?;
+    let start = text.find("<steamID>")? + "<steamID>".len();
+    let end = text[start..].find("</steamID>")? + start;
+    let value = text[start..end]
+        .trim()
+        .trim_start_matches("<![CDATA[")
+        .trim_end_matches("]]>")
+        .trim();
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 fn invoke(request: &Request) -> CommandResult<Vec<RemoteItem>> {
@@ -230,11 +259,18 @@ fn invoke(request: &Request) -> CommandResult<Vec<RemoteItem>> {
                 "Steam Workshop 返回条目超过上限",
             ));
         }
-        let items = details
+        let mut items = details
             .iter()
             .cloned()
             .map(RemoteItem::parse)
             .collect::<CommandResult<Vec<_>>>()?;
+        if items.len() <= 12 {
+            for item in &mut items {
+                if let Some(steam_id) = item.creator_steam_id.as_deref() {
+                    item.author = fetch_author(&client, steam_id);
+                }
+            }
+        }
         let requested: std::collections::HashSet<&str> =
             request.workshop_ids.iter().map(String::as_str).collect();
         let mut returned = std::collections::HashSet::new();
@@ -304,6 +340,8 @@ pub fn get(database: &Path, request: Request) -> CommandResult<Response> {
                 result: item.result,
                 title: item.title,
                 description: item.description,
+                creator_steam_id: item.creator_steam_id,
+                author: item.author,
                 creator_app_id: item.creator_app_id,
                 consumer_app_id: item.consumer_app_id,
                 time_created: item.time_created,
@@ -328,6 +366,7 @@ mod tests {
             "result": "1",
             "title": "Example mod",
             "short_description": "Description",
+            "creator": 76561198000000000_u64,
             "creator_appid": "322330",
             "consumer_appid": 322330,
             "time_created": "1700000000",
@@ -339,6 +378,7 @@ mod tests {
         .expect("valid Steam item");
         assert_eq!(item.workshop_id, "2893991859");
         assert_eq!(item.result, Some(1));
+        assert_eq!(item.creator_steam_id.as_deref(), Some("76561198000000000"));
         assert_eq!(item.creator_app_id, Some(322330));
         assert_eq!(item.time_created, Some(1700000000));
         assert_eq!(item.file_size, Some(1024));

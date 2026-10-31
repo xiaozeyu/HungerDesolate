@@ -1,6 +1,6 @@
 use crate::{
     dto::{CommandError, CommandResult},
-    instance_creation::{HostTarget, PortPlan},
+    instance_creation::{CreateInput, HostTarget, PortPlan},
     ssh::with_verified_session,
     ssh_dto::ConnectionRequest,
 };
@@ -22,19 +22,6 @@ const RELEASE: &str = include_str!("../../remote-scripts/actions/instance-releas
 const DOCKER: &str = include_str!("../../remote-scripts/actions/instance-docker.py");
 const MAX_OUTPUT: usize = 256 * 1024;
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateTaskInput {
-    pub display_name: String,
-    pub autostart: bool,
-    pub start_after_create: bool,
-    pub port_policy: String,
-    pub caves_enabled: bool,
-    pub release_id: String,
-    pub release_catalog_digest: String,
-    pub expected_ports: Vec<PortPlan>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartRequest {
@@ -43,9 +30,21 @@ pub struct StartRequest {
     pub target: HostTarget,
     pub expected_record_version: u64,
     pub expected_registry_revision: u64,
-    pub plan_id: String,
     pub operation_id: String,
-    pub input: CreateTaskInput,
+    pub input: CreateInput,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdmissionInput<'a> {
+    display_name: &'a str,
+    autostart: bool,
+    start_after_create: bool,
+    port_policy: &'a str,
+    caves_enabled: bool,
+    release_id: &'a str,
+    release_catalog_digest: &'a str,
+    expected_ports: &'a [PortPlan],
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,7 +151,6 @@ fn validate_start(request: &StartRequest) -> CommandResult<()> {
     }
     crate::server_input::validate_id(&request.target.server_id, OP, "serverId")?;
     crate::server_input::validate_id(&request.target.host_id, OP, "hostId")?;
-    crate::server_input::validate_id(&request.plan_id, OP, "planId")?;
     crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
     if request.expected_registry_revision > crate::server_input::MAX_REVISION
         || request.expected_record_version > crate::server_input::MAX_REVISION
@@ -163,7 +161,6 @@ fn validate_start(request: &StartRequest) -> CommandResult<()> {
         || (!request.input.autostart && request.input.start_after_create)
         || !valid_uuid(&request.input.release_id)
         || !request.input.release_catalog_digest.starts_with("sha256:")
-        || request.input.expected_ports.len() != if request.input.caves_enabled { 6 } else { 3 }
     {
         return Err(error("CREATE_INPUT_INVALID", "创建容器请求参数无效"));
     }
@@ -218,10 +215,10 @@ fn remote_error(code: &str) -> Box<CommandError> {
         ),
         "OPERATION_ID_REUSED" => error("OPERATION_ID_REUSED", "操作编号已用于不同的创建请求"),
         "INSTANCE_CREATE_BUSY" => error("INSTANCE_CREATE_BUSY", "已有创建任务正在运行"),
-        "REGISTRY_CHANGED" => error("REGISTRY_CHANGED", "注册表已变化，请重新预览"),
+        "REGISTRY_CHANGED" => error("REGISTRY_CHANGED", "注册表已变化，请刷新后重试"),
         "RELEASE_CATALOG_CHANGED" => error(
             "RELEASE_CATALOG_CHANGED",
-            "Release 列表已变化，请刷新 Release 后重新预览",
+            "Release 列表已变化，请刷新 Release 后重试",
         ),
         "CREATE_PORT_STATE_INVALID" => error(
             "CREATE_PORT_STATE_INVALID",
@@ -229,7 +226,7 @@ fn remote_error(code: &str) -> Box<CommandError> {
         ),
         "CREATE_INPUT_INVALID" | "CREATE_TASK_INPUT_INVALID" => error(
             "CREATE_INPUT_INVALID",
-            "创建请求字段无效，请重新打开新建窗口后预览",
+            "创建请求字段无效，请重新打开新建窗口",
         ),
         "CREATE_PATH_UNSAFE" | "CREATE_TASK_PATH_UNSAFE" | "CREATE_FILE_INVALID" => error(
             "CREATE_TASK_PATH_UNSAFE",
@@ -241,7 +238,7 @@ fn remote_error(code: &str) -> Box<CommandError> {
             "CREATE_OPERATION_STATE_INVALID",
             "实例操作记录无效，请核对注册表",
         ),
-        "PLAN_STALE" => error("PLAN_STALE", "创建预览已失效，请重新预览"),
+        "PLAN_STALE" => error("PLAN_STALE", "创建计划已失效，请重试"),
         "ROOT_REQUIRED" => error("ROOT_REQUIRED", "远端创建任务要求 root Docker 环境"),
         "CREATE_TASK_STATE_INVALID" => error("CREATE_TASK_STATE_INVALID", "创建任务状态文件无效"),
         _ => error("CREATE_TASK_FAILED", "创建容器请求失败，请查看远端错误码"),
@@ -387,9 +384,28 @@ pub fn start(database: &Path, request: StartRequest) -> CommandResult<TaskRespon
         if host_id.as_deref() != Some(request.target.host_id.as_str()) {
             return Err(error("HOST_IDENTITY_MISMATCH", "创建目标主机身份不一致"));
         }
-        let input = serde_json::to_value(&request.input)
-            .map_err(|_| error("CREATE_TASK_PROTOCOL_INVALID", "创建容器请求无法编码"))?;
-        let task = execute(session, &json!({"action":"start","schemaVersion":1,"operationId":request.operation_id,"planId":request.plan_id,"hostId":request.target.host_id,"expectedRegistryRevision":request.expected_registry_revision,"input":input}))?
+        let check = crate::instance_creation::check(
+            session,
+            &request.target.host_id,
+            request.expected_registry_revision,
+            &request.input,
+        )?;
+        if !check.blockers.is_empty() {
+            return Err(crate::instance_creation::blocked(&check.blockers));
+        }
+        let input = serde_json::to_value(AdmissionInput {
+            display_name: &request.input.display_name,
+            autostart: request.input.autostart,
+            start_after_create: request.input.start_after_create,
+            port_policy: &request.input.port_policy,
+            caves_enabled: request.input.caves_enabled,
+            release_id: &request.input.release_id,
+            release_catalog_digest: &request.input.release_catalog_digest,
+            expected_ports: &check.ports,
+        })
+        .map_err(|_| error("CREATE_TASK_PROTOCOL_INVALID", "创建容器请求无法编码"))?;
+        let operation_id = &request.operation_id;
+        let task = execute(session, &json!({"action":"start","schemaVersion":1,"operationId":operation_id,"planId":operation_id,"hostId":&request.target.host_id,"expectedRegistryRevision":request.expected_registry_revision,"input":input}))?
             .ok_or_else(|| error("CREATE_TASK_PROTOCOL_INVALID", "创建任务响应为空"))?;
         Ok(TaskResponse {
             schema_version: 1,
@@ -449,6 +465,61 @@ mod tests {
         let failure = remote_error("RELEASE_CATALOG_CHANGED");
         assert_eq!(failure.code, "RELEASE_CATALOG_CHANGED");
         assert!(failure.message.contains("刷新 Release"));
+    }
+
+    #[test]
+    fn admission_input_carries_the_checked_port_plan() {
+        let release_id = "22222222-2222-4222-8222-222222222222";
+        let input = CreateInput {
+            display_name: "生存一服".into(),
+            autostart: true,
+            start_after_create: false,
+            port_policy: "auto".into(),
+            caves_enabled: false,
+            release_id: release_id.into(),
+            release_catalog_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let ports = vec![
+            PortPlan {
+                shard: "master".into(),
+                purpose: "game".into(),
+                protocol: "udp".into(),
+                bind_address: "0.0.0.0".into(),
+                host_port: 11000,
+                container_port: 11000,
+            },
+            PortPlan {
+                shard: "master".into(),
+                purpose: "steamAuth".into(),
+                protocol: "udp".into(),
+                bind_address: "0.0.0.0".into(),
+                host_port: 8766,
+                container_port: 8766,
+            },
+            PortPlan {
+                shard: "master".into(),
+                purpose: "steamMaster".into(),
+                protocol: "udp".into(),
+                bind_address: "0.0.0.0".into(),
+                host_port: 27016,
+                container_port: 27016,
+            },
+        ];
+        let value = serde_json::to_value(AdmissionInput {
+            display_name: &input.display_name,
+            autostart: input.autostart,
+            start_after_create: input.start_after_create,
+            port_policy: &input.port_policy,
+            caves_enabled: input.caves_enabled,
+            release_id: &input.release_id,
+            release_catalog_digest: &input.release_catalog_digest,
+            expected_ports: &ports,
+        })
+        .expect("admission input");
+        assert_eq!(value.as_object().expect("object").len(), 8);
+        assert_eq!(value["expectedPorts"][0]["hostPort"], 11000);
+        assert_eq!(value["expectedPorts"][2]["purpose"], "steamMaster");
+        assert_eq!(value["releaseId"], release_id);
     }
 
     #[test]

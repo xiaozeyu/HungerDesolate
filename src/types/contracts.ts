@@ -154,6 +154,7 @@ export interface TaskResult {
     expectedRevision?: number;
     preparedMods?: {workshopId: string; contentDigest: string; updateCandidate: boolean;
         previousArtifactDigest?: string | null}[];
+    modsWarnings?: string[];
 }
 
 export interface MutationResult<T> {

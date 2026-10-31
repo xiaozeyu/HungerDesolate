@@ -12,7 +12,7 @@ import { describeError } from "../lib/commandError";
 import { currentConnection, matchesConnection, type ConnectionTicket } from "../lib/connectionGuard";
 import type { ConnectionRequest, FingerprintChallenge, HostConnection, ServerSummary, SshConnectionState } from "../types/contracts";
 const props = defineProps<{server: ServerSummary; preview: boolean; disabled?: boolean}>();
-const emit = defineEmits<{busy: [value: boolean]}>();
+const emit = defineEmits<{busy: [value: boolean]; connected: []}>();
 const workspace = useWorkspace();
 const state = ref<SshConnectionState | null>(null), challenge = ref<FingerprintChallenge | null>(null);
 const verification = ref<HostConnection | null>(null);
@@ -37,7 +37,7 @@ watch([() => props.server.serverId, () => props.server.recordVersion, () => prop
   clearContext();
   if (!isTauri() || props.preview) return;
   const captured = ticket();
-  try { const result = await api.getSshState(request(captured)); if (current(captured) && matchesConnection(captured,result)) state.value = result; }
+  try { const result = await api.getSshState(request(captured)); if (current(captured) && matchesConnection(captured,result)) { state.value = result; } }
   catch (cause) { if (current(captured)) failure.value = describeError(cause).message; }
 }, {immediate:true});
 watch(credentialOpen, open => {if (!open) clearSecrets();});
@@ -71,7 +71,7 @@ async function saveCredential() {
 async function connect() {
   if (!canUseSsh.value) return;
   const captured = ticket();busy.value = true;failure.value = "";verification.value = null;
-  try { const result = await api.connectServer(request(captured)); if (current(captured) && matchesConnection(captured,result)) { verification.value = result; message.value = result.managementState === "ready" ? "登录通过 · 主机已初始化" : "登录通过 · 主机未初始化"; await workspace.refresh(); } }
+  try { const result = await api.connectServer(request(captured)); if (current(captured) && matchesConnection(captured,result)) { verification.value = result; message.value = result.managementState === "ready" ? "登录通过 · 主机已初始化" : "登录通过 · 主机未初始化"; await workspace.refresh(); emit("connected"); } }
   catch (cause) { if (current(captured)) {const error=describeError(cause); failure.value = [error.message,...error.recoverySteps].join("；");} }
   finally { if (current(captured)) busy.value = false; }
 }

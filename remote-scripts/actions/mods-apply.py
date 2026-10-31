@@ -173,12 +173,24 @@ def set_status(directory, status, stage, *, result=None, error=None, completed=N
     return state
 
 
-def error_payload(code, request, task_id, remote_changed=True):
+def error_payload(code, request, task_id, remote_changed=True, protection_backup=None):
+    if code == "MOD_APPLY_ROLLBACK_FAILED":
+        message = "MOD 应用失败且自动恢复未完成，请检查专服部署状态"
+        steps = ["检查任务阶段、保护备份与容器状态；必要时手动恢复"]
+    elif protection_backup is True:
+        message = "MOD 应用未能完成；已使用冷保护备份恢复原部署"
+        steps = ["检查任务阶段与保护备份，再刷新 MOD 部署状态"]
+    elif protection_backup is False:
+        message = "MOD 应用未能完成；未创建冷保护备份，请检查专服部署状态"
+        steps = ["检查任务阶段与专服部署状态；未创建保护备份时无法自动恢复"]
+    else:
+        message = "MOD 应用未能完成；请检查任务阶段与专服部署状态"
+        steps = ["检查任务阶段与专服部署状态；必要时使用已有备份恢复"]
     return {"schemaVersion": 1, "code": code, "category": "modApply", "operation": "modApply",
             "requestId": None, "target": {"hostId": request.get("hostId"), "instanceId": request.get("instanceId")},
-            "message": "MOD 应用未能完成；原部署与保护点已保留", "retryable": True,
+            "message": message, "retryable": True,
             "remoteChanged": remote_changed, "taskId": task_id,
-            "recoverySteps": ["检查任务阶段与保护备份，再刷新 MOD 部署状态"], "details": {}}
+            "recoverySteps": steps, "details": {}}
 
 
 def verify_identity(request):
@@ -197,12 +209,6 @@ def verify_identity(request):
             or manifest.get("configRevision") != request["expectedRevision"]):
         reject("REVISION_CONFLICT")
     return instance, manifest
-
-
-def restore_gate(host_id):
-    evidence = read_json(ROOT / "restore-acceptance.json", 65536, missing=None)
-    return isinstance(evidence, dict) and evidence.get("schemaVersion") == 1 \
-        and evidence.get("hostId") == host_id and evidence.get("runtimeVerified") is True
 
 
 def validate_desired(instance, request):
@@ -225,7 +231,7 @@ def validate_desired(instance, request):
         if item["enabled"]:
             if not artifact:
                 reject("MOD_ARTIFACT_REQUIRED")
-            prepared = ROOT / "instances" / request["instanceId"] / "mods" / "prepared" / workshop_id / artifact
+            prepared = ROOT / "mods" / "prepared" / workshop_id / artifact
             safe_dir(prepared)
             metadata = read_json(prepared / "manifest.json", 4 * 1024 * 1024)
             if metadata.get("workshopId") != workshop_id or metadata.get("contentDigest") != artifact:
@@ -329,7 +335,7 @@ def build_mod_release(instance, mods, mod_release_id, task_id, download_ns):
         workshop_root.mkdir(mode=0o700, parents=True)
         for item in mods:
             if not item["enabled"]: continue
-            source = instance / "mods" / "prepared" / item["workshopId"] / item["artifactDigest"] / "content"
+            source = ROOT / "mods" / "prepared" / item["workshopId"] / item["artifactDigest"] / "content"
             _, _, actual_digest = download_ns["content_files"](source)
             if actual_digest != item["artifactDigest"]:
                 reject("MOD_ARTIFACT_INVALID")
@@ -412,21 +418,14 @@ def restore_paths_from_backup(instance, archive_ns, restore_ns, backup_path, req
     stage = instance / "staging" / "mod-apply" / request["operationId"] / "rollback"
     safe_dir(stage.parent, create=True)
     archive_ns["extract_to_staging"](backup_path / "archive.tar.gz", stage, request["hostId"], request["instanceId"], metadata["checksum"])
-    preserved = {}
-    for name in ("cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt"):
-        source = instance / "config" / "Cluster_1" / name
-        if source.exists():
-            preserved[name] = source.read_bytes()
-    relative = ["config/Cluster_1", "desired/mods.json", "deployed-mods.json",
-                "active-release.json", "manifest.json", "compose.yaml"]
+    relative = ["desired/mods.json", "deployed-mods.json", "active-release.json", "manifest.json", "compose.yaml"]
+    relative.extend("config/Cluster_1/" + role.title() + "/modoverrides.lua" for role in roles)
     mods_release_id = metadata.get("modsReleaseId")
     if isinstance(mods_release_id, str) and UUID.fullmatch(mods_release_id):
         relative.append("mods/releases/" + mods_release_id)
     if isinstance(remove_mod_release_id, str) and UUID.fullmatch(remove_mod_release_id):
         relative.append("mods/releases/" + remove_mod_release_id)
-    relative.extend("data/" + role.title() for role in roles)
-    relative.extend(("desired/world.json", "deployed-world.json"))
-    optional_snapshots = {"desired/world.json", "deployed-world.json", "deployed-mods.json"}
+    optional_snapshots = {"deployed-mods.json"}
     for name in relative:
         source = stage / name
         destination = instance / name
@@ -441,11 +440,11 @@ def restore_paths_from_backup(instance, archive_ns, restore_ns, backup_path, req
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if source.is_dir(): shutil.copytree(source, destination, symlinks=False)
         else: shutil.copy2(source, destination)
-    config_root = instance / "config" / "Cluster_1"
-    for name, payload in preserved.items():
-        atomic_bytes(config_root / name, payload, 0o600)
-    for name in ("config/Cluster_1", "data/Master", "data/Caves"):
-        restore_ns["assign_runtime_ownership"](instance / name)
+    restore_ns["assign_runtime_ownership"](instance / "config" / "Cluster_1")
+    for role in roles:
+        config = instance / "config" / "Cluster_1" / role.title() / "modoverrides.lua"
+        if config.exists():
+            os.chmod(config, 0o600)
     if isinstance(mods_release_id, str) and UUID.fullmatch(mods_release_id):
         release_root = instance / "mods" / "releases" / mods_release_id
         if release_root.exists():
@@ -456,52 +455,6 @@ def restore_paths_from_backup(instance, archive_ns, restore_ns, backup_path, req
             os.chown(release_manifest, 0, 0)
             os.chmod(release_manifest, 0o600)
     return stage
-
-
-def verify_gate(request):
-    if not restore_gate(request["hostId"]): reject("MOD_RESTORE_ACCEPTANCE_REQUIRED")
-
-
-def has_cold_protection(instance, request):
-    parent = ROOT / "backups" / request["instanceId"]
-    try:
-        safe_dir(parent)
-    except FileNotFoundError:
-        return False
-    source = globals().get("ARCHIVE_SOURCE")
-    if not isinstance(source, str):
-        reject("MOD_APPLY_ARCHIVE_HELPER_MISSING")
-    archive_ns = {"__name__": "backup_archive"}
-    exec(compile(source, "<backup-archive-preview>", "exec"), archive_ns)
-    active = read_json(instance / "active-release.json", 65536)
-    for child in sorted(parent.iterdir(), reverse=True):
-        if not valid_uuid(child.name): continue
-        try:
-            safe_dir(child)
-            metadata = read_json(child / "metadata.json", 262144)
-            if (metadata.get("hostId") != request["hostId"]
-                    or metadata.get("instanceId") != request["instanceId"]
-                    or metadata.get("captureMode") != "cold"
-                    or metadata.get("verification") != "verified"
-                    or metadata.get("restorability") != "restorable"
-                    or not isinstance(metadata.get("checksum"), str)
-                    or re.fullmatch(r"[0-9a-f]{64}", metadata["checksum"]) is None):
-                continue
-            archive = child / "archive.tar.gz"
-            manifest = archive_ns["inspect_archive"](archive, request["hostId"],
-                request["instanceId"], metadata["checksum"])["manifest"]
-            if (manifest.get("captureMode") != "cold" or manifest.get("runtimeStatus") != "stopped"
-                    or manifest.get("runtimeVerified") is not True):
-                continue
-            mods_release = active.get("modsReleaseId")
-            if mods_release and not any(item.get("path") == "mods/releases/" + mods_release + "/manifest.json"
-                    for item in manifest.get("files", []) if isinstance(item, dict)):
-                continue
-            return True
-        except (OSError, Rejected, ValueError, TypeError, KeyError):
-            continue
-    return False
-
 
 def acquire_lock(path):
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -533,7 +486,6 @@ def worker(task_id):
         maintenance = acquire_lock(instance / "locks" / "world-config.lock")
         mods_lock = acquire_lock(instance / "locks" / "instance.lock")
         instance, manifest = verify_identity(request)
-        verify_gate(request)
         desired, mods, desired_digest = validate_desired(instance, request)
         if desired_digest != request["desiredDigest"]: reject("REVISION_CONFLICT")
         roles, runtime_before = container_roles(request["instanceId"], manifest)
@@ -584,11 +536,17 @@ def worker(task_id):
             stopped = True
             _, stopped_status = container_roles(request["instanceId"], manifest)
             if stopped_status != "stopped": reject("MOD_APPLY_STOP_FAILED")
-        CURRENT_STAGE = "backup"
-        backup_id = backup_current(instance, manifest, request, roles, archive_ns, protection_id)
-        transaction["protectionBackupId"] = backup_id
-        atomic_json(directory / "transaction.json", transaction)
-        set_status(directory, "running", "backup", completed="stop", result={"protectionBackupId": backup_id})
+        completed_stage = "stop" if runtime_before == "running" else "prepare"
+        if request["createProtectionBackup"]:
+            CURRENT_STAGE = "backup"
+            backup_id = backup_current(instance, manifest, request, roles, archive_ns, protection_id)
+            transaction["protectionBackupId"] = backup_id
+            atomic_json(directory / "transaction.json", transaction)
+            set_status(directory, "running", "backup", completed=completed_stage,
+                result={"protectionBackupId": backup_id})
+        else:
+            set_status(directory, "running", "publish", completed=completed_stage,
+                result={"protectionBackupId": None})
 
         CURRENT_STAGE = "publish"
         release_destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -667,11 +625,8 @@ def worker(task_id):
             except Exception:
                 rollback_ok = False
         if not rollback_ok: code = "MOD_APPLY_ROLLBACK_FAILED"
-        if published and rollback_ok:
-            # Keep the release if the protection backup references it; GC may remove it later.
-            pass
         return set_status(directory, "failed", "rollback" if backup_id else CURRENT_STAGE,
-            error=error_payload(code, request, task_id, bool(backup_id)))
+            error=error_payload(code, request, task_id, bool(backup_id) or published, bool(backup_id)))
     finally:
         shutil.rmtree(stage_root, ignore_errors=True)
         for fd in (mods_lock, maintenance, heavy):
@@ -689,7 +644,8 @@ def valid_request(request):
             reject("MOD_APPLY_INPUT_INVALID")
         if request["action"] == "start" and (not valid_uuid(request.get("operationId"))
                 or not isinstance(request.get("desiredDigest"), str)
-                or re.fullmatch(r"[0-9a-f]{64}", request["desiredDigest"]) is None):
+                or re.fullmatch(r"[0-9a-f]{64}", request["desiredDigest"]) is None
+                or type(request.get("createProtectionBackup")) is not bool):
             reject("MOD_APPLY_INPUT_INVALID")
     elif request["action"] == "status" and not valid_uuid(request.get("operationId")):
         reject("MOD_APPLY_INPUT_INVALID")
@@ -709,8 +665,6 @@ def preview(request):
     active = read_json(instance / "active-release.json", 65536)
     roles, runtime_status = container_roles(request["instanceId"], manifest)
     blockers = []
-    if not restore_gate(request["hostId"]): blockers.append("MOD_RESTORE_ACCEPTANCE_REQUIRED")
-    if not has_cold_protection(instance, request): blockers.append("MOD_PROTECTION_BACKUP_REQUIRED")
     previous = deployed.get("mods") if isinstance(deployed, dict) else []
     if not isinstance(previous, list): previous = []
     previous_map = {item.get("workshopId"): item for item in previous if isinstance(item, dict)}
@@ -841,7 +795,8 @@ def reconcile_interrupted(request, state):
         elif transaction.get("runtimeBefore") == "running":
             compose(instance, transaction["manifest"], "start", *roles)
         return set_status(directory, "interrupted", state["stage"],
-            error=error_payload("MOD_APPLY_INTERRUPTED_RECOVERED", request, task_id, bool(backup_id)),
+            error=error_payload("MOD_APPLY_INTERRUPTED_RECOVERED", request, task_id, bool(backup_id),
+                bool(backup_id)),
             completed=state.get("lastCompletedStage"),
             result={"recovered": True, "protectionBackupId": backup_id,
                 "runtimeStatus": transaction.get("runtimeBefore")})

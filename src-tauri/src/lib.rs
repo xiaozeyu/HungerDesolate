@@ -1,11 +1,14 @@
 mod backups;
+mod build_cache;
 mod commands;
 mod credential_source;
+mod diagnostics;
 mod docker_installation;
 mod dto;
 mod environment;
 mod environment_dto;
 mod host_initialization;
+mod host_mods;
 mod image_build;
 mod instance_cleanup;
 mod instance_creation;
@@ -69,6 +72,7 @@ pub fn run() -> tauri::Result<()> {
             commands::get_host_initialization,
             commands::list_instances,
             commands::get_instance_overview,
+            commands::get_instance_diagnostics,
             commands::list_instance_backups,
             commands::preview_instance_backup,
             commands::create_instance_backup,
@@ -83,7 +87,6 @@ pub fn run() -> tauri::Result<()> {
             commands::get_instance_restore_task,
             commands::list_instance_restore_tasks,
             commands::start_instance,
-            commands::preview_instance_create,
             commands::create_instance,
             commands::get_instance_create_status,
             commands::cleanup_orphan_instance,
@@ -93,15 +96,16 @@ pub fn run() -> tauri::Result<()> {
             commands::get_workshop_metadata,
             commands::list_instance_mods,
             commands::save_instance_mods,
-            commands::prepare_instance_mods,
-            commands::get_instance_mod_task,
-            commands::list_instance_mod_tasks,
             commands::preview_apply_instance_mods,
             commands::apply_instance_mods,
             commands::get_instance_mod_apply_task,
             commands::list_instance_mod_apply_tasks,
+            commands::list_host_mods,
+            commands::delete_host_mod,
+            commands::prepare_host_mods,
+            commands::get_host_mod_task,
+            commands::list_host_mod_tasks,
             commands::save_world_config,
-            commands::preview_world_apply,
             commands::apply_world_config,
             commands::list_instance_releases,
             commands::preview_instance_release,
@@ -111,6 +115,7 @@ pub fn run() -> tauri::Result<()> {
             commands::preview_instance_release_delete,
             commands::delete_instance_release,
             commands::build_dst_image,
+            commands::manage_build_cache,
             commands::get_build_status,
         ])
         .run(tauri::generate_context!())

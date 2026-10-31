@@ -244,7 +244,7 @@ planId 在远端记录，绑定目标、规范化输入、revision、环境证�
 
 短保存也走实例锁和 revision CAS。排队不提前承诺已保存配置；同实例只允许一个已接受的变更任务，后续写入返回 `INSTANCE_BUSY`。不同实例的重型任务进入主机队列。
 
-创建预览使用 HostTarget，可提供建议 instanceId/端口但不占用资源；执行在注册锁内分配不可变身份、真实预留与创建任务。返回 `TaskAccepted.target` 为最终 InstanceTarget；端口与预览不一致时返回 PLAN_STALE，重新预览，不能悄悄换号。
+创建检查与创建合并为 `create_instance`：后端在同一命令内先用受信任 SSH 执行只读检查（身份、注册表版本、release 与端口证据、管理目录），通过后再进入注册锁分配不可变身份、真实预留与持久创建任务。返回 `TaskAccepted.target` 为最终 InstanceTarget；检查与接纳之间注册表变化返回 REGISTRY_CHANGED/PLAN_STALE，前端刷新后重新提交，不能悄悄换号。前端没有独立 preview command 或预览窗口。
 
 ## 7. Command 目录
 
@@ -271,8 +271,7 @@ planId 在远端记录，绑定目标、规范化输入、revision、环境证�
 | preview_host_preparation / previewHostPreparation | P/connection（规划） | environmentCheckId | Docker/脚本/镜像安装预览，阶段 0 后实现 |
 | prepare_host / prepareHost | T/connection（规划） | planId、operationId | 完整环境准备任务，依赖 controller 与阶段 0；尚未注册 |
 | list_instances / listInstances | Q/connection（已实现） | ConnectionRequest | InstanceListResponse，具体边界见 §7.1.5 |
-| preview_instance_create / previewInstanceCreate | P/HostTarget（只读已实现） | CreateInput、expectedRecordVersion、expectedRegistryRevision | 创建建议预览；尚无执行计划，allowed=false，端口不预留 |
-| create_instance / createInstance | T/HostTarget（已注册） | 容器字段、预览端口、planId、operationId、expectedRegistryRevision；不接收 worldSettings 或 Token | TaskSnapshot；完成容器创建和 runtime 验证后结束，世界配置由后续 world command 处理 |
+| create_instance / createInstance | T/HostTarget（已实现） | CreateInput（容器字段、releaseId、releaseCatalogDigest）、expectedRecordVersion、expectedRegistryRevision、operationId；不接收 worldSettings 或 Token | 后端先执行只读检查，阻断项以 `CREATE_BLOCKED` 返回；通过后在注册锁内分配 instanceId/端口并接纳持久创建任务，完成容器创建和 runtime 验证后结束 |
 | resume_instance_create / resumeInstanceCreate | T/InstanceTarget | planId、expectedRevision、operationId | 原实例安全阶段继续；不分配第二个 ID |
 | cleanup_failed_instance / cleanupFailedInstance | T/InstanceTarget | planId、expectedRevision、operationId | 进入受控删除清理；有世界数据时适用备份要求 |
 | preview_instance_recovery / previewInstanceRecovery | P/InstanceTarget | action(resumeCreate/cleanupCreate)、expectedRevision | 检查原创建 journal，生成绑定同一实例的恢复预览 |
@@ -286,7 +285,7 @@ planId 在远端记录，绑定目标、规范化输入、revision、环境证�
 | preview_instance_delete / previewInstanceDelete | P/InstanceTarget | expectedRecordVersion、expectedRegistryRevision | 核对容器/网络归属与状态、待执行任务、世界数据和归档目标，返回绑定快照的 planId |
 | delete_instance / deleteInstance | T/InstanceTarget | planId、typedName、expectedRecordVersion、expectedRegistryRevision、operationId | 二次核对后移除已停止且身份匹配的容器/网络；有世界文件时阻断并要求保护备份；其余实例目录归档到 retired，再释放端口 |
 
-CreateInput：displayName、autostart、startAfterCreate、portPolicy(auto)、cavesEnabled。`cavesEnabled` 是容器拓扑字段，决定 Master/Caves 服务和完整端口计划；gameMode、maxPlayers、pvp、description 与 Token 属于容器环境完成后的世界配置，不进入创建容器预览 DTO。首期固定公网路线，创建请求不接收 networkMode。世界配置通过 `save_world_config`/`apply_world_config` 处理，人数范围以阶段 0 确认的 DST 支持范围固化。
+CreateInput：displayName、autostart、startAfterCreate（当前 UI 固定为 false，不提供会误导的创建后启动）、portPolicy(auto)、cavesEnabled。`cavesEnabled` 是容器拓扑字段，决定 Master/Caves 服务和完整端口计划；gameMode、maxPlayers、pvp、description 与 Token 属于容器环境完成后的世界配置，不进入创建容器预览 DTO。首期固定公网路线，创建请求不接收 networkMode。世界配置通过 `save_world_config`/`apply_world_config` 处理，人数范围以阶段 0 确认的 DST 支持范围固化。
 
 2026-10-21 启动修复：运行工作目录为 `/srv/dst/bin64`，存档/MOD 挂载目录根由 UID/GID 1000 持有；不递归改动已有存档文件。首次启动旧版受管 Compose 时，仅允许与确定性旧模板完全相符的工作目录修复，原文件保留为 `compose.before-runtime-fix.yaml`；自定义差异返回 `INSTANCE_START_COMPOSE_DRIFT`。容器退出或反复重启立即返回 `INSTANCE_START_CONTAINER_EXITED`，仅暴露分片、退出码、重启次数和 OOM 布尔值，不回传容器日志或 `.State.Error`。运行镜像新增 `ca-certificates`，旧镜像不会由启动操作隐式升级。
 
@@ -438,23 +437,23 @@ InstanceSummary 新增 manifestAvailable。maxPlayers 允许 null，未知不能
 
 前端缓存按 hostId 归属，并记录提供数据的 serverId/recordVersion；接收前验证请求/目标/版本/唯一 ID。比已确认 registryRevision 更旧的响应不提交。选择授权绑定当时连接版本，刷新失败/切换/离开详情会失效，过期列表不可继续进入；深链接不能跳过列表选择。真实领域尚未实现时展示空状态，不复用演示世界/MOD/备份数组。
 
-### 7.1.6 创建预览（2026-10-18）
+### 7.1.6 创建检查与创建任务（2026-10-31）
 
-请求 `{schemaVersion,requestId,target:{serverId,hostId},expectedRecordVersion,expectedRegistryRevision,input}`。input 仅有 displayName、autostart、startAfterCreate、portPolicy=auto 和 cavesEnabled；未知字段（包括 worldSettings、networkMode 和 token）与密码或路径拒绝接收。当前固定公网路线，预览阶段不收集或存储世界配置和秘密。
+`create_instance` 请求 `{schemaVersion,requestId,target:{serverId,hostId},expectedRecordVersion,expectedRegistryRevision,operationId,input}`。input 含 displayName、autostart、startAfterCreate、portPolicy=auto、cavesEnabled、releaseId 和 releaseCatalogDigest；未知字段（包括 worldSettings、networkMode 和 token）与密码或路径拒绝接收。当前固定公网路线，创建阶段不收集或存储世界配置和秘密。
 
-响应绑定 requestId/HostTarget/recordVersion/registryRevision，含 previewId、capturedAtUnixSeconds、expiresAtUnixSeconds（10 分钟）、规范化 input、proposedInstanceId、composeProject、storagePath、ports、blockers、availableBytes、dockerVersion/null、composeVersion/null、allowed=false、portReservation=unreserved。UUID/目录/项目仅为本次建议，不持久化，不是执行授权或端口预留；未来创建任务须重新预览并在远端锁内分配不可变身份及端口，不复用本增量 previewId 执行。
+后端在同一命令内先执行只读检查：核对完整 HostTarget、连接版本、注册表版本、release 身份与远端管理目录，读取现有 registry/manifest 预留、Linux socket 与 Docker HostConfig.PortBindings，计算 Master/Caves 完整同号端口计划。检查不写入任何远端状态，端口只是本次命令内的建议；通过后立即进入接纳事务，由注册锁重新计算端口并要求与检查计划完全一致，再分配不可变 instanceId 与任务。前端只收到创建任务，不接收建议 instanceId、目录、端口或 allowed 字段，也不存在可复用的 previewId/planId。
 
-只读远端脚本通过受信任 SSH stdin 执行，不修改远端文件或 Docker。文件拒绝符号链接、不安全权限、异常类型、超大文件与身份不符；前后重读 registry/host/manifest 排除读期间变化。实例上限 200，单 manifest 64 KiB、registry 1 MiB、manifest 汇总预算 4 MiB。固定读取本机 rootful Docker socket，查询仅投影版本和 HostConfig.PortBindings，避免读取/输出容器秘密配置；Docker 命令结果最多 1 MiB、容器数量上限 400。
+检查发现条件不满足时返回 `CREATE_BLOCKED`，`details.blockers` 仅包含固定阻断项 `PORT_RESERVATIONS_MISSING`、`EXISTING_PORT_PLAN_INCOMPLETE`、`PORT_EVIDENCE_UNAVAILABLE`、`DOCKER_UNAVAILABLE`、`DOCKER_PLATFORM_UNSUPPORTED`、`COMPOSE_UNAVAILABLE`、`MANAGEMENT_ROOT_UNWRITABLE`、`PORT_PLAN_EXHAUSTED`；前端按白名单映射文案。release 缺失、Compose config、runtime 和容器验证属于持久创建任务阶段，分别返回任务错误并保留现场。
 
-端口检查保守合并全部 IPv4/IPv6 UDP/TCP 本地占用、已有 registry 预留及活动实例 manifest 端口（停止实例仍保留），加上 Docker 配置中的发布端口；首期固定公网路线、IPv4 通配、同号 UDP，Master 和可选 Caves 各 game/steamAuth/steamMaster 三项。自动规划范围为 game 11000–19999、steamAuth 8766–9765、steamMaster 27016–28015。LAN 发现仍是阶段 0 的独立验证项，不进入当前创建请求；真实 DST 端口含义和联网仍须阶段 0 验证，不从预览推断可连接。任一必要端口证据缺失/格式错误均禁止乐观分配。
+只读脚本通过受信任 SSH stdin 执行，不修改远端文件或 Docker。文件拒绝符号链接、不安全权限、异常类型、超大文件与身份不符；前后重读 registry/host/manifest 排除读期间变化。实例上限 200，单 manifest 64 KiB、registry 1 MiB、manifest 汇总预算 4 MiB。固定读取本机 rootful Docker socket，查询仅投影 HostConfig.PortBindings，避免读取/输出容器秘密配置；Docker 命令结果最多 1 MiB、容器数量上限 400。
 
-预览不再固定添加游戏镜像阻断；它只报告注册表、端口、Docker/Compose 和管理目录条件。固定阻断项为 `PORT_RESERVATIONS_MISSING`、`EXISTING_PORT_PLAN_INCOMPLETE`、`PORT_EVIDENCE_UNAVAILABLE`、`DOCKER_UNAVAILABLE`、`DOCKER_PLATFORM_UNSUPPORTED`、`COMPOSE_UNAVAILABLE`、`MANAGEMENT_ROOT_UNWRITABLE`、`PORT_PLAN_EXHAUSTED`。release 缺失、Compose config、runtime 和容器验证属于 `create_instance` 持久任务阶段，分别返回任务错误并保留现场。
+端口检查保守合并全部 IPv4/IPv6 UDP/TCP 本地占用、已有 registry 预留及活动实例 manifest 端口（停止实例仍保留），加上 Docker 配置中的发布端口；首期固定公网路线、IPv4 通配、同号 UDP，Master 和可选 Caves 各 game/steamAuth/steamMaster 三项。自动规划范围为 game 11000–19999、steamAuth 8766–9765、steamMaster 27016–28015。LAN 发现仍是阶段 0 的独立验证项，不进入当前创建请求；真实 DST 端口含义和联网仍须阶段 0 验证。
 
-前端编辑参数、切换主机/连接版本、注册表变化和关窗使在途 success/error/finally 失效；响应必须匹配本次输入、完整目标与版本，并验证同号/用途唯一/范围，不信任远端返回的任意路径或文案。
+前端编辑参数、切换主机/连接版本、注册表变化和关窗使在途 success/error/finally 失效；响应必须匹配本次请求、完整目标与版本；创建任务 target 必须来自任务响应，不能由页面当前选中对象推断。
 
-### 7.1.7 创建任务完整契约（2026-10-19）
+### 7.1.7 创建任务完整契约（2026-10-31）
 
-创建请求拒绝时保留受限远端错误码，Release catalog 变化明确提示刷新并重新预览。已持久化任务保存自身的 worker/Docker 脚本快照；构建新镜像或更新桌面应用不会改写旧任务的脚本和失败记录。容器创建命令为 `docker compose ... create`，不传 `--no-start`。创建窗口收到失败任务后直接展示阶段、错误码、任务编号及受限 Docker/Compose 诊断。
+创建请求拒绝时保留受限远端错误码，Release catalog 变化明确提示刷新并重新提交。已持久化任务保存自身的 worker/Docker 脚本快照；构建新镜像或更新桌面应用不会改写旧任务的脚本和失败记录。容器创建命令为 `docker compose ... create`，不传 `--no-start`。创建窗口收到失败任务后直接展示阶段、错误码、任务编号及受限 Docker/Compose 诊断。
 
 #### 创建请求 DTO
 
@@ -465,37 +464,29 @@ interface CreateInstanceRequest {
   target: HostTarget; // { serverId, hostId }
   expectedRecordVersion: number;
   expectedRegistryRevision: number;
-  operationId: string;
+  operationId: string; // 同时作为远端接纳的 planId，用于同 operationId 幂等重放
   input: {
     displayName: string; // 1–64 字符
     autostart: boolean;
     startAfterCreate: boolean;
     portPolicy: "auto"; // 首期固定
     cavesEnabled: boolean;
+    releaseId: string; // 已验证的 DST release
+    releaseCatalogDigest: string; // sha256:…
   };
-  // 预览端口计划：仅用于本次提交绑定，不作为远端分配授权
-  proposedPorts: Array<{
-    shard: "master" | "caves";
-    purpose: "game" | "steamAuth" | "steamMaster";
-    protocol: "udp";
-    port: number;
-  }>;
-  planId: string | null; // 当前不使用 plan 机制，保留字段
+  // 端口计划由后端在检查阶段计算并直接交给接纳事务，前端不再提交
 }
 ```
 
-#### 创建任务接受响应
+#### 创建任务响应
 
 ```ts
-interface CreateInstanceAccepted {
+interface InstanceCreateTaskResponse {
   schemaVersion: 1;
-  taskId: string;
-  operationId: string;
-  target: InstanceTarget; // 完整 { serverId, hostId, instanceId }
-  status: "queued" | "running";
-  sequence: number; // 初始为 1
-  reused: boolean; // 同 operationId 重放时 true
-  createdAtUnixSeconds: number;
+  requestId: string;
+  serverId: string;
+  recordVersion: number;
+  task: TaskSnapshot | null; // 完整 target 来自 task.target
 }
 ```
 
@@ -554,7 +545,8 @@ interface InstanceCreationResult {
 | `CREATE_CONTAINER_VERIFICATION_FAILED` | 容器 labels/挂载/端口验证失败 | 查看日志、清理现场 |
 | `CREATE_DIRECTORY_CONFLICT` | 实例目录已存在 | 清理现场或恢复 |
 | `CREATE_MANIFEST_CONFLICT` | manifest 已存在且内容不符 | 清理现场 |
-| `CREATE_PORT_CONFLICT` | 端口在执行时被占用 | 重新预览、清理现场 |
+| `CREATE_BLOCKED` | 只读检查发现端口、Docker/Compose 或管理目录阻断 | 按 `details.blockers` 提示后刷新重试 |
+| `CREATE_PORT_CONFLICT` | 端口在执行时被占用 | 刷新后重新提交、清理现场 |
 
 无容器专服提供专用 `cleanup_orphan_instance` 确认命令：远端 registry lock 内重查任务、受管容器和网络后才允许移出活动列表并释放端口；空目录会移除，目录内有文件时整体移入 `retired/<instanceId>` 保留。它不执行备份，也不替代正常运行实例的 `preview_instance_delete/delete_instance`。
 
@@ -563,8 +555,8 @@ interface InstanceCreationResult {
 创建任务的 `journal` 只包含持久化阶段变更，不代表容器 stdout/stderr。Compose/Docker 校验诊断按错误详情单独返回并限长；不读取或保存完整游戏日志。
 
 Release 删除通过 `preview_instance_release_delete/delete_instance_release` 执行。删除重查 catalog digest、活动实例登记及 manifest/active-release、未结束或待核实任务、容器引用及共享镜像。retired 登记只保留历史，不阻断 Release 删除；归档文件不修改，确认时说明恢复可能需重新导入原镜像。活动实例、未结束任务引用阻断删除；独占镜像被任意容器（含停止容器）引用时阻断。共用 digest 仅删除当前 Release 登记并保留镜像，其他 Release 的容器引用不阻断该登记删除。预览列出具体引用 ID，用户须输入 DST build 确认；执行时在锁内重查，镜像只按固定 digest 删除。
-| `CREATE_REGISTRY_CHANGED` | 注册表在执行期间变化 | 重新预览 |
-| `CREATE_ADMISSION_FAILED` | 接纳阶段失败（注册锁内检查） | 查看错误详情、重新预览 |
+| `CREATE_REGISTRY_CHANGED` | 注册表在执行期间变化 | 刷新后重新提交 |
+| `CREATE_ADMISSION_FAILED` | 接纳阶段失败（注册锁内检查） | 查看错误详情、刷新后重新提交 |
 
 #### 查询创建任务状态
 
@@ -605,16 +597,19 @@ type GetInstanceCreationStatusResponse = {
 | command / wrapper | 类型 | 业务输入 | 返回与要求 |
 | --- | --- | --- | --- |
 | get_world_config / getWorldConfig | Q | InstanceTarget | WorldConfig |
-| save_world_config / saveWorldConfig | M | target、settings、tokenChange、serverPasswordChange、expectedRevision、operationId | MutationResult<WorldConfig>，只保存期望，不宣称已部署 |
-| preview_world_apply / previewWorldApply | P/InstanceTarget | expectedRecordVersion、expectedRevision | 差异、新世界生成项、现有存档文件数和保护备份要求；绑定读到的期望配置摘要 |
-| apply_world_config / applyWorldConfig | T | target、expectedRevision、desiredDigest、activeReleaseId、operationId | 发布已保存配置并按原运行状态重建分片；不读取前端隐式草稿；第一版仅对无现存世界文件开放，返回 `runtimeVerified=false`，隔离运行验证不作门槛 |
+| save_world_config / saveWorldConfig | M | target、settings、tokenChange、serverPasswordChange、expectedRevision、operationId | MutationResult<WorldConfig>，只保存期望，不宣称已部署。UI 的“保存并应用”在保存成功后按新 revision 调用 apply_world_config；失败保留已保存期望和待应用状态 |
+| apply_world_config / applyWorldConfig | T | target、expectedRevision、operationId | 同一命令内先执行只读应用检查（revision、期望摘要、运行分片、Token、部署/Release、渲染），阻断项以 `WORLD_APPLY_BLOCKED` + `details.blockers` 返回；通过后发布已保存配置并按原运行状态重建分片，返回 `runtimeVerified=false` 和 warnings。不读取前端隐式草稿，不接收前端传入的 desiredDigest/activeReleaseId |
 | get_workshop_metadata / getWorkshopMetadata | Q/global | workshopIds[] | 元数据；上限 100，不需要实例，不含启用状态 |
 | search_workshop / searchWorkshop | Q/global | query、cursor、limit | 元数据搜索，外部来源能力待验证，失败允许手工输入 ID |
 | list_instance_mods / listInstanceMods | Q | target | InstanceMods |
 | save_instance_mods / saveInstanceMods | M | target、desiredMods[]、expectedRevision、operationId；编辑配置时附带 schemaBindings[] | CAS 保存实例期望配置；编辑字段绑定固定 contentDigest 与 modinfoSha256，后端复读当前 schema 并校验值与变更字段 |
 | check_instance_mod_updates / checkInstanceModUpdates | Q | target | 只检查；有目标和请求顺序，失败保留最后检查时间 |
 | preview_apply_instance_mods / previewInstanceMods | P | target、expectedRevision | 实际差异、固定摘要、运行状态、分片与阻断原因 |
-| apply_instance_mods / applyInstanceMods | T | target、expectedRevision、desiredDigest、operationId | 接纳持久任务；复核后创建冷保护备份、发布 MOD Release/配置、重建并验证 |
+| apply_instance_mods / applyInstanceMods | T | target、expectedRevision、desiredDigest、operationId、createProtectionBackup | 接纳持久任务；按 `createProtectionBackup` 决定是否在发布前创建冷保护备份，从主机库发布 MOD Release/配置、重建并验证。实例 MOD 页面只从主机库选择版本，UI 的“应用更改”自动 preview 后 apply，页面开关决定是否为本次应用创建备份 |
+| list_host_mods / listHostMods | Q | HostTarget、expectedRecordVersion | 主机公共 MOD 内容列表、版本、大小、使用实例 |
+| delete_host_mod / deleteHostMod | M | HostTarget、workshopId、contentDigest | 删除未被实例 desired/deployed/活动 Release 引用的主机内容 |
+| prepare_host_mods / prepareHostMods | T | HostTarget、workshopIds、sourceHandles、operationId | 主机级 SteamCMD 准备任务；写入 `mods/prepared` |
+| get_host_mod_task / list_host_mod_tasks | Q | HostTarget、operationId 或列表 | 主机级 MOD 准备任务查询 |
 | get_instance_mod_apply_task / getInstanceModApplyTask | Q | target、operationId | 查询持久应用任务与中断恢复结果 |
 | list_instance_mod_apply_tasks / listInstanceModApplyTasks | Q | target | 列出该实例 MOD 应用任务 |
 | get_update_status / getUpdateStatus | Q | target | UpdateStatus，已缓存的检查结果 |
@@ -622,11 +617,11 @@ type GetInstanceCreationStatusResponse = {
 | preview_instance_update / previewInstanceUpdate | P | target、scope(dst/mods/both)、expectedRevision | 固定目标 build/Workshop 摘要与回滚能力 |
 | run_instance_update / runInstanceUpdate | T | target、planId、expectedRevision、operationId | 保护备份后更新预览指定的目标产物 |
 
-当前已实现的 `get_workshop_metadata` 在桌面端通过 HTTPS 查询 Steam Workshop，最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，返回期望/已部署启用、期望/已部署配置、期望/已部署产物摘要、准备摘要/时间和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁。配置编辑请求的 `schemaBindings[]` 结构为 `{ workshopId, artifactDigest, modinfoSha256, changedFields[] }`；Rust 在 revision 未变化时重新读取实例快照，复求当前 schema，校验绑定摘要、可编辑字段、枚举候选值与基础类型，并确认未声明字段保持原值。游戏侧以 `name` 持久化配置，同名项会作为共享字段编辑；同名定义的共同候选集/类型由前后端共同校验，无法安全合并的组只读而不阻断其他字段。revision 已变化时由远端操作回执优先支持同一 operationId 幂等重放，新的过期操作仍由 CAS 拒绝。编辑保存会固定当前已准备 contentDigest，成功仅推进实例期望状态与全局 revision，不代表内容已部署或正在运行。配置表单只提交实际修改的字段；复杂/不支持字段与未知旧值保留不变。应用预览通过单一远端权威 probe 绑定 target/revision，列出变更、分片和阻断原因；提交时携带 `desiredDigest` 并在远端重验。应用 worker 获取重型锁、世界配置锁和实例写锁，生成 Master/Caves 独立 UGC MOD Release，校验复制后各 Workshop 内容摘要与 setup 文件，冷停服后创建冷保护备份，再原子发布活动 Release、`modoverrides.lua`、部署快照和确定性 Compose；按原状态重建分片，并对原本运行的实例验证游戏进程。失败使用刚创建的保护备份恢复完整原 MOD/配置/Compose/世界组合；worker 中断时 status 查询等待 admission grace 后进行对账。`disable` 和 `remove` 先只保存 desired，必须再预览并应用才会生效。保护备份与普通备份均纳入 MOD desired/deployed 状态和活动 MOD Release；恢复时 rebasing 到新全局 revision。MOD Release 的实际 UGC 下载参数和 Linux amd64 运行兼容仍需实机验收。
+当前已实现的 `get_workshop_metadata` 在桌面端通过 HTTPS 查询 Steam Workshop，并返回 `author`/`creatorSteamId` 供主机 MOD 添加前确认，最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，返回期望/已部署启用、期望/已部署配置、期望/已部署产物摘要、准备摘要/时间和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁。配置编辑请求的 `schemaBindings[]` 结构为 `{ workshopId, artifactDigest, modinfoSha256, changedFields[] }`；Rust 在 revision 未变化时重新读取实例快照，复求当前 schema，校验绑定摘要、可编辑字段、枚举候选值与基础类型，并确认未声明字段保持原值。游戏侧以 `name` 持久化配置，同名项会作为共享字段编辑；同名定义的共同候选集/类型由前后端共同校验，无法安全合并的组只读而不阻断其他字段。revision 已变化时由远端操作回执优先支持同一 operationId 幂等重放，新的过期操作仍由 CAS 拒绝。编辑保存会固定当前已准备 contentDigest，成功仅推进实例期望状态与全局 revision，不代表内容已部署或正在运行。配置表单只提交实际修改的字段；复杂/不支持字段与未知旧值保留不变。应用预览通过单一远端权威 probe 绑定 target/revision，列出变更、分片和阻断原因，不要求实例已有冷备份或主机恢复验收；提交时携带 `desiredDigest` 和 `createProtectionBackup` 并在远端重验。应用 worker 获取重型锁、世界配置锁和实例写锁，生成 Master/Caves 独立 UGC MOD Release，校验复制后各 Workshop 内容摘要与 setup 文件，冷停服后按 `createProtectionBackup` 决定是否创建冷保护备份，再原子发布活动 Release、`modoverrides.lua`、部署快照和确定性 Compose；按原状态重建分片，并对原本运行的实例验证游戏进程。请求备份时，失败使用该备份恢复完整原 MOD/配置/Compose/世界组合；未请求备份时不做自动恢复，任务失败并明确提示检查部署状态。worker 中断时 status 查询等待 admission grace 后进行对账。`disable` 和 `remove` 先只保存 desired，必须再预览并应用才会生效。保护备份与普通备份均纳入 MOD desired/deployed 状态和活动 MOD Release；恢复时 rebasing 到新全局 revision。MOD Release 的实际 UGC 下载参数和 Linux amd64 运行兼容仍需实机验收。
 
-MOD 更新检查将 Workshop `contentHandle` 与已准备产物的来源 handle 比较；变化项可由 `prepare_instance_mods` 通过 `sourceHandles` 请求获取，并在 `mods/candidates` 保存候选 digest/来源标识，不改 desired 或部署状态。候选 `modinfo.version` 与 deployed digest 对应版本分别返回；采用候选时才 CAS 更新 desired artifactDigest。source handle 缺失时为 unknown；旧产物首次获取一次作为基线，内容摘要相同后可显示已是最新。
+主机级 MOD 更新检查将 Workshop `contentHandle` 与主机库 manifest 的 `sourceHandle` 比较；变化时通过 `prepare_host_mods` 获取新内容并写入 `mods/prepared`，不自动改变实例 desired。实例从 `list_host_mods` 选择版本，`save_instance_mods` 只保存 `artifactDigest`。`prepare_host_mods` 使用 HostTarget 和主机任务，不接收实例目标；成功结果只证明内容固定在主机库。
 
-`prepare_instance_mods` 接受完整目标、全局 `expectedRevision`、`operationId`、已启用 Workshop ID 和可选的 sourceHandles，返回持久任务。任务固定一个本地已验证、具备 `steamcmd-workshop-v1` 能力的工具镜像 digest，并单独核对/记录目标 DST Release；无符合条件的本地镜像时返回 `MOD_FETCH_CAPABILITY_UNAVAILABLE`。`get_instance_mod_task/list_instance_mod_tasks` 按完整 InstanceTarget 查询任务。成功结果包含 `expectedRevision` 与每项 `preparedMods[{workshopId,contentDigest,updateCandidate,previousArtifactDigest}]`，仅证明内容固定在实例 `mods/prepared`，不表示已部署或运行。普通首次准备由前端复读最新 desired；MOD 仍启用且期望摘要与任务开始时记录的摘要一致时，再通过全局 revision CAS 将固定摘要写入 desired。更新候选只保存在 candidates，必须用户显式采用后才更新 desired；若任务期间状态改变则不覆盖，并提示复核。
+`prepare_host_mods` 接受 HostTarget、`operationId`、Workshop ID 和可选的 sourceHandles，返回主机级持久任务；任务固定本地已验证、具备 `steamcmd-workshop-v1` 能力的工具镜像 digest，成功后把内容写入主机库。`get_host_mod_task/list_host_mod_tasks` 按 HostTarget 查询。实例不再有 `prepare_instance_mods` 命令；实例 desired 通过主机库版本选择写入 `artifactDigest`。
 
 ### 7.3 备份、日志、诊断、任务
 
@@ -634,12 +629,13 @@ MOD 更新检查将 Workshop `contentHandle` 与已准备产物的来源 handle 
 | --- | --- | --- | --- |
 | list_instance_backups / listInstanceBackups | Q | target、cursor、limit | BackupSummary 分页，包含 retired 实例历史 |
 | preview_instance_backup / previewInstanceBackup | P | target、captureMode(cold/quasiHot)、expectedRevision | 一致性语义、停服影响、空间估算；准热备份不满足破坏性操作保护点 |
-| create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；metadata 保留采集模式与运行状态 |
+| create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；metadata 保留采集模式、运行状态、`mods[]`（workshopId/enabled/artifactDigest）引用，不保存活动 MOD Release 内容；`BackupSummary.mods` 返回引用 |
 | download_instance_backup / downloadInstanceBackup | T | target、backupId、operationId、本地授权 destinationHandle | SFTP 下载及本地 checksum；不允许前端随意传远端路径 |
-| restore_instance_backup / restoreInstanceBackup | T | target、backupId、expectedRevision、operationId、createProtectionBackup | 用户确认恢复后，命令先同步检查归属、checksum、Release 产物、空间与运行状态；阻断时不创建任务，通过后才接纳恢复 worker；跨实例明确拒绝。`createProtectionBackup=false` 时不创建恢复前保护点，仍保留事务回滚现场 |
+| restore_instance_backup / restoreInstanceBackup | T | target、backupId、expectedRevision、operationId、createProtectionBackup | 用户确认恢复后检查归属、checksum、Release 产物、空间与运行状态；从主机库最新内容重建 MOD Release，缺失 MOD 返回 `modsWarnings` 但继续恢复；跨实例明确拒绝。`createProtectionBackup=false` 时不创建恢复前保护点 |
 | delete_instance_backup / deleteInstanceBackup | M | target、expectedRevision、backupId、expectedChecksum | checksum CAS、实例归属和维护锁校验后删除备份；恢复前保护点与普通备份一样可删除，不再保留“最新一份不可删”的限制 |
 | read_instance_logs / readInstanceLogs | Q | target、shardKind、cursor、limit | LogPage，游标绑定 stream/target |
 | get_instance_diagnostics / getInstanceDiagnostics | Q | target | 有限健康摘要、证据、失败任务 ID、恢复入口 |
+| manage_build_cache / manageBuildCache | Q/M | HostTarget、action(preview/cleanup) | 预览构建目录与 Docker Build Cache；清理构建上下文并执行受控 `docker builder prune`，不删除 Release 镜像 |
 | list_tasks / listTasks | Q | HostTarget 或 bootstrap ConnectionTaskTarget、instanceId 可选、cursor、limit | 固定目标 TaskSnapshot 分页，不依赖当前详情；合并本地下载/准备任务索引 |
 | get_task / getTask | Q | HostTarget 或 bootstrap ConnectionTaskTarget、taskId | 校验远端任务归属，返回 TaskSnapshot |
 | get_operation / getOperation | Q | HostTarget 或 bootstrap ConnectionTaskTarget、operationId | 返回 task/shortMutation/notFound 三种结果；恢复接受应答丢失，不重新执行 |
@@ -678,7 +674,7 @@ interface CommandError {
 | INSTANCE_NOT_FOUND / INSTANCE_RETIRED | 返回当前主机列表；保留可读取历史入口 |
 | REVISION_CONFLICT | 显示 currentRevision，保留草稿，重新读取和比较 |
 | INSTANCE_BUSY | 拒绝写入，展示已接受的实际目标任务；主机资源排队用 TaskAccepted.status=queued，不作为错误 |
-| OPERATION_ID_REUSED / PLAN_STALE | 前者禁止自动换 ID 重试；后者重新预览 |
+| OPERATION_ID_REUSED / PLAN_STALE | 前者禁止自动换 ID 重试；后者刷新后重新提交 |
 | PORT_CONFLICT / LAN_PORT_RANGE_EXHAUSTED | 展示用途/协议/端口，重新分配或调整发现方式 |
 | ENVIRONMENT_UNSUPPORTED / PERMISSION_DENIED / IMAGE_UNVERIFIED | 打开环境阻断与恢复说明 |
 | DISK_SPACE_INSUFFICIENT / BACKUP_VERIFY_FAILED | 阻断停服或破坏性阶段，保留现场 |

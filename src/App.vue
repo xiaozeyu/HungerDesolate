@@ -79,6 +79,10 @@ onUnmounted(() => { disposed = true; unlisten?.(); });
               <List :size="17"/>
               专服列表
             </button>
+            <button class="nav-item" :class="{active:route.path.endsWith('/mods')}" @click="hostRoute('mods')">
+              <Wrench :size="17"/>
+              MOD 库
+            </button>
             <button class="nav-item" :class="{active:route.path.endsWith('/releases')}" @click="hostRoute('releases')">
               <Package :size="17"/>
               Release 管理

@@ -32,6 +32,7 @@ export interface BackupSummary {
   sizeBytes: number; checksum: string | null; verification: "pending" | "verified" | "failed";
   restorability: "restorable" | "missingArtifacts" | "incompatible" | "unknown";
   dstBuild: string | null; dstReleaseId: string | null; modsReleaseId: string | null;
+  mods?: { workshopId: string; enabled: boolean; artifactDigest?: string | null }[];
   configRevision: number; containsSecrets: boolean;
 }
 export interface BackupListResponse {
@@ -81,37 +82,13 @@ export interface InstanceCreateInput {
   cavesEnabled: boolean;
 }
 export interface InstanceCreateDraft extends InstanceCreateInput {}
-export interface CreationPort {
-  shard: "master" | "caves";
-  purpose: "game" | "steamAuth" | "steamMaster";
-  protocol: "udp";
-  bindAddress: "0.0.0.0";
-  hostPort: number;
-  containerPort: number;
-}
-export interface InstanceCreatePreview {
-  schemaVersion: 1; requestId: string; target: {serverId:string;hostId:string};
-  recordVersion: number; registryRevision: number; previewId: string;
-  capturedAtUnixSeconds: number; expiresAtUnixSeconds: number;
-  input: InstanceCreateInput; proposedInstanceId: string; composeProject: string;
-  storagePath: string; ports: CreationPort[]; blockers: string[];
-  availableBytes: number; dockerVersion: string | null; composeVersion: string | null;
-  allowed: false; portReservation: "unreserved";
-}
-export interface InstanceCreatePreviewRequest {
-  schemaVersion: 1; requestId: string; target: {serverId:string;hostId:string};
-  expectedRecordVersion: number; expectedRegistryRevision: number; input: InstanceCreateInput;
-}
-export interface InstanceCreateTaskInput extends InstanceCreateInput { releaseId:string;releaseCatalogDigest:string;expectedPorts:CreationPort[]; }
+export interface InstanceCreateTaskInput extends InstanceCreateInput { releaseId:string;releaseCatalogDigest:string; }
 export interface InstanceCreateTaskRequest {
   schemaVersion: 1; requestId: string; target: {serverId:string;hostId:string}; expectedRecordVersion: number;
-  expectedRegistryRevision: number; planId: string; operationId: string; input: InstanceCreateTaskInput;
+  expectedRegistryRevision: number; operationId: string; input: InstanceCreateTaskInput;
 }
 export interface InstanceCreateTaskResponse {
   schemaVersion: 1; requestId: string; serverId: string; recordVersion: number; task: TaskSnapshot | null;
-}
-export function previewInstanceCreate(request: InstanceCreatePreviewRequest): Promise<InstanceCreatePreview> {
-  return call("preview_instance_create",request);
 }
 export function createInstance(request: InstanceCreateTaskRequest): Promise<InstanceCreateTaskResponse> { return call("create_instance",request); }
 export function getInstanceCreateStatus(request: {schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};expectedRecordVersion:number;operationId:string}): Promise<InstanceCreateTaskResponse> {

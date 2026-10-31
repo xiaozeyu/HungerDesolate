@@ -15,6 +15,7 @@ const workspace = useWorkspace();
 const editorOpen = ref(false);
 const saving = ref(false);
 const savedMessage = ref("");
+const savedServerId = ref("");
 const addButton = ref<HTMLButtonElement | null>(null);
 async function setEditorOpen(open: boolean) {
   editorOpen.value = open;
@@ -22,6 +23,7 @@ async function setEditorOpen(open: boolean) {
 }
 function saved(server: ServerSummary) {
   savedMessage.value = `已添加“${server.displayName}”`;
+  savedServerId.value = server.serverId;
   void setEditorOpen(false);
 }
 </script>
@@ -33,7 +35,7 @@ function saved(server: ServerSummary) {
       </template>
     </PageHeader>
     <CredentialCleanupNotice/>
-    <p v-if="savedMessage" role="status" class="success-message">{{savedMessage}}</p>
+    <p v-if="savedMessage" role="status" class="success-message">{{savedMessage}}<button v-if="savedServerId" class="text-button" @click="router.push(`/hosts/${savedServerId}/connection`)">配置连接</button></p>
     <div v-if="workspace.error.value" class="error-strip" role="alert">{{workspace.error.value}}</div>
     <div v-if="workspace.loading.value && !workspace.servers.value.length" class="empty-state" role="status"><p>读取连接记录…</p></div>
     <div v-else-if="!workspace.servers.value.length" class="empty-state"><Server :size="28"/><h2>还没有主机</h2><button class="button" @click="setEditorOpen(true)">添加第一台主机</button></div>

@@ -279,7 +279,7 @@ SSH 断开不停止 controller/worker。客户端标 observation=stale，重连�
 
 ### 9.1 新建专服
 
-预览环境与端口 → 注册/预留 → 建目录/拓扑 manifest → 准备镜像与 DST 发布 → 渲染配置/Compose → 创建但不启动容器 → 验证容器环境。创建阶段不写世界配置、Token 或运行时世界参数；容器环境验证完成后，才进入世界配置保存/应用流程。
+`create_instance` 在同一命令内先做只读检查（HostTarget/连接版本/注册表版本、受控文件、release 与端口证据、Docker/Compose 与管理目录），随后在注册锁内注册/预留 → 建目录/拓扑 manifest → 准备镜像与 DST 发布 → 渲染配置/Compose → 创建但不启动容器 → 验证容器环境。检查阶段的建议端口只在本次命令内传给接纳事务，由接纳事务重新计算并要求完全一致；检查发现阻断项时返回 `CREATE_BLOCKED`，不进入接纳。创建阶段不写世界配置、Token 或运行时世界参数；容器环境验证完成后，才进入世界配置保存/应用流程。
 
 创建前初始化只包含实例身份、拓扑、端口和 autostart 等容器字段；世界配置和 Token 不写入初始 manifest。`startAfterCreate=false` 时完成镜像、容器身份、挂载和停止状态校验，不假设网络已验证；世界配置在容器环境验证完成后由独立配置流程提交。
 
@@ -289,7 +289,7 @@ SSH 断开不停止 controller/worker。客户端标 observation=stale，重连�
 
 save 只更新 desired 与 manifest configRevision；不立即改活动 config/data。tokenChange 与 serverPasswordChange 由独立字段写入 `desired-secrets/<credentialRef>.<kind>` 的 root-only 文件，普通 desired JSON、事务回执只保存随机引用。写操作在实例锁内使用 `expectedRevision` CAS，原子 journal 协调 desired/manifest/operation receipt，秘密值在 Rust 请求边界使用 Zeroizing；失败和重放不得泄露或覆盖已有凭据。
 
-apply 以已保存 revision 生成预览，实例锁内重查 → staging 渲染/解析校验 → 如需停服先优雅停止 → 创建一致保护备份 → 发布配置与完整 active-release 组合 → 按原运行状态或明确用户选择启动 → 实际重读 digest/状态。
+apply 在同一个 Rust 命令内先用只读检查绑定已保存 revision、期望摘要、活动 Release、运行分片、Token、部署与渲染条件；阻断项以 `WORLD_APPLY_BLOCKED` 返回，不进入写入。检查通过后实例锁内重查 → staging 渲染/解析校验 → 如需停服先优雅停止 → 创建一致保护备份 → 发布配置与完整 active-release 组合 → 按原运行状态或明确用户选择启动 → 实际重读 digest/状态。desiredDigest 与 activeReleaseId 由检查阶段固定并直接传给接纳执行，前端不再提交。
 
 禁用洞穴不能直接删除 Caves 世界数据；停止洞穴、更新拓扑并保留存档，重新开启默认复用原存档。重置世界为未来单独危险动作，不能藏在洞穴开关/普通配置保存中。端口变更须在 registry → maintenance 短阶段重新预留整套，发布验证后释放旧预留，失败恢复旧端口。
 
@@ -299,15 +299,17 @@ Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、ena
 
 配置表单按 schema 的候选项、布尔、数字和字符串类型渲染；复杂值与不支持字段只读。游戏界面按数组位置展示配置项，但持久化以 `name` 为键；同名项在应用中合并成一个共享值控件，候选值取所有同名定义的交集。类型冲突、无共同候选项或当前值不明的同名组只读，不阻塞同一 MOD 的其他字段。保存只合并用户实际修改的字段，保留未知字段及旧值，并可显式恢复 MOD 默认值。编辑请求绑定 workshopId、已准备 contentDigest、modinfoSha256 和 changedFields；Rust 在保存前按完整 target 与 expectedRevision 重新读取快照并复求 schema，校验内容/schema 摘要、所有同名定义的类型/候选值及未声明字段未变化。revision 已变化时跳过预校验，由远端 save controller 先处理 operationId 回执重放，再执行 CAS，保持丢失响应后的幂等行为。编辑成功固定当前内容摘要并更新 desired，不改 active-release/UGC，不宣称已部署。
 
-MOD 内容准备复核目标实例的活动 DST Release，同时从本地主机已验证 Release 中选择固定 digest 且带有 `steamcmd-workshop-v1` 能力标记的镜像作为 SteamCMD 工具容器；活动镜像优先，缺能力时才使用另一条已验证本地 Release。两种 Release 身份分别记录。worker 通过 systemd controller 持久运行；下载容器不挂 Docker socket，仅挂当前 task staging，以非 root 用户、只读根文件系统和资源限制运行 SteamCMD。SteamCMD 非零退出、超时、Workshop 内容缺失和容器执行失败使用不同稳定错误码；Docker 启动错误仅按 daemon、network、mount、image、permission、runtime 白名单分类，并只返回数值退出码，不回传原始诊断文本。SteamCMD Workshop 缓存按独立 HOME 与可执行文件目录共同检索，覆盖 `Steam/steamapps`、`.steam/steamcmd`、`.steam/steam` 和 `.local/share/Steam` 常见布局；只接受请求 Workshop ID 下找到的普通 `modinfo.lua`，复制其所在内容目录进入任务输出，再进行完整文件清单验证。完成后校验文件类型、路径、数量、总大小、modinfo 与逐文件摘要，再将内容所有权归给远端 root 管理面并发布到只读 `mods/prepared/<workshopId>/<contentDigest>`（目录 `0555`、文件 `0444`、manifest `0600`）。探针逐级拒绝链接、非受管 owner 和可写目录，并以 `O_NOFOLLOW` 打开配置文件；desired 固定摘要缺失时不回退读取其他版本。准备任务开始时在实例锁下记录目标 MOD 原有摘要。普通初次准备完成后，前端复核 MOD 仍启用、desired 摘要未变化，再以最新全局 revision CAS 保存新摘要；更新候选只写入 candidates，用户明确采用时才更改 desired。准备不修改活动 UGC/active-release，不启停分片；失败现场保留，重连可从持久任务核对。匿名 SteamCMD 下载、Linux amd64 网络路径和实际 Workshop 样本尚待实机验收。
+主机级 MOD 内容准备使用 HostTarget 和 `host-mod-tasks`。worker 从本地主机已验证 Release 中选择固定 digest 且带有 `steamcmd-workshop-v1` 能力标记的镜像作为 SteamCMD 工具容器；下载容器不挂 Docker socket，仅挂主机 task staging，以非 root 用户、只读根文件系统和资源限制运行 SteamCMD。完成后校验文件类型、路径、数量、总大小、modinfo 与逐文件摘要，将内容发布到只读 `mods/prepared/<workshopId>/<contentDigest>`（目录 `0555`、文件 `0444`、manifest `0600`），供所有实例选择。实例 desired 只记录 `workshopId/enabled/configurationOptions/artifactDigest`，不再写实例 `mods/prepared`。应用时从主机库复制内容到实例 MOD Release，并校验摘要。匿名 SteamCMD 下载、Linux amd64 网络路径和实际 Workshop 样本尚待实机验收。
 
-应用流程：解析/去重/校验 → staging 顺序下载每分片需要的内容 → 记录可识别实际版本/摘要 → 验证一致性与权限 → 停目标分片 → 保护备份 → 切换完整部署 → 启动/重读配置与运行证据。
+应用流程：解析/去重/校验 → staging 顺序下载每分片需要的内容 → 记录可识别实际版本/摘要 → 验证一致性与权限 → 停目标分片 → 按请求可选创建冷保护备份（不请求时跳过） → 切换完整部署 → 启动/重读配置与运行证据。未创建备份时失败不做自动恢复，任务错误明确提示检查部署状态；MOD 应用不以主机恢复验收或已有备份作为放行门槛。
 
 下载成功、配置已部署、运行验证通过分别记录阶段。任何 MOD 自动下载或写 UGC 行为必须在阶段 0 核对；不得因启动时会下载就省略版本和失败证据。手动“检查更新”是只读查询，不占维护栏；真正下载/部署进入任务。
 
-当前代码已实现完整 desired → preview → 持久 apply task 路径：远端复核 revision/digest、主机恢复验收证据与可恢复冷保护点；按每实例独立 modsReleaseId 生成 Master/Caves UGC 内容和 setup 文件，逐分片复核内容 digest；停止后归档世界、MOD desired/deployed、活动 MOD Release、Compose 与配置，发布后重建容器。原来运行的实例需通过进程验证，原来停止的实例保持停止。失败或任务中断使用同一保护点恢复原部署组合。禁用和移除只改 desired，仍须走预览/应用才能部署。普通备份与恢复现已包含 MOD 状态和活动 MOD Release。
+主机级 MOD 内容库：`/var/lib/famine-hub/mods/prepared/<workshopId>/<contentDigest>` 保存公共 Workshop 内容；`host-mod-tasks` 保存主机级准备任务。实例应用只从主机库复制内容。主机库删除检查实例 desired/deployed 和活动 MOD Release 引用。备份不保存活动 MOD Release 内容，恢复从主机库最新内容重建 MOD Release；缺失 MOD 返回 warning 但继续恢复。
 
-恢复验收门禁仍要求主机存在由真实恢复任务写入的 `restore-acceptance.json`；隔离单测不能制造该证据。目标 DST 镜像接受 `-ugc_directory`、setup 文件挂载、UGC 数据可写性及进程实际加载正确 MOD 集合尚需 Linux amd64 主机验收；当前运行验证仅确认容器/DST 进程，不声称已从游戏内部证明有效 MOD 集合。
+当前代码已实现完整 desired → preview → 持久 apply task 路径：远端复核 revision/digest；按每实例独立 modsReleaseId 生成 Master/Caves UGC 内容和 setup 文件，逐分片复核内容 digest；停止后归档世界、MOD desired/deployed、活动 MOD Release、Compose 与配置，发布后重建容器。原来运行的实例需通过进程验证，原来停止的实例保持停止。请求冷保护备份时，失败或任务中断使用该保护点恢复原部署组合；未请求时不自动恢复。禁用和移除只改 desired，仍须走预览/应用才能部署。普通备份与恢复现已包含 MOD 状态和活动 MOD Release。
+
+MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有冷备份；即使实例已有世界数据，用户仍可直接应用。未请求备份时失败无法自动回滚，任务错误会明确提示检查部署状态。目标 DST 镜像接受 `-ugc_directory`、setup 文件挂载、UGC 数据可写性及进程实际加载正确 MOD 集合尚需 Linux amd64 主机验收；当前运行验证仅确认容器/DST 进程，不声称已从游戏内部证明有效 MOD 集合。
 
 ## 10. 备份与恢复
 
@@ -370,6 +372,8 @@ check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按�
 | 定时备份 | 远端受控 scheduler 容器，不挂 socket；定时产生请求，主机 controller 接纳并走同实例锁/备份流程；非桌面计时器 | get/save_backup_policy；错过执行、排队、DST 停服、重启后重复触发都有持久 operationId；桌面关闭仍执行 |
 | 保留策略 | count/age/space 规则；活动任务引用和唯一恢复点不删除；保护备份可由用户删除，先预览再清理 | policy revision CAS；任何删除失败记录事件，不能清除索引假装成功 |
 | 健康历史 | 有界实例采样，只记录证据、时间和 schema；摘要不推断未采集状态 | get_health_history 分页，主机/实例隔离 |
+| 专服诊断 | `get_instance_diagnostics` 读取有界运行摘要、分片容器状态、脱敏最近日志和失败/中断任务证据；不读取秘密文件，当前不做历史曲线与日志游标 |
+| 构建缓存 | `manage_build_cache` 预览构建目录和 Docker Build Cache，确认后删除 `image-build/dst-runtime-build` 并执行 `docker builder prune -f`；构建锁活动时拒绝，不删除 Release 镜像 |
 | 诊断包 | 有限日志、任务摘要、非敏感 manifest、能力/版本；排除 Token/密钥/存档个人信息和秘密文件 | export_diagnostics；持久化前脱敏，用户预览范围，测试敏感样本不出现 |
 | 旧部署发现 | 只读扫描旧目录/service/端口/版本，返回 sourceId 与摘要，不接管旧默认目录 | discover_legacy_deployment |
 | 迁移 | 预览 → 保护备份 → 停旧服务 → 复制到新独立实例 → 验证 → 启动新 Compose；失败停新并恢复旧 | preview/run_legacy_migration；旧路径/keyring 不自动授权导入，不删除旧数据 |

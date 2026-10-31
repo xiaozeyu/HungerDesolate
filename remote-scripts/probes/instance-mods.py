@@ -133,33 +133,36 @@ def candidate_paths(instance_id, workshop_id, release_id, artifact_digest=None):
     root = ROOT / "instances" / instance_id
     names = [f"workshop-{workshop_id}", workshop_id]
     bases = []
-    prepared_root = root / "mods" / "prepared" / workshop_id
+    prepared_roots = [ROOT / "mods" / "prepared" / workshop_id]
+    for parent in (ROOT / "mods", ROOT / "mods" / "prepared"):
+        if parent.exists() or parent.is_symlink():
+            safe_directory(parent)
     if artifact_digest is not None:
         if not isinstance(artifact_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", artifact_digest):
             reject("MOD_STATE_INVALID")
-        if not safe_directory(root) or not safe_directory(root / "mods") or not safe_directory(root / "mods" / "prepared") or not safe_directory(prepared_root):
+        directory = None
+        for prepared_root in prepared_roots:
+            candidate = prepared_root / artifact_digest
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022):
+                reject("MOD_ARTIFACT_INVALID")
+            directory = candidate
+            break
+        if directory is None:
             return
-        directory = prepared_root / artifact_digest
-        try:
-            info = directory.lstat()
-        except FileNotFoundError:
-            return
-        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022):
-            reject("MOD_ARTIFACT_INVALID")
         metadata = read_json(directory / "manifest.json", None)
         if (isinstance(metadata, dict) and metadata.get("workshopId") == workshop_id
                 and metadata.get("contentDigest") == artifact_digest):
             yield directory / "content" / "modinfo.lua"
         return
-    try:
-        if safe_directory(root) and safe_directory(root / "mods") and safe_directory(root / "mods" / "prepared"):
-            prepared_info = prepared_root.lstat()
-        else:
-            prepared_info = None
-        if (prepared_info is not None and stat.S_ISDIR(prepared_info.st_mode)
-                and not stat.S_ISLNK(prepared_info.st_mode)
-                and prepared_info.st_uid in (0, os.geteuid()) and not prepared_info.st_mode & 0o022):
+    for prepared_root in prepared_roots:
+        try:
+            if not safe_directory(prepared_root):
+                continue
             candidates = []
             for item in prepared_root.iterdir():
                 if not re.fullmatch(r"[0-9a-f]{64}", item.name):
@@ -176,8 +179,8 @@ def candidate_paths(instance_id, workshop_id, release_id, artifact_digest=None):
                 if (isinstance(metadata, dict) and metadata.get("workshopId") == workshop_id
                         and metadata.get("contentDigest") == content_digest):
                     yield directory / "content" / "modinfo.lua"
-    except FileNotFoundError:
-        pass
+        except FileNotFoundError:
+            continue
     if isinstance(release_id, str) and release_id:
         bases.extend([root / "mods" / "releases" / release_id / "Master", root / "mods" / "releases" / release_id])
     bases.extend([root / "mods" / "releases" / "Master", root / "mods" / "releases"])
@@ -189,7 +192,8 @@ def candidate_paths(instance_id, workshop_id, release_id, artifact_digest=None):
 
 def read_modinfo(instance_id, workshop_id, release_id, artifact_digest=None):
     for path in candidate_paths(instance_id, workshop_id, release_id, artifact_digest):
-        artifact_root = ROOT / "instances" / instance_id / "mods"
+        host_root = ROOT / "mods"
+        artifact_root = host_root if host_root in path.parents else ROOT / "instances" / instance_id / "mods"
         release_root = artifact_root / "releases"
         runtime_owned = release_root in path.parents
         if not safe_artifact_path(artifact_root, path.parent, runtime=runtime_owned):
@@ -241,18 +245,28 @@ def read_modinfo(instance_id, workshop_id, release_id, artifact_digest=None):
 def read_prepared_artifact(instance_id, workshop_id, content_digest):
     if not isinstance(content_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", content_digest):
         return None
-    root = ROOT / "instances" / instance_id / "mods" / "prepared" / workshop_id
-    if not all(safe_directory(path) for path in (root.parents[2], root.parents[1], root.parents[0], root)):
-        return None
-    directory = root / content_digest
-    if not safe_directory(directory):
+    roots = [(ROOT / "mods" / "prepared" / workshop_id, ROOT / "mods")]
+    for parent in (ROOT / "mods", ROOT / "mods" / "prepared"):
+        if parent.exists() or parent.is_symlink():
+            safe_directory(parent)
+    directory = None
+    for root, safe_root in roots:
+        candidate = root / content_digest
+        try:
+            if not safe_directory(root) or not safe_directory(candidate):
+                continue
+        except FileNotFoundError:
+            continue
+        directory = candidate
+        break
+    if directory is None:
         return None
     metadata = read_json(directory / "manifest.json", None)
     if (not isinstance(metadata, dict) or metadata.get("workshopId") != workshop_id
             or metadata.get("contentDigest") != content_digest):
         reject("MOD_ARTIFACT_INVALID")
     path = directory / "content" / "modinfo.lua"
-    if not safe_artifact_path(ROOT / "instances" / instance_id / "mods", path.parent):
+    if not safe_artifact_path(safe_root, path.parent):
         reject("MOD_ARTIFACT_INVALID")
     try:
         info = path.lstat()

@@ -22,6 +22,8 @@ const TASK_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-task
 const ARCHIVE_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-archive.py");
 const RESTORE_SCRIPT: &str = include_str!("../../remote-scripts/actions/restore-task.py");
 const RELEASE_SCRIPT: &str = include_str!("../../remote-scripts/actions/instance-release.py");
+const MODS_APPLY_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-apply.py");
+const MODS_DOWNLOAD_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-download.py");
 const MAX_OUTPUT: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +129,15 @@ pub struct RestoreTaskStatusRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackupModRef {
+    pub workshop_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub artifact_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupSummary {
     pub schema_version: u32,
     pub backup_id: String,
@@ -144,6 +155,8 @@ pub struct BackupSummary {
     pub dst_build: Option<String>,
     pub dst_release_id: Option<String>,
     pub mods_release_id: Option<String>,
+    #[serde(default)]
+    pub mods: Vec<BackupModRef>,
     pub config_revision: u64,
     pub contains_secrets: bool,
 }
@@ -329,8 +342,10 @@ fn invoke_task(session: &Session, payload: &Value) -> CommandResult<Value> {
     let archive_source = STANDARD.encode(ARCHIVE_SCRIPT.as_bytes());
     let restore_source = STANDARD.encode(RESTORE_SCRIPT.as_bytes());
     let release_source = STANDARD.encode(RELEASE_SCRIPT.as_bytes());
+    let mods_apply_source = STANDARD.encode(MODS_APPLY_SCRIPT.as_bytes());
+    let mods_download_source = STANDARD.encode(MODS_DOWNLOAD_SCRIPT.as_bytes());
     let source = format!(
-        "import base64,json\nARCHIVE_SOURCE=base64.b64decode('{archive_source}').decode('utf-8')\nWORKER_SOURCE=base64.b64decode('{task_source}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{restore_source}').decode('utf-8')\nRELEASE_SOURCE=base64.b64decode('{release_source}').decode('utf-8')\nrequest=json.loads(base64.b64decode('{request}').decode('utf-8'))\nif request.get('action','').startswith('restore'):\n    namespace={{'__name__':'restore_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'RESTORE_SOURCE':RESTORE_SOURCE,'RELEASE_SOURCE':RELEASE_SOURCE}}\n    exec(compile(RESTORE_SOURCE,'<restore-task>','exec'),namespace)\n    namespace['main'](request)\nelse:\n    namespace={{'__name__':'backup_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'WORKER_SOURCE':WORKER_SOURCE}}\n    exec(compile(WORKER_SOURCE,'<backup-task>','exec'),namespace)\n    namespace['main'](request)\n"
+        "import base64,json\nARCHIVE_SOURCE=base64.b64decode('{archive_source}').decode('utf-8')\nWORKER_SOURCE=base64.b64decode('{task_source}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{restore_source}').decode('utf-8')\nRELEASE_SOURCE=base64.b64decode('{release_source}').decode('utf-8')\nMODS_APPLY_SOURCE=base64.b64decode('{mods_apply_source}').decode('utf-8')\nMODS_DOWNLOAD_SOURCE=base64.b64decode('{mods_download_source}').decode('utf-8')\nrequest=json.loads(base64.b64decode('{request}').decode('utf-8'))\nif request.get('action','').startswith('restore'):\n    namespace={{'__name__':'restore_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'RESTORE_SOURCE':RESTORE_SOURCE,'RELEASE_SOURCE':RELEASE_SOURCE,'MODS_APPLY_SOURCE':MODS_APPLY_SOURCE,'MODS_DOWNLOAD_SOURCE':MODS_DOWNLOAD_SOURCE}}\n    exec(compile(RESTORE_SOURCE,'<restore-task>','exec'),namespace)\n    namespace['main'](request)\nelse:\n    namespace={{'__name__':'backup_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'WORKER_SOURCE':WORKER_SOURCE}}\n    exec(compile(WORKER_SOURCE,'<backup-task>','exec'),namespace)\n    namespace['main'](request)\n"
     );
     run_remote(session, &source)
 }

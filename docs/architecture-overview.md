@@ -138,23 +138,24 @@ Release = 一个经过验证的 DST 版本组合
 
 ### 创建实例
 ```
-用户输入
+用户填写名称 + 选择 Release
   ↓
-预览 (preview_instance_create)
-  ├─ 检查端口冲突
-  ├─ 验证 release 可用
-  └─ 生成预览数据
-  ↓
-确认创建 (create_instance)
+创建专服 (create_instance)
+  ├─ 检查 (同一命令内，只读)
+  │   ├─ HostTarget / 连接版本 / 注册表版本
+  │   ├─ 端口占用与 release 证据
+  │   ├─ Docker / Compose / 管理目录
+  │   └─ 阻断项 → CREATE_BLOCKED，不进入接纳
+  ↓ 检查通过
   ├─ 注册表锁
-  ├─ 预留端口
+  ├─ 预留端口（与检查计划一致）
   ├─ 生成 instanceId
   ├─ 创建目录结构
   ├─ 写入 manifest
   ├─ 渲染 Compose
   └─ 创建容器（不启动）
   ↓
-验证结果
+任务轮询与验证结果
   ├─ 容器标签正确
   ├─ 挂载点正确
   └─ 网络配置正确

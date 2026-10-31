@@ -57,28 +57,6 @@ class InstanceBackupsTests(unittest.TestCase):
         self.root_patch.stop()
         self.temp.cleanup()
 
-    def test_legacy_backup_without_active_release_only_restores_when_no_mod_release_is_active(self):
-        archive = self.root / "legacy.tar.gz"
-        with tarfile.open(archive, "w:gz"):
-            pass
-        manifest = {"files": []}
-
-        self.assertIsNone(MODULE.mod_release_snapshot_blocker(archive, manifest, {"modsReleaseId": None}))
-        self.assertEqual(MODULE.mod_release_snapshot_blocker(
-            archive, manifest, {"modsReleaseId": "55555555-5555-4555-8555-555555555555"}),
-            "MOD_RELEASE_UNAVAILABLE")
-
-    def test_archived_active_mod_release_requires_its_release_manifest(self):
-        archive = self.root / "active.tar.gz"
-        snapshot = json.dumps({"schemaVersion": 1, "modsReleaseId": "55555555-5555-4555-8555-555555555555"}).encode()
-        with tarfile.open(archive, "w:gz") as bundle:
-            member = tarfile.TarInfo("data/active-release.json")
-            member.size = len(snapshot)
-            bundle.addfile(member, io.BytesIO(snapshot))
-        manifest = {"files": [{"path": "active-release.json"}]}
-
-        self.assertEqual(MODULE.mod_release_snapshot_blocker(archive, manifest, {}), "MOD_RELEASE_UNAVAILABLE")
-
     def test_empty_list_is_real_and_bound_to_target(self):
         result = MODULE.list_backups(dict(self.request))
         self.assertEqual(result["items"], [])

@@ -5,6 +5,7 @@ import PageHeader from "../components/PageHeader.vue";
 import AppDialog from "../components/AppDialog.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import { listHostMods } from "../api/hostMods";
 import { createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, getInstanceBackupTask, getInstanceRestoreTask, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
@@ -30,6 +31,7 @@ const createBusy = ref(false);
 const activeTask = ref<TaskSnapshot | null>(null);
 const restoreBusy = ref(false);
 const restoreTarget = ref<BackupSummary | null>(null);
+const restoreModWarnings = ref<string[]>([]);
 const restoreProtection = ref(true);
 const deleteTarget = ref<BackupSummary | null>(null);
 const deleteBusy = ref(false);
@@ -195,12 +197,32 @@ async function runDownload(backupId:string, operationId:string, destination:stri
   }
 }
 
-function prepareRestore(item: BackupSummary) {
+async function prepareRestore(item: BackupSummary) {
   if (workspace.preview.value || item.verification !== "verified") return;
   error.value = "";
   restoreError.value = "";
   restoreProtection.value = true;
   restoreTarget.value = item;
+  restoreModWarnings.value = [];
+  const connection = server.value;
+  const instanceTarget = target.value;
+  const enabled = (item.mods ?? []).filter(ref => ref.enabled);
+  if (!connection?.hostId || !instanceTarget || !enabled.length) return;
+  try {
+    const response = await listHostMods({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      target: { serverId: connection.serverId, hostId: connection.hostId }, expectedRecordVersion: connection.recordVersion });
+    if (restoreTarget.value !== item) return;
+    const versions = new Map(response.items.map(entry => [entry.workshopId, new Set<string>()]));
+    for (const entry of response.items) versions.get(entry.workshopId)?.add(entry.contentDigest);
+    restoreModWarnings.value = [];
+    for (const ref of enabled) {
+      const digests = versions.get(ref.workshopId);
+      if (!digests?.size) restoreModWarnings.value.push(`缺少 MOD ${ref.workshopId}`);
+      else if (ref.artifactDigest && !digests.has(ref.artifactDigest)) restoreModWarnings.value.push(`MOD ${ref.workshopId} 将使用主机库最新版本`);
+    }
+  } catch (cause) {
+    if (restoreTarget.value === item) restoreModWarnings.value = [];
+  }
 }
 
 function prepareDelete(item: BackupSummary) {
@@ -399,7 +421,7 @@ function taskErrorLabel(code: string | null | undefined, stage: string, operatio
     BACKUP_WORKER_NOT_STARTED: "备份 worker 未开始执行，专服未进入备份阶段。请刷新任务状态后重新创建备份。",
     BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING: "旧备份缺少配置快照，且当前已应用配置版本不同；恢复已阻止。",
     BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID: "备份中的已应用配置快照校验失败；恢复已阻止。",
-    MOD_RELEASE_UNAVAILABLE: "此备份缺少与当前 MOD 部署匹配的快照，恢复已安全阻止。",
+    MOD_RELEASE_UNAVAILABLE: "主机库中没有可用的 MOD 版本，恢复已停止。",
   };
   const message = code ? labels[code] ?? "任务失败，任务现场已保留。" : "任务失败，任务现场已保留。";
   const stageLabel = activeTaskStageLabel({ operation, stage });
@@ -544,6 +566,7 @@ onBeforeUnmount(() => {
       <span>{{ activeTaskStageLabel(activeTask) }}</span>
       <span v-if="activeTask.result?.backupId" class="mono">{{ activeTask.result.backupId }}</span>
       <p v-if="activeTask.error" class="backup-warning">{{ taskErrorLabel(activeTask.error.code, activeTask.stage, activeTask.operation, activeTask.error.details) }}</p>
+      <p v-if="activeTask.result?.modsWarnings?.length" class="backup-warning">{{ activeTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}。缺少 MOD 时世界可能崩溃。</p>
     </section>
     <section v-if="preview" class="backup-preview" aria-live="polite">
       <div class="backup-preview-heading">
@@ -589,15 +612,17 @@ onBeforeUnmount(() => {
         <button v-if="task.status === 'interrupted'" class="button" :disabled="workspace.preview.value" @click="retryDownload(task)">继续下载</button>
       </div>
     </section>
-    <AppDialog :open="!!restoreTarget" title="恢复备份" description="确认后会先检查归属、校验和、版本产物及空间；检查通过后开始恢复。" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; } }">
+    <AppDialog :open="!!restoreTarget" title="恢复备份" description="确认后会先检查归属、校验和、版本产物及空间；检查通过后开始恢复。" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; restoreModWarnings = []; } }">
       <p v-if="restoreTarget">将恢复 <span class="mono">{{ restoreTarget.backupId }}</span>（{{ formatDate(restoreTarget.createdAt) }}）。</p>
+      <p class="muted-text">MOD 使用主机库当前最新版本；主机库缺少 MOD 时会提示，但不会阻止恢复。</p>
+      <p v-if="restoreModWarnings.length" class="backup-warning">{{ restoreModWarnings.join("；") }}。缺少 MOD 时继续恢复可能导致世界崩溃。</p>
       <label class="backup-restore-option">
         <input v-model="restoreProtection" type="checkbox" :disabled="restoreBusy" />
         <span>恢复前创建保护备份</span>
       </label>
       <p class="form-hint">保护备份用于失败回滚；不勾选会直接替换当前世界。</p>
       <p v-if="restoreError" class="error-strip" role="alert">{{ restoreError }}</p>
-      <template #footer><button class="button" :disabled="restoreBusy" @click="restoreTarget = null; restoreError = ''">取消</button><button class="button primary" :disabled="restoreBusy || workspace.preview.value" @click="restoreBackup">{{ restoreBusy ? "检测并开始恢复…" : "确认恢复" }}</button></template>
+      <template #footer><button class="button" :disabled="restoreBusy" @click="restoreTarget = null; restoreError = ''; restoreModWarnings = []">取消</button><button class="button primary" :disabled="restoreBusy || workspace.preview.value" @click="restoreBackup">{{ restoreBusy ? "检测并开始恢复…" : "确认恢复" }}</button></template>
     </AppDialog>
     <AppDialog :open="!!deleteTarget" title="删除备份" description="此操作会永久删除远端归档，不能撤销。" @update:open="value => { if (!value && !deleteBusy) { deleteTarget = null; deleteError = ''; } }">
       <p v-if="deleteTarget">确定删除 <span class="mono">{{ deleteTarget.backupId }}</span>（{{ formatBytes(deleteTarget.sizeBytes) }}）？</p>

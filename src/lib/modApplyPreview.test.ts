@@ -1,16 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { BackupSummary } from "../api/instances.ts";
 import type { InstanceModSummary } from "../types/mods.ts";
 import { buildModApplyPreview, mergeModApplyBlockers } from "./modApplyPreview.ts";
-
-const backup: BackupSummary = {
-  schemaVersion: 1, backupId: "11111111-1111-4111-8111-111111111111", hostId: "22222222-2222-4222-8222-222222222222",
-  instanceId: "33333333-3333-4333-8333-333333333333", createdAt: "2026-10-22T10:00:00Z", reason: "protect",
-  captureMode: "cold", captureSemantics: "stoppedBeforeRead", runtimeStatusAtCapture: "stopped", sizeBytes: 1,
-  checksum: "a".repeat(64), verification: "verified", restorability: "restorable", dstBuild: "756039",
-  dstReleaseId: null, modsReleaseId: null, configRevision: 2, containsSecrets: false,
-};
 
 function mod(overrides: Partial<InstanceModSummary> = {}): InstanceModSummary {
   return {
@@ -34,49 +25,46 @@ test("builds a read-only preview for add/configure/disable/remove changes", () =
       mod({ workshopId: "disable", desiredEnabled: false, deployedEnabled: true }),
       mod({ workshopId: "remove", desiredEnabled: null, deployedEnabled: true }),
     ],
-    backups: [backup], runtimeStatus: "running", cavesEnabled: true, restoreAcceptancePassed: false,
+    runtimeStatus: "running", cavesEnabled: true,
   });
 
   assert.deepEqual(preview.changes.map(change => [change.workshopId, change.action]), [
     ["add", "add"], ["config", "configure"], ["disable", "disable"], ["remove", "remove"],
   ]);
   assert.deepEqual(preview.shards, ["master", "caves"]);
-  assert.equal(preview.protectionBackup?.backupId, backup.backupId);
-  assert.equal(preview.canApply, false);
-  assert.match(preview.blockers[0] ?? "", /尚未通过/);
+  assert.equal(preview.canApply, true);
+  assert.deepEqual(preview.blockers, []);
 });
 
 test("blocks an enabled MOD without its pinned prepared content", () => {
-  const preview = buildModApplyPreview({ mods: [mod({ preparedDigest: null })], backups: [],
-    runtimeStatus: "stopped", cavesEnabled: false, restoreAcceptancePassed: true });
+  const preview = buildModApplyPreview({ mods: [mod({ preparedDigest: null })],
+    runtimeStatus: "stopped", cavesEnabled: false });
   assert.equal(preview.changes.length, 1);
   assert.match(preview.blockers[0] ?? "", /固定 MOD 内容/);
+  assert.equal(preview.canApply, false);
 });
 
-test("requires a compatible verified cold backup and rejects unknown runtime state", () => {
-  const bad = { ...backup, restorability: "missingArtifacts" as const };
-  const preview = buildModApplyPreview({ mods: [mod({ deployedEnabled: null })], backups: [bad],
-    runtimeStatus: "unknown", cavesEnabled: false, restoreAcceptancePassed: true });
-  assert.equal(preview.protectionBackup, null);
+test("rejects unknown runtime state without requiring a pre-existing backup", () => {
+  const preview = buildModApplyPreview({ mods: [mod({ deployedEnabled: null })],
+    runtimeStatus: "unknown", cavesEnabled: false });
   assert.equal(preview.canApply, false);
   assert.match(preview.blockers[0] ?? "", /无法确认专服运行状态/);
-  assert.match(preview.warnings[0] ?? "", /冷保护备份/);
+  assert.deepEqual(preview.warnings, []);
 });
 
 test("does not report changes for a matching deployed snapshot", () => {
   const preview = buildModApplyPreview({ mods: [mod({ deployedEnabled: true,
     desiredConfiguration: { nested: { a: 1, b: 2 } }, deployedConfiguration: { nested: { b: 2, a: 1 } },
-    deployedArtifactDigest: "a".repeat(64) })], backups: [backup], runtimeStatus: "running",
-    cavesEnabled: false, restoreAcceptancePassed: true });
+    deployedArtifactDigest: "a".repeat(64) })], runtimeStatus: "running",
+    cavesEnabled: false });
   assert.deepEqual(preview.changes, []);
   assert.equal(preview.canApply, false);
 });
 
-test("merges local and authoritative restore acceptance blockers into one message", () => {
-  const preview = buildModApplyPreview({ mods: [mod({ deployedEnabled: null })], backups: [backup],
-    runtimeStatus: "running", cavesEnabled: false, restoreAcceptancePassed: false });
-  const blockers = mergeModApplyBlockers(preview, ["MOD_RESTORE_ACCEPTANCE_REQUIRED"]);
+test("merges server blockers with a safe fallback label", () => {
+  const preview = buildModApplyPreview({ mods: [mod({ deployedEnabled: null })],
+    runtimeStatus: "running", cavesEnabled: false });
+  const blockers = mergeModApplyBlockers(preview, ["MOD_ARTIFACT_REQUIRED", "MOD_UNKNOWN_REASON"]);
 
-  assert.deepEqual(blockers, ["MOD 发布恢复验收尚未通过此 Linux 主机验收"]);
-  assert.equal(preview.canApply, false);
+  assert.deepEqual(blockers, ["启用的 MOD 缺少主机库内容版本", "服务端阻断发布：MOD_UNKNOWN_REASON"]);
 });

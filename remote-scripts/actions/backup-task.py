@@ -420,13 +420,10 @@ def _worker_impl(task_id):
         roots = ["data/Master", "config/Cluster_1"]
         active_path = instance / "active-release.json"
         active_snapshot = read_json(active_path, 65536) if active_path.exists() else {}
-        active_mods_release = active_snapshot.get("modsReleaseId") if isinstance(active_snapshot, dict) else None
         for relative in ("active-release.json", "manifest.json", "compose.yaml"):
             if (instance / relative).exists(): roots.append(relative)
         for relative in ("desired/mods.json", "deployed-mods.json"):
             if (instance / relative).exists(): roots.append(relative)
-        if active_mods_release:
-            roots.append("mods/releases/" + active_mods_release)
         if manifest.get("cavesEnabled") is True:
             roots.append("data/Caves")
         for relative in ("desired/world.json", "deployed-world.json"):
@@ -502,6 +499,12 @@ def _worker_impl(task_id):
                                                            request["instanceId"], created["checksum"])
             set_status(directory, "running", "backupVerify", completed="backup")
             restorability, release = backup_restorability(instance, request, release_id)
+            desired_path = instance / "desired" / "mods.json"
+            desired_mods = read_json(desired_path, 2 * 1024 * 1024) if desired_path.exists() else {}
+            mods_refs = [{"workshopId": str(item.get("workshopId")), "enabled": item.get("enabled") is True,
+                          "artifactDigest": item.get("artifactDigest") if isinstance(item.get("artifactDigest"), str) else None}
+                         for item in desired_mods.get("mods", []) if isinstance(item, dict)] \
+                if isinstance(desired_mods, dict) and isinstance(desired_mods.get("mods"), list) else []
             metadata = {"schemaVersion": 1, "backupId": backup_id, "hostId": request["hostId"],
                 "instanceId": request["instanceId"], "createdAt": verified["manifest"]["captureCompletedAt"],
                 "reason": request["reason"], "captureMode": request["captureMode"],
@@ -509,7 +512,7 @@ def _worker_impl(task_id):
                 "runtimeStatusAtCapture": capture_runtime, "sizeBytes": created["archiveSizeBytes"],
                 "checksum": created["checksum"], "verification": "verified", "restorability": restorability,
                 "dstBuild": release.get("dstBuild") if release else None, "dstReleaseId": release_id,
-                "modsReleaseId": active.get("modsReleaseId") if isinstance(active, dict) else None,
+                "modsReleaseId": None, "mods": mods_refs,
                 "configRevision": request["expectedRevision"], "containsSecrets": False}
             atomic_json(backup_stage / "metadata.json", metadata)
             if backup_dir.exists():

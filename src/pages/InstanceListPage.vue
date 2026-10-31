@@ -23,12 +23,17 @@ const {data,error,loading,stale,refresh}=useInstanceList(server,workspace.previe
 const taskStore=useTasks();
 const selectedTask=ref<TaskSnapshot|null>(null);
 const createOpen=ref(false);
+const createdTarget=ref<{serverId:string;hostId:string;instanceId:string}|null>(null);
 const deleteTarget=ref<InstanceSummary|null>(null), deletePlan=ref<InstanceDeletePreview|null>(null), deleteName=ref(""), deleteOperationId=ref(""), deleteBusy=ref(false), deletePreviewBusy=ref(false), deleteError=ref("");
 const deleteDiagnostics=ref<UserError|null>(null);
-watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.recordVersion,()=>data.value?.registryRevision,()=>workspace.preview.value],()=>{createOpen.value=false;deleteTarget.value=null;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deleteBusy.value=false;deletePreviewBusy.value=false;deleteError.value="";deleteDiagnostics.value=null;selectedTask.value=null;});
+watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.recordVersion,()=>data.value?.registryRevision,()=>workspace.preview.value],()=>{createOpen.value=false;deleteTarget.value=null;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deleteBusy.value=false;deletePreviewBusy.value=false;deleteError.value="";deleteDiagnostics.value=null;selectedTask.value=null;createdTarget.value=null;});
 const instances=computed(()=>data.value?.instances ?? []);
 const running=computed(()=>instances.value.filter(item=>item.runtimeStatus==='running').length);
 const unknown=computed(()=>instances.value.filter(item=>item.runtimeStatus==='unknown').length);
+async function creationSucceeded(created:{serverId:string;hostId:string;instanceId:string}){
+  await refresh();
+  createdTarget.value=created;
+}
 function enter(instance:InstanceSummary){
   if (!server.value || stale.value || !canInspectInstance(instance)) return;
   workspace.select({serverId:server.value.serverId,hostId:instance.hostId,instanceId:instance.instanceId});
@@ -88,7 +93,8 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
   <div class="page">
     <PageHeader :eyebrow="server?.displayName" title="专服列表"><template #actions><button class="button" :disabled="loading || !server" @click="refresh"><RefreshCw :size="16"/>{{loading?'读取中…':'刷新'}}</button><button class="button primary" :disabled="workspace.preview.value || !server?.hostId || !data || loading || stale || !!error" @click="createOpen=true"><Plus :size="16"/>新建专服</button></template></PageHeader>
     <PreviewNotice/>
-    <InstanceCreateDialog v-model:open="createOpen" :server="server" :registry-revision="data?.registryRevision ?? 0" @creation-succeeded="refresh"/>
+    <p v-if="createdTarget" class="success-message" role="status">专服已创建<button class="text-button" @click="router.push(`/hosts/${createdTarget.serverId}/instances/${createdTarget.instanceId}/world`)">进入世界配置</button></p>
+    <InstanceCreateDialog v-model:open="createOpen" :server="server" :registry-revision="data?.registryRevision ?? 0" @creation-succeeded="creationSucceeded"/>
     <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul><button v-if="server" class="text-button" @click="router.push(`/hosts/${server.serverId}/connection`)">连接设置</button><button v-if="server" class="text-button" @click="router.push(`/hosts/${server.serverId}/environment`)">主机环境</button></div>
     <div v-if="loading && !data" class="empty-state" role="status">读取专服列表…</div>
     <template v-else-if="data">

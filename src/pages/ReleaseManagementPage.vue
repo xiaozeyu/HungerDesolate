@@ -21,6 +21,8 @@ import {
   type InstanceReleaseDeletePreview,
 } from "../api/instances";
 import { describeError } from "../lib/commandError";
+import { cleanupBuildCache, previewBuildCache, type BuildCachePreview } from "../api/buildCache";
+import { formatBytes } from "../lib/environmentView";
 
 const route = useRoute();
 const workspace = useWorkspace();
@@ -47,6 +49,9 @@ const deletePreview = ref<InstanceReleaseDeletePreview|null>(null);
 const deleteTypedName = ref("");
 const deleteBusy = ref(false);
 const deleteError = ref("");
+const cachePreview = ref<BuildCachePreview | null>(null);
+const cacheBusy = ref(false);
+const cacheError = ref("");
 const bundleInputs = new Map<string, HTMLInputElement>();
 let statusInterval: number | null = null;
 let buildPollBusy = false;
@@ -381,6 +386,9 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   deleteTypedName.value = "";
   deleteBusy.value = false;
   deleteError.value = "";
+  cachePreview.value = null;
+  cacheError.value = "";
+  cacheBusy.value = false;
   clearBundle();
   if (buildTarget && !isCurrent(buildTarget)) {
     stopPolling();
@@ -399,12 +407,55 @@ onUnmounted(() => {
   buildObservationError.value = "";
   clearBundle();
 });
+
+async function openCacheCleanup() {
+  const target = targetSnapshot();
+  if (!target || cacheBusy.value) return;
+  const sequence = ++actionSequence;
+  cacheBusy.value = true;
+  cacheError.value = "";
+  try {
+    const response = await previewBuildCache({ schemaVersion: 1, requestId: crypto.randomUUID(), action: "preview",
+      serverId: target.serverId, hostId: target.hostId, expectedRecordVersion: target.recordVersion });
+    if (!isCurrent(target, sequence)) return;
+    if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存预览身份不匹配");
+    cachePreview.value = response;
+  } catch (cause) {
+    if (isCurrent(target, sequence)) cacheError.value = describeError(cause).message;
+  } finally {
+    if (isCurrent(target, sequence)) cacheBusy.value = false;
+  }
+}
+
+async function confirmCacheCleanup() {
+  const preview = cachePreview.value;
+  const target = targetSnapshot();
+  if (!preview || !target || cacheBusy.value || !preview.allowed) return;
+  const sequence = ++actionSequence;
+  cacheBusy.value = true;
+  cacheError.value = "";
+  try {
+    const response = await cleanupBuildCache({ schemaVersion: 1, requestId: crypto.randomUUID(), action: "cleanup",
+      serverId: target.serverId, hostId: target.hostId, expectedRecordVersion: target.recordVersion });
+    if (!isCurrent(target, sequence)) return;
+    if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存清理身份不匹配");
+    cachePreview.value = null;
+    buildMessage.value = `构建缓存已清理${response.contextBytes ? `，移除 ${formatBytes(response.contextBytes)} 构建目录` : ""}`;
+  } catch (cause) {
+    if (isCurrent(target, sequence)) cacheError.value = describeError(cause).message;
+  } finally {
+    if (isCurrent(target, sequence)) cacheBusy.value = false;
+  }
+}
 </script>
 
 <template>
   <div class="page release-page">
     <PageHeader :eyebrow="server?.displayName" title="DST Release 管理">
       <template #actions>
+        <button class="button" :disabled="building || loading || !server || cacheBusy" @click="openCacheCleanup">
+          <Trash2 :size="16" />清理构建缓存
+        </button>
         <button class="button" :disabled="building || loading || !server" @click="startBuild">
           <Hammer :size="16" />{{ building ? "构建中…" : "构建镜像" }}
         </button>
@@ -525,6 +576,23 @@ onUnmounted(() => {
       <template #footer>
         <button class="button" :disabled="deleteBusy" @click="closeDeleteDialog(false)">取消</button>
         <button class="button danger" :disabled="deleteBusy || !deletePreview?.allowed || deleteTypedName!==deletePreview?.dstBuild" @click="confirmDeleteRelease">{{ deleteBusy ? "正在删除…" : "删除 Release" }}</button>
+      </template>
+    </AppDialog>
+    <AppDialog :open="!!cachePreview" title="清理构建缓存" description="删除构建上下文并清理 Docker 未使用的构建缓存；不会删除 Release 镜像。" @update:open="value => { if (!value && !cacheBusy) { cachePreview = null; cacheError = ''; } }">
+      <div v-if="cachePreview" class="form-stack">
+        <dl class="creation-facts">
+          <div><dt>构建目录</dt><dd>{{ formatBytes(cachePreview.contextBytes) }}</dd></div>
+          <div><dt>Docker 构建缓存</dt><dd>{{ cachePreview.dockerCache.size ?? "不可用" }}</dd></div>
+          <div><dt>可回收</dt><dd>{{ cachePreview.dockerCache.reclaimable ?? "—" }}</dd></div>
+          <div><dt>Docker</dt><dd>{{ cachePreview.dockerAvailable ? "可用" : "不可用" }}</dd></div>
+          <div><dt>构建状态</dt><dd>{{ cachePreview.buildActive ? "正在构建，暂不可清理" : "空闲" }}</dd></div>
+        </dl>
+        <p v-if="!cachePreview.allowed" class="environment-error">{{ cachePreview.buildActive ? "当前有镜像构建任务，不能清理缓存。" : "Docker 不可用，不能清理构建缓存。" }}</p>
+        <p v-if="cacheError" class="error-strip" role="alert">{{ cacheError }}</p>
+      </div>
+      <template #footer>
+        <button class="button" :disabled="cacheBusy" @click="cachePreview = null; cacheError = ''">取消</button>
+        <button class="button danger" :disabled="cacheBusy || !cachePreview?.allowed" @click="confirmCacheCleanup">{{ cacheBusy ? "清理中…" : "清理缓存" }}</button>
       </template>
     </AppDialog>
   </div>

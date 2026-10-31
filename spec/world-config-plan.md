@@ -4,7 +4,7 @@
 - 优先级：P0 核心
 - 依赖：容器创建框架已完成
 - 可并行：阶段 0 准备
-- 当前实现：基础/联机字段、Master/Caves 选项、期望配置 CAS 保存、应用预览和应用命令已落地；实例启动命令会等待 DST 进程及容器内 UDP 监听器就绪，状态标为本机运行验证。启动失败诊断与真实主机实测待验收；公网可达性仍未验证。
+- 当前实现：基础/联机字段、Master/Caves 选项、期望配置 CAS 保存、应用命令已落地；应用检查已合并进 `apply_world_config`，前端不再有独立预览命令或预览窗口。实例启动命令会等待 DST 进程及容器内 UDP 监听器就绪，状态标为本机运行验证。启动失败诊断与真实主机实测待验收；公网可达性仍未验证。
 
 ## 1. 功能范围
 
@@ -359,62 +359,31 @@ DST 选项 key、标签、分组、分片适用范围、默认值和可选值由
 
 第一版应用实现约束：配置应用只替换受保护的 `config/` 并按预览时已运行的分片集合重建和启动，不改写 `data/Master`、`data/Caves` 世界存档，因此已存在世界文件的实例仍可重复应用配置。世界生成选项在已有存档上只对新世界生效；未来重置或迁移世界数据仍必须先接入保护备份链路。运行时隔离验证作为 warning 保留，应用回执明确 `runtimeVerified=false`。此首版操作不宣称公网联通或玩家可加入。
 
-#### 预览与应用
+#### 检查与应用（2026-10-31 合并）
 
-- [ ] **预览命令**（后端）
-  ```rust
-  #[tauri::command]
-  async fn preview_world_apply(
-      target: InstanceTarget,
-      expected_revision: i64
-  ) -> Result<PlanPreview, CommandError> {
-      // 1. 读取 desired 与 deployed
-      // 2. 计算差异
-      // 3. 检查是否需要停服
-      // 4. 生成备份建议
-      // 5. 返回 planId
-  }
-  ```
-
-- [x] **首版应用**（后端）
+- [x] **检查合并进应用命令**（后端）
   ```rust
   #[tauri::command]
   async fn apply_world_config(
       target: InstanceTarget,
-      expected_revision: i64,
-      desired_digest: String,
-      active_release_id: String,
+      expected_record_version: u64,
+      expected_revision: u64,
       operation_id: String
   ) -> Result<WorldApplyResponse, CommandError> {
-      // 首版只应用无存档实例；已存在世界文件时保护备份未完成，保持阻断
-      // 以 revision、期望 digest、active release 和 operationId 绑定操作
-      // 按原运行状态停止、重建并启动；隔离运行验证延后并返回 runtimeVerified=false
+      // 1. 同一 SSH 会话内先执行只读应用检查（revision、期望摘要、Token、部署、Release、渲染）
+      // 2. 阻断项以 WORLD_APPLY_BLOCKED + details.blockers 返回，不进入写入
+      // 3. 以 revision、检查得到的期望 digest、active release 和 operationId 绑定应用
+      // 4. 按原运行状态停止、重建并启动；返回 runtimeVerified=false 与 warnings
   }
   ```
 
-- [ ] **UI 流程**
+- [x] **UI 流程**
   ```vue
-  <button @click="previewApply" :disabled="!canApply">
-    应用配置
+  <button @click="saveAndApply" :disabled="saving || applyBusy">
+    {{ saving ? '保存中…' : applyBusy ? '检查并部署中…' : '保存并应用' }}
   </button>
-  
-  <!-- 预览 Dialog -->
-  <AppDialog v-model:open="previewOpen" title="应用世界配置">
-    <ul>
-      <li>将停止专服</li>
-      <li>创建保护备份</li>
-      <li>应用新配置</li>
-      <li>重新启动专服</li>
-    </ul>
-    
-    <template #footer>
-      <button @click="previewOpen = false">取消</button>
-      <button @click="confirmApply" class="primary">
-        应用配置
-      </button>
-    </template>
-  </AppDialog>
   ```
+  保存成功后直接调用 `apply_world_config`；阻断项和警告内联显示，不再打开应用预览 Dialog，也不保留单独“预览应用”入口。
 
 ## 3. 测试计划
 

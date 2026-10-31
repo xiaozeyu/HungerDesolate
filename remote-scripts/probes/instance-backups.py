@@ -237,23 +237,6 @@ def assess_restorability(backup, metadata, instance, manifest, host_id, instance
                                text=True, timeout=10, check=False, env=environment)
         if image.returncode != 0 or image.stdout.strip() != release["imageDigest"]:
             return "missingArtifacts"
-        mods_release_id = metadata.get("modsReleaseId")
-        if mods_release_id is not None:
-            if not valid_uuid(mods_release_id):
-                return "incompatible"
-            archived_paths = {item.get("path") for item in inspected["manifest"].get("files", [])
-                              if isinstance(item, dict)}
-            mods_root = "mods/releases/" + mods_release_id
-            if mods_root + "/manifest.json" not in archived_paths:
-                return "missingArtifacts"
-            with tarfile.open(archive, "r:gz") as bundle:
-                member = bundle.getmember("data/" + mods_root + "/manifest.json")
-                stream = bundle.extractfile(member)
-                mods_manifest = json.loads(stream.read(4 * 1024 * 1024 + 1)) if stream else None
-            if (mods_manifest.get("schemaVersion") != 1
-                    or mods_manifest.get("modsReleaseId") != mods_release_id
-                    or mods_manifest.get("instanceId") != instance_id):
-                return "missingArtifacts"
         return "restorable"
     except FileNotFoundError:
         return "missingArtifacts"
@@ -375,29 +358,6 @@ def world_config_snapshot_blocker(archive_path, archive_manifest, instance, expe
         return "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING" if not has_desired else "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID"
 
 
-def mod_release_snapshot_blocker(archive_path, archive_manifest, current_active):
-    archived = {item.get("path") for item in archive_manifest.get("files", []) if isinstance(item, dict)}
-    if "active-release.json" not in archived:
-        return "MOD_RELEASE_UNAVAILABLE" if current_active.get("modsReleaseId") else None
-    try:
-        with tarfile.open(archive_path, "r:gz") as bundle:
-            member = bundle.getmember("data/active-release.json")
-            if not member.isfile() or member.size > 65536:
-                return "MOD_RELEASE_UNAVAILABLE"
-            stream = bundle.extractfile(member)
-            snapshot = json.loads(stream.read(65537)) if stream else None
-        if not isinstance(snapshot, dict):
-            return "MOD_RELEASE_UNAVAILABLE"
-        mods_release_id = snapshot.get("modsReleaseId")
-        if mods_release_id is not None:
-            release_manifest = "mods/releases/" + str(mods_release_id) + "/manifest.json"
-            if release_manifest not in archived:
-                return "MOD_RELEASE_UNAVAILABLE"
-        return None
-    except (OSError, ValueError, TypeError, KeyError, tarfile.TarError):
-        return "MOD_RELEASE_UNAVAILABLE"
-
-
 def restore_preflight(request):
     host_id, instance_id, instance, manifest = identity(request)
     backup_id = request.get("backupId")
@@ -440,9 +400,6 @@ def restore_preflight(request):
         current_release = current_active.get("dstReleaseId")
     except FileNotFoundError:
         pass
-    mod_snapshot_blocker = mod_release_snapshot_blocker(archive, archive_manifest, current_active)
-    if mod_snapshot_blocker:
-        blockers.append(mod_snapshot_blocker)
     backup_release = metadata.get("dstReleaseId")
     if backup_release and current_release and backup_release != current_release:
         blockers.append("DST_RELEASE_MISMATCH")

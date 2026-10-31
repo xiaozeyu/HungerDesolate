@@ -27,7 +27,7 @@ class ModsApplyTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "famine-hub"
         self.instance = self.root / "instances" / INSTANCE
         for path in (self.root / "instances", self.root / "backups" / INSTANCE,
-                     self.instance / "desired", self.instance / "mods" / "prepared" / "123",
+                     self.instance / "desired", self.root / "mods" / "prepared" / "123",
                      self.instance / "config" / "Cluster_1" / "Master", self.instance / "data" / "Master",
                      self.instance / "locks", self.root / "locks"):
             path.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -49,7 +49,7 @@ class ModsApplyTests(unittest.TestCase):
         self.write(self.instance / "config" / "Cluster_1" / "Master" / "server.ini",
             "[NETWORK]\nserver_port=11000\n[STEAM]\nmaster_server_port=27000\n")
         self.write(self.instance / "data" / "Master" / "save.zip", "save")
-        artifact = self.instance / "mods" / "prepared" / "123" / CONTENT
+        artifact = self.root / "mods" / "prepared" / "123" / CONTENT
         (artifact / "content").mkdir(parents=True, mode=0o700)
         self.write(artifact / "manifest.json", {"schemaVersion": 1, "workshopId": "123", "contentDigest": CONTENT})
         self.write(artifact / "content" / "modinfo.lua", "version = '1.0'\n")
@@ -57,8 +57,6 @@ class ModsApplyTests(unittest.TestCase):
         backup.mkdir(mode=0o700)
         self.write(backup / "metadata.json", {"schemaVersion": 1, "backupId": "77777777-7777-4777-8777-777777777777",
             "captureMode": "cold", "verification": "verified", "checksum": "b" * 64})
-        self.write(self.root / "restore-acceptance.json", {"schemaVersion": 1, "hostId": HOST,
-            "instanceId": INSTANCE, "taskId": REQUEST, "runtimeVerified": True})
         self.request = {"schemaVersion": 1, "action": "preview", "requestId": REQUEST,
             "serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE, "expectedRevision": 3}
 
@@ -70,17 +68,20 @@ class ModsApplyTests(unittest.TestCase):
         path.write_text(value if isinstance(value, str) else json.dumps(value))
         path.chmod(0o600)
 
-    def test_preview_describes_add_and_blocks_missing_restore_evidence(self):
+    def test_validate_desired_reads_host_level_artifact(self):
+        with patch.object(MODULE, "ROOT", self.root):
+            desired, mods, _ = MODULE.validate_desired(self.instance, self.request)
+        self.assertEqual(mods[0]["artifactDigest"], CONTENT)
+        self.assertEqual(desired["instanceId"], INSTANCE)
+
+    def test_preview_describes_add_without_restore_or_backup_gate(self):
+        shutil.rmtree(self.root / "backups")
         with patch.object(MODULE, "ROOT", self.root), \
-             patch.object(MODULE, "container_roles", return_value=(["master"], "running")), \
-             patch.object(MODULE, "has_cold_protection", return_value=True):
+             patch.object(MODULE, "container_roles", return_value=(["master"], "running")):
             result = MODULE.preview(self.request)
-            self.assertTrue(result["allowed"])
-            self.assertEqual(result["changes"], [{"workshopId": "123", "action": "add"}])
-            (self.root / "restore-acceptance.json").unlink()
-            blocked = MODULE.preview(self.request)
-            self.assertFalse(blocked["allowed"])
-            self.assertEqual(blocked["blockers"], ["MOD_RESTORE_ACCEPTANCE_REQUIRED"])
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["changes"], [{"workshopId": "123", "action": "add"}])
+        self.assertEqual(result["blockers"], [])
 
     def test_preview_covers_disable_and_remove_without_claiming_unrelated_mods(self):
         self.write(self.instance / "deployed-mods.json", {"schemaVersion": 1, "instanceId": INSTANCE,
@@ -93,13 +94,21 @@ class ModsApplyTests(unittest.TestCase):
         desired["mods"][0]["enabled"] = False
         self.write(self.instance / "desired" / "mods.json", desired)
         with patch.object(MODULE, "ROOT", self.root), \
-             patch.object(MODULE, "container_roles", return_value=(["master"], "stopped")), \
-             patch.object(MODULE, "has_cold_protection", return_value=True):
+             patch.object(MODULE, "container_roles", return_value=(["master"], "stopped")):
             result = MODULE.preview(self.request)
         self.assertEqual(result["changes"], [
             {"workshopId": "123", "action": "disable"},
             {"workshopId": "456", "action": "remove"},
         ])
+
+    def test_start_requires_an_explicit_backup_choice(self):
+        request = {**self.request, "action": "start", "operationId": "77777777-7777-4777-8777-777777777777",
+                   "desiredDigest": CONTENT}
+        with self.assertRaises(MODULE.Rejected) as failure:
+            MODULE.valid_request(request)
+        self.assertEqual(failure.exception.code, "MOD_APPLY_INPUT_INVALID")
+        MODULE.valid_request({**request, "createProtectionBackup": False})
+        MODULE.valid_request({**request, "createProtectionBackup": True})
 
     def test_start_rejects_a_noop_even_when_there_are_no_other_blockers(self):
         tasks = self.root / "mod-apply-tasks"
@@ -114,6 +123,16 @@ class ModsApplyTests(unittest.TestCase):
             with self.assertRaises(MODULE.Rejected) as failure:
                 MODULE.start(request, "worker", "archive", "release", "runtime", "restore", "download")
         self.assertEqual(failure.exception.code, "MOD_APPLY_NO_CHANGES")
+
+    def test_error_payload_reflects_the_backup_choice(self):
+        request = {"hostId": HOST, "instanceId": INSTANCE}
+        with_backup = MODULE.error_payload("MOD_APPLY_FAILED", request, REQUEST, True, True)
+        without_backup = MODULE.error_payload("MOD_APPLY_FAILED", request, REQUEST, True, False)
+        self.assertIn("保护备份恢复", with_backup["message"])
+        self.assertIn("未创建冷保护备份", without_backup["message"])
+        self.assertIn("无法自动恢复", without_backup["recoverySteps"][0])
+        rollback = MODULE.error_payload("MOD_APPLY_ROLLBACK_FAILED", request, REQUEST, True, True)
+        self.assertIn("自动恢复未完成", rollback["message"])
 
     def test_lua_rendering_quotes_values_and_rejects_null(self):
         output = MODULE.modoverrides([{"workshopId": "123", "enabled": True,
@@ -179,6 +198,10 @@ class ModsApplyTests(unittest.TestCase):
         token_path.write_text("current-token\n"); token_path.chmod(0o600)
         admin_path = self.instance / "config" / "Cluster_1" / "adminlist.txt"
         admin_path.write_text("STEAM_1\n"); admin_path.chmod(0o600)
+        world_path = self.instance / "desired" / "world.json"
+        self.write(world_path, {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 3,
+            "settings": {"roomName": "keep"}, "secrets": {"tokenRef": None, "serverPasswordRef": None}})
+        world_before = world_path.read_bytes()
         (self.instance / "staging" / "mod-apply" / operation_id).mkdir(parents=True, mode=0o700)
         backup_path = Path(self.temp.name) / "backup"
         backup_path.mkdir()
@@ -195,6 +218,7 @@ class ModsApplyTests(unittest.TestCase):
         self.assertFalse((self.instance / "deployed-mods.json").exists())
         self.assertEqual(token_path.read_text(), "current-token\n")
         self.assertEqual(admin_path.read_text(), "STEAM_1\n")
+        self.assertEqual(world_path.read_bytes(), world_before)
 
 
 if __name__ == "__main__":

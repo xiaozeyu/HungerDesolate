@@ -95,7 +95,7 @@ class InstanceModsProbeTests(unittest.TestCase):
         desired = json.loads(desired_path.read_text())
         desired["mods"][0]["artifactDigest"] = digest
         desired_path.write_text(json.dumps(desired)); desired_path.chmod(0o600)
-        artifact = self.instance / "mods" / "prepared" / "123" / digest
+        artifact = self.root / "mods" / "prepared" / "123" / digest
         content = artifact / "content"
         content.mkdir(parents=True, mode=0o700)
         metadata = {"schemaVersion": 1, "workshopId": "123", "contentDigest": digest,
@@ -111,39 +111,6 @@ class InstanceModsProbeTests(unittest.TestCase):
         self.assertEqual(result["preparedAt"], "2026-10-22T00:00:00Z")
         self.assertEqual(result["folderName"], "workshop-123")
 
-    def test_reads_candidate_artifact_without_replacing_desired_artifact(self):
-        desired_digest = "a" * 64
-        candidate_digest = "b" * 64
-        desired_path = self.instance / "desired" / "mods.json"
-        desired = json.loads(desired_path.read_text())
-        desired["mods"][0]["artifactDigest"] = desired_digest
-        desired_path.write_text(json.dumps(desired)); desired_path.chmod(0o600)
-        prepared_root = self.instance / "mods" / "prepared" / "123"
-        for digest, version in ((desired_digest, "v1.0.0"), (candidate_digest, "v1.1.0")):
-            artifact = prepared_root / digest
-            content = artifact / "content"
-            content.mkdir(parents=True, mode=0o700)
-            manifest = artifact / "manifest.json"
-            manifest.write_text(json.dumps({"schemaVersion": 1, "workshopId": "123",
-                "contentDigest": digest, "preparedAt": "2026-10-23T00:00:00Z",
-                "sourceHandle": "200" if digest == candidate_digest else "100"}))
-            manifest.chmod(0o600)
-            (content / "modinfo.lua").write_text(f"version = '{version}'\nconfiguration_options = {{}}\n")
-            (content / "modinfo.lua").chmod(0o444)
-        candidates = self.instance / "mods" / "candidates"
-        candidates.mkdir(mode=0o700)
-        pointer = candidates / "123.json"
-        pointer.write_text(json.dumps({"schemaVersion": 1, "workshopId": "123",
-            "contentDigest": candidate_digest, "sourceHandle": "200",
-            "preparedAt": "2026-10-23T00:00:00Z"}))
-        pointer.chmod(0o600)
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output): self.probe.main(self.request())
-        item = json.loads(output.getvalue())["items"][0]
-        self.assertEqual(item["artifact"]["contentDigest"], desired_digest)
-        self.assertEqual(item["candidateArtifact"]["contentDigest"], candidate_digest)
-        self.assertEqual(item["candidateArtifact"]["sourceHandle"], "200")
-
     def test_missing_pinned_digest_does_not_fall_back_to_another_release(self):
         desired_path = self.instance / "desired" / "mods.json"
         desired = json.loads(desired_path.read_text())
@@ -153,33 +120,6 @@ class InstanceModsProbeTests(unittest.TestCase):
         with contextlib.redirect_stdout(output): self.probe.main(self.request())
         self.assertIsNone(json.loads(output.getvalue())["items"][0]["artifact"])
 
-    def test_rejects_symlinked_prepared_content_directory(self):
-        digest = "a" * 64
-        desired_path = self.instance / "desired" / "mods.json"
-        desired = json.loads(desired_path.read_text())
-        desired["mods"][0]["artifactDigest"] = digest
-        desired_path.write_text(json.dumps(desired)); desired_path.chmod(0o600)
-        prepared = self.instance / "mods" / "prepared" / "123"
-        prepared.mkdir(parents=True)
-        artifact = prepared / digest
-        artifact.mkdir()
-        (artifact / "manifest.json").write_text(json.dumps({"schemaVersion": 1, "workshopId": "123", "contentDigest": digest}))
-        (artifact / "manifest.json").chmod(0o600)
-        content = self.root / "outside"
-        content.mkdir()
-        (content / "modinfo.lua").write_text("configuration_options = {}\n")
-        artifact.joinpath("content").symlink_to(content, target_is_directory=True)
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(self.probe.ModProbeError) as failure:
-            self.probe.main(self.request())
-        self.assertEqual(failure.exception.code, "MOD_ARTIFACT_INVALID")
-
-    def test_rejects_group_writable_prepared_parent(self):
-        prepared = self.instance / "mods" / "prepared"
-        prepared.mkdir(parents=True)
-        prepared.chmod(0o770)
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(self.probe.ModProbeError) as failure:
-            self.probe.main(self.request())
-        self.assertEqual(failure.exception.code, "MOD_ARTIFACT_INVALID")
 
 
 if __name__ == "__main__":

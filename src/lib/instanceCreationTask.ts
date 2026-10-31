@@ -1,4 +1,4 @@
-import type { CommandError, TaskResult, TaskSnapshot } from "../types/contracts";
+import type { TaskSnapshot } from "../types/contracts";
 
 const stages: Record<string, string> = {
   queued: "等待任务",
@@ -34,12 +34,6 @@ export function creationTaskErrorLabel(code: string | null | undefined): string 
   return code ? errors[code] ?? "创建任务失败，现场已保留" : "创建任务失败，现场已保留";
 }
 
-export function creationTaskRecoveryActions(task: Pick<TaskSnapshot, "result" | "error">): TaskResult["recoveryActions"] {
-  return task.result?.recoveryActions ?? task.error?.details?.recoveryActions as TaskResult["recoveryActions"] ?? [];
-}
-
 export function isCreationTask(task: TaskSnapshot): boolean {
   return task.operation === "instanceCreate" || task.operation === "instanceCreateResume";
 }
-
-export type CreationTaskError = CommandError;

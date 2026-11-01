@@ -161,20 +161,16 @@ fn remote_error(envelope: &Value) -> Box<CommandError> {
             "INSTANCE_DELETE_ACTION_INVALID",
             "删除操作类型不匹配，请更新桌面应用",
         ),
+        "INSTANCE_DELETE_BUSY" => (
+            "INSTANCE_DELETE_BUSY",
+            "专服正在执行其他任务，请等待任务结束后重试",
+        ),
         "INSTANCE_DELETE_ACTIVE_TASK" | "ACTIVE_TASK" => {
             ("INSTANCE_DELETE_ACTIVE_TASK", "专服仍有活动任务，不能删除")
         }
         "CONTAINER_RUNNING" => (
             "INSTANCE_DELETE_CONTAINER_RUNNING",
             "实例仍有运行中的容器，请先安全停止",
-        ),
-        "CONTAINER_REMOVING" => (
-            "INSTANCE_DELETE_CONTAINER_REMOVING",
-            "实例容器正在删除，请等待 Docker 状态稳定后重新预览",
-        ),
-        "BACKUP_REQUIRED" => (
-            "INSTANCE_DELETE_BACKUP_REQUIRED",
-            "发现世界数据，请先创建并验证保护备份",
         ),
         "TASK_STATUS_MISSING" => (
             "INSTANCE_DELETE_TASK_UNKNOWN",

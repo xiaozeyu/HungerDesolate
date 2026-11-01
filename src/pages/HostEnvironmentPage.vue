@@ -1,30 +1,24 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 import { RefreshCw, CheckCircle2, AlertTriangle, CircleX, ChevronDown } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import SummaryBar from "../components/SummaryBar.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useHostEnvironment } from "../composables/useHostEnvironment";
+import { useConnectionDialog } from "../composables/useConnectionDialog";
 import { canInitializeHost, formatBytes } from "../lib/environmentView";
 import { dockerInstallBlockerLabel, dockerInstallPhaseLabel, dockerInstallStatusLabel, dockerInstallTaskErrorLabel } from "../lib/dockerInstallation";
-const route = useRoute(), router = useRouter(), workspace = useWorkspace();
+const route = useRoute(), workspace = useWorkspace();
+const { openConnection } = useConnectionDialog();
 const server = computed(() => workspace.servers.value.find(item => item.serverId === route.params.serverId) ?? null);
 const {data,loading,error,stale,refresh,plan,planOpen,initializing,outcomeUnknown,prepareInitialization,confirmInitialization,dockerPreview,dockerPreviewOpen,dockerPreviewLoading,dockerPreviewError,previewDockerInstall,dockerTask,dockerStarting,dockerTaskLoading,dockerTaskError,startDockerInstall,clearDockerTask} = useHostEnvironment(server,workspace.preview,(hostId,recordVersion)=>workspace.bindHost(server.value?.serverId ?? "",recordVersion,hostId));
 const blockers = computed(() => data.value?.checks.filter(check => check.level === "blocker").length ?? 0);
 const engineLabels = {notInstalled:"未安装",permissionDenied:"权限不足",unavailable:"不可访问",available:"可访问"};
 const checks = computed(() => [...(data.value?.checks ?? [])].sort((a,b)=>({blocker:0,warning:1,passed:2}[a.level]-{blocker:0,warning:1,passed:2}[b.level])));
-const environmentSummary = computed(() => [
-  { label: "检查", value: blockers.value ? `${blockers.value} 项阻断` : "通过", tone: blockers.value ? "danger" as const : "success" as const },
-  { label: "检查项", value: data.value?.checks.length ?? 0 },
-  { label: "系统", value: data.value?.os ?? data.value?.kernel ?? "未知" },
-  { label: "架构", value: data.value?.architecture ?? "未知" },
-  { label: "Docker", value: engineLabels[data.value?.docker.engineState ?? "unavailable"] ?? "未知" },
-]);
 const refreshButton = ref<HTMLButtonElement | null>(null);
 const dockerPlanInvalid = computed(() => ["PLAN_STALE","PLAN_EXPIRED","INSTALL_HOST_CHANGED","INSTALL_SNAPSHOT_CHANGED","INSTALL_PREFLIGHT_BLOCKED"].includes(dockerTaskError.value?.code ?? ""));
 async function confirm() {
@@ -40,19 +34,25 @@ async function retryDockerInstall() {
 </script>
 <template>
   <div class="page">
-    <PageHeader :eyebrow="server?.displayName" title="主机环境"><template #actions><button v-if="!workspace.preview.value && data?.hostId && (data.docker.engineState === 'notInstalled' || data.docker.clientVersion && (data.docker.engineState !== 'available' || !data.docker.composeVersion))" class="button" :disabled="loading || initializing || stale || dockerPreviewLoading || dockerTaskLoading || dockerTask?.status === 'queued' || dockerTask?.status === 'running'" @click="previewDockerInstall">{{dockerTask?.status === 'queued' || dockerTask?.status === 'running' ? '安装中…' : dockerPreviewLoading ? '检查中…' : data.docker.engineState === 'available' ? '修复 Compose' : data.docker.engineState === 'unavailable' ? '修复 Docker' : '安装 Docker'}}</button><button v-if="!workspace.preview.value && data && (!data.hostId || plan?.status === 'incomplete')" class="button" :disabled="loading || initializing || stale || outcomeUnknown || !canInitializeHost(data)" @click="prepareInitialization">{{initializing ? '处理中…' : plan?.status === 'incomplete' ? '查看初始化' : '初始化'}}</button><button ref="refreshButton" class="button primary" :disabled="!server || loading || initializing" @click="refresh"><RefreshCw :size="16"/>{{loading ? '检查中…' : outcomeUnknown ? '重查原操作' : '重新检查'}}</button></template></PageHeader>
+    <PageHeader :eyebrow="server?.displayName" title="主机环境"><template #status><StatusLabel v-if="data" :tone="stale ? 'warning' : blockers ? 'danger' : 'success'" :label="stale ? '结果已过期' : blockers ? `${blockers} 项阻断` : '检查通过'"/></template><template #actions><button v-if="!workspace.preview.value && data?.hostId && (data.docker.engineState === 'notInstalled' || data.docker.clientVersion && (data.docker.engineState !== 'available' || !data.docker.composeVersion))" class="button" :disabled="loading || initializing || stale || dockerPreviewLoading || dockerTaskLoading || dockerTask?.status === 'queued' || dockerTask?.status === 'running'" @click="previewDockerInstall">{{dockerTask?.status === 'queued' || dockerTask?.status === 'running' ? '安装中…' : dockerPreviewLoading ? '检查中…' : data.docker.engineState === 'available' ? '修复 Compose' : data.docker.engineState === 'unavailable' ? '修复 Docker' : '安装 Docker'}}</button><button v-if="!workspace.preview.value && data && (!data.hostId || plan?.status === 'incomplete')" class="button" :disabled="loading || initializing || stale || outcomeUnknown || !canInitializeHost(data)" @click="prepareInitialization">{{initializing ? '处理中…' : plan?.status === 'incomplete' ? '查看初始化' : '初始化'}}</button><button ref="refreshButton" class="button primary" :disabled="!server || loading || initializing" @click="refresh"><RefreshCw :size="16"/>{{loading ? '检查中…' : outcomeUnknown ? '重查原操作' : '重新检查'}}</button></template></PageHeader>
     <PreviewNotice/>
-    <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul><button v-if="server" class="text-button" @click="router.push(`/hosts/${server.serverId}/connection`)">连接设置</button></div>
+    <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul><button v-if="server" class="text-button" type="button" @click="openConnection(server.serverId)">连接设置</button></div>
     <div v-if="dockerPreviewError" class="environment-error" role="alert">{{dockerPreviewError.message}}</div>
     <div v-if="dockerTaskError" class="environment-error" role="alert">{{dockerTaskError.message}}</div>
     <div v-if="loading && !data" class="empty-state" role="status">检查中…</div>
     <template v-else-if="data">
-      <SummaryBar :items="environmentSummary" label="主机环境摘要"/>
-      <div class="overview-grid">
-        <section class="section-block"><div class="section-heading"><div><h2>系统与资源</h2><p class="muted-text">主机身份、内存与磁盘</p></div></div><dl class="environment-facts"><div><dt>系统</dt><dd>{{data.os ?? data.kernel ?? '未知'}}</dd></div><div><dt>架构</dt><dd class="mono">{{data.architecture ?? '未知'}}</dd></div><div><dt>用户 UID</dt><dd class="mono">{{data.uid ?? '未知'}}</dd></div><div><dt>可用 / 总内存</dt><dd>{{formatBytes(data.memory?.availableBytes)}} / {{formatBytes(data.memory?.totalBytes)}}</dd></div><div><dt>可用 / 总磁盘</dt><dd>{{formatBytes(data.disk?.availableBytes)}} / {{formatBytes(data.disk?.totalBytes)}}</dd></div><div><dt>磁盘检查路径</dt><dd class="mono">{{data.disk?.path ?? '未知'}}</dd></div><div><dt>主机身份</dt><dd class="mono">{{data.hostId ?? '未初始化'}}</dd></div></dl></section>
-        <section class="section-block"><div class="section-heading"><div><h2>Docker</h2><p class="muted-text">引擎、Compose 与数据目录</p></div></div><dl class="environment-facts"><div><dt>客户端</dt><dd>{{data.docker.clientVersion ?? '未知'}}</dd></div><div><dt>引擎</dt><dd>{{engineLabels[data.docker.engineState]}}</dd></div><div><dt>服务端版本</dt><dd class="mono">{{data.docker.serverVersion ?? '未知'}}</dd></div><div><dt>Compose</dt><dd class="mono">{{data.docker.composeVersion ?? '未知'}}</dd></div><div><dt>数据目录</dt><dd class="mono">{{data.docker.dataRoot ?? '未知'}}</dd></div><div><dt>可用 / 总磁盘</dt><dd>{{formatBytes(data.docker.disk?.availableBytes)}} / {{formatBytes(data.docker.disk?.totalBytes)}}</dd></div></dl></section>
-      </div>
-      <section class="section-block"><div class="section-heading"><div><h2>检查结果</h2><p class="muted-text">阻断、警告与恢复建议</p></div></div><div class="environment-checks"><details v-for="check in checks" :key="`${check.code}:${check.label}`" class="environment-check"><summary><CheckCircle2 v-if="check.level === 'passed'" class="icon-success" :size="17"/><CircleX v-else-if="check.level === 'blocker'" class="icon-danger" :size="17"/><AlertTriangle v-else class="icon-warning" :size="17"/><span>{{check.label}}</span><span class="environment-check-result">{{check.message}}</span><ChevronDown v-if="check.recoverySteps.length" class="environment-check-chevron" :size="15"/></summary><ul v-if="check.recoverySteps.length"><li v-for="step in check.recoverySteps" :key="step">{{step}}</li></ul></details></div></section>
+      <section class="section-block environment-panel">
+        <div class="section-heading"><div><h2>系统与资源</h2><p class="muted-text">主机身份、内存与磁盘</p></div></div>
+        <dl class="environment-facts"><div><dt>系统</dt><dd>{{data.os ?? data.kernel ?? '未知'}}</dd></div><div><dt>架构</dt><dd class="mono">{{data.architecture ?? '未知'}}</dd></div><div><dt>用户 UID</dt><dd class="mono">{{data.uid ?? '未知'}}</dd></div><div><dt>可用 / 总内存</dt><dd>{{formatBytes(data.memory?.availableBytes)}} / {{formatBytes(data.memory?.totalBytes)}}</dd></div><div><dt>可用 / 总磁盘</dt><dd>{{formatBytes(data.disk?.availableBytes)}} / {{formatBytes(data.disk?.totalBytes)}}</dd></div><div><dt>磁盘检查路径</dt><dd class="mono">{{data.disk?.path ?? '未知'}}</dd></div><div><dt>主机身份</dt><dd class="mono">{{data.hostId ?? '未初始化'}}</dd></div></dl>
+      </section>
+      <section class="section-block environment-panel">
+        <div class="section-heading"><div><h2>Docker</h2><p class="muted-text">引擎、Compose 与数据目录</p></div></div>
+        <dl class="environment-facts"><div><dt>客户端</dt><dd>{{data.docker.clientVersion ?? '未知'}}</dd></div><div><dt>引擎</dt><dd>{{engineLabels[data.docker.engineState]}}</dd></div><div><dt>服务端版本</dt><dd class="mono">{{data.docker.serverVersion ?? '未知'}}</dd></div><div><dt>Compose</dt><dd class="mono">{{data.docker.composeVersion ?? '未知'}}</dd></div><div><dt>数据目录</dt><dd class="mono">{{data.docker.dataRoot ?? '未知'}}</dd></div></dl>
+      </section>
+      <section class="section-block">
+        <div class="section-heading"><div><h2>检查结果</h2><p class="muted-text">阻断、警告与恢复建议</p></div><span class="muted-text">{{checks.length}} 项</span></div>
+        <div class="environment-checks"><details v-for="check in checks" :key="`${check.code}:${check.label}`" class="environment-check"><summary><CheckCircle2 v-if="check.level === 'passed'" class="icon-success" :size="17"/><CircleX v-else-if="check.level === 'blocker'" class="icon-danger" :size="17"/><AlertTriangle v-else class="icon-warning" :size="17"/><span>{{check.label}}</span><span class="environment-check-result">{{check.message}}</span><ChevronDown v-if="check.recoverySteps.length" class="environment-check-chevron" :size="15"/></summary><ul v-if="check.recoverySteps.length"><li v-for="step in check.recoverySteps" :key="step">{{step}}</li></ul></details></div>
+      </section>
 <FloatingTask v-if="dockerTask && ['queued','running'].includes(dockerTask.status)" label="Docker 安装">
       <div v-if="dockerTask && ['queued','running'].includes(dockerTask.status)" class="environment-summary" role="status"><StatusLabel tone="warning" :label="dockerInstallStatusLabel(dockerTask.status)"/><span>{{dockerInstallPhaseLabel(dockerTask.phase)}}</span><span class="muted-text">{{dockerTaskLoading ? '同步中…' : ''}}</span></div>
 </FloatingTask>
@@ -81,3 +81,14 @@ async function retryDockerInstall() {
     </AppDialog>
   </div>
 </template>
+
+
+<style scoped>
+.environment-panel { padding: 18px 20px; border: 1px solid var(--border); background: var(--surface); }
+.environment-panel .environment-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; margin-top: 10px; border-top: 1px solid var(--border); }
+.environment-facts > div { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.environment-facts dt { flex: 0 0 auto; color: var(--text-tertiary); font-size: 11px; }
+.environment-facts dd { margin: 0; text-align: right; overflow-wrap: anywhere; font-size: 12px; }
+.environment-checks { border-top: 1px solid var(--border); }
+@media (max-width: 760px) { .environment-panel .environment-facts { grid-template-columns: 1fr; } }
+</style>

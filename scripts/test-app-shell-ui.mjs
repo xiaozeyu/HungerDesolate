@@ -7,7 +7,7 @@ import {resolve} from 'node:path';
 test('app shell exposes a global task center and operation bar without the update route', async () => {
   const app = await readFile(resolve(process.cwd(), 'src/App.vue'), 'utf8');
   const router = await readFile(resolve(process.cwd(), 'src/router.ts'), 'utf8');
-  const taskCenter = await readFile(resolve(process.cwd(), 'src/pages/TaskCenterPage.vue'), 'utf8');
+  const taskDrawer = await readFile(resolve(process.cwd(), 'src/components/TaskDrawer.vue'), 'utf8');
   const overview = await readFile(resolve(process.cwd(), 'src/pages/InstanceOverviewPage.vue'), 'utf8');
   const world = await readFile(resolve(process.cwd(), 'src/pages/WorldPage.vue'), 'utf8');
   const mods = await readFile(resolve(process.cwd(), 'src/pages/ModsPage.vue'), 'utf8');
@@ -30,11 +30,13 @@ test('app shell exposes a global task center and operation bar without the updat
   assert.match(app, /refreshActiveTasks/);
   assert.match(app, /任务记录/);
   assert.doesNotMatch(app, /<span v-if="activityCount" class="nav-count">/);
-  assert.match(router, /path: "\/tasks"/);
+  assert.doesNotMatch(router, /path: "\/tasks"/);
+  assert.match(app, /<TaskDrawer\/>/);
+  assert.match(taskDrawer, /sessionStartedAt/);
   assert.doesNotMatch(router, /UpdatesPage|name: "updates"/);
-  assert.match(taskCenter, /refreshActiveTasks/);
-  assert.match(taskCenter, /进行中/);
-  assert.match(taskCenter, /title="任务记录"/);
+  assert.match(taskDrawer, /refreshActiveTasks/);
+  assert.match(taskDrawer, /进行中/);
+  assert.match(taskDrawer, /任务记录/);
   assert.match(overview, /operations\.run\(/);
   assert.match(world, /operations\.run\(/);
   assert.match(world, /kind: "worldApply"/);
@@ -67,6 +69,6 @@ test('app shell exposes a global task center and operation bar without the updat
   assert.doesNotMatch(instanceOverview, /isCurrentQuery|QueryTicket/);
   assert.match(hostModsPage, /useQuery/);
   assert.doesNotMatch(hostModsPage, /loadSequence|function current/);
-  assert.match(taskCenter, /buildRows/);
+  assert.match(taskDrawer, /buildRows/);
   assert.match(world, /readWorldDraft|writeWorldDraft/);
 });

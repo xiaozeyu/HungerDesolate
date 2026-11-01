@@ -3,13 +3,16 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowLeft, Cpu, FileText, Gauge, Globe2, HardDrive, List, Monitor, Moon, Package, Server, Settings, Sun, TerminalSquare, Wrench } from "@lucide/vue";
+import { ArrowLeft, Cpu, FileText, Gauge, Globe2, HardDrive, List, Moon, Package, Server, Settings, Sun, TerminalSquare, Wrench } from "@lucide/vue";
 import { useWorkspace } from "./composables/useWorkspace";
 import { useTheme } from "./composables/useTheme";
 import { useTasks } from "./composables/useTasks";
 import { useOperations } from "./composables/useOperations";
 import { useBuildTasks } from "./composables/useBuildTasks";
+import { useTaskDrawer } from "./composables/useTaskDrawer";
 import IconButton from "./components/IconButton.vue";
+import TaskDrawer from "./components/TaskDrawer.vue";
+import ConnectionSettingsDialog from "./components/ConnectionSettingsDialog.vue";
 import { elapsedLabel, operationKindLabel, operationTargetLabel, stageLabel, taskOperationLabel, taskTargetLabel } from "./lib/operationView";
 import { refreshActiveTasks } from "./lib/taskRefresh";
 import { refreshBuildTasks } from "./lib/buildRefresh";
@@ -20,6 +23,7 @@ const workspace = useWorkspace();
 const taskStore = useTasks();
 const operations = useOperations();
 const buildTasks = useBuildTasks();
+const { openDrawer: openTaskDrawer } = useTaskDrawer();
 const { theme, toggleTheme } = useTheme();
 const activeServerId = computed(() => String(route.params.serverId ?? ""));
 const activeInstanceId = computed(() => String(route.params.instanceId ?? ""));
@@ -134,10 +138,6 @@ onUnmounted(() => {
               <Cpu :size="17"/>
               主机环境
             </button>
-            <button class="nav-item" :class="{active:route.path.endsWith('/connection')}" @click="hostRoute('connection')">
-              <Monitor :size="17"/>
-              连接设置
-            </button>
           </template>
         </div>
         <div v-else class="nav-group">
@@ -197,11 +197,13 @@ onUnmounted(() => {
             <span class="muted-text">{{activeServer ? 'SSH 已连接' : '从主机列表进入'}}</span>
           </template>
         </div>
-        <button v-if="route.path!=='/tasks'" class="text-button" type="button" @click="router.push('/tasks')">
+        <button class="text-button" type="button" @click="openTaskDrawer">
           <FileText :size="14"/>
           任务记录<span v-if="activityCount"> · {{activityCount}}</span>
         </button>
       </footer>
     </main>
+    <TaskDrawer/>
+    <ConnectionSettingsDialog/>
   </div>
 </template>

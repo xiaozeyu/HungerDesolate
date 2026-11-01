@@ -10,10 +10,12 @@ import AppDialog from "../components/AppDialog.vue";
 import ServerForm from "../components/ServerForm.vue";
 import CredentialCleanupNotice from "../components/CredentialCleanupNotice.vue";
 import { useWorkspace } from "../composables/useWorkspace";
+import { useConnectionDialog } from "../composables/useConnectionDialog";
 import type { ServerSummary } from "../types/contracts";
 
 const router = useRouter();
 const workspace = useWorkspace();
+const { openConnection } = useConnectionDialog();
 const editorOpen = ref(false);
 const saving = ref(false);
 const savedMessage = ref("");
@@ -40,8 +42,11 @@ function authLabel(host: ServerSummary) {
   return host.authKind === "key" ? "SSH 密钥" : "密码";
 }
 function openHost(host: ServerSummary) {
-  const page = workspace.preview.value || host.hostId ? "instances" : "connection";
-  void router.push(`/hosts/${host.serverId}/${page}`);
+  if (workspace.preview.value || host.hostId) {
+    void router.push(`/hosts/${host.serverId}/instances`);
+  } else {
+    openConnection(host.serverId);
+  }
 }
 async function setEditorOpen(open: boolean) {
   editorOpen.value = open;
@@ -62,7 +67,7 @@ function saved(server: ServerSummary) {
       </template>
     </PageHeader>
     <CredentialCleanupNotice/>
-    <p v-if="savedMessage" role="status" class="success-message">{{savedMessage}}<button v-if="savedServerId" class="text-button" @click="router.push(`/hosts/${savedServerId}/connection`)">配置连接</button></p>
+    <p v-if="savedMessage" role="status" class="success-message">{{savedMessage}}<button v-if="savedServerId" class="text-button" type="button" @click="openConnection(savedServerId)">配置连接</button></p>
     <div v-if="workspace.error.value" class="error-strip" role="alert">{{workspace.error.value}}</div>
     <div v-if="workspace.loading.value && !servers.length" class="empty-state" role="status"><p>读取连接记录…</p></div>
     <div v-else-if="!servers.length" class="empty-state"><Server :size="28"/><h2>还没有主机</h2><button class="button" @click="setEditorOpen(true)">添加第一台主机</button></div>
@@ -70,20 +75,19 @@ function saved(server: ServerSummary) {
       <SummaryBar :items="summaryItems" label="主机摘要"/>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>主机</th><th>地址</th><th>认证</th><th>状态</th><th>记录版本</th><th class="table-action"/></tr></thead>
+          <thead><tr><th>主机</th><th>地址</th><th>认证</th><th>状态</th><th class="table-action"/></tr></thead>
           <tbody>
             <tr v-for="host in servers" :key="host.serverId">
               <td><div class="table-primary"><Server :size="17"/><strong>{{host.displayName}}</strong></div><small class="table-sub">{{host.username}}</small></td>
               <td class="mono">{{host.host}}:{{host.sshPort}}</td>
               <td>{{authLabel(host)}}</td>
               <td><StatusLabel :tone="hostState(host).tone" :label="hostState(host).label"/></td>
-              <td class="mono">v{{host.recordVersion}}</td>
               <td class="table-action">
                 <div class="host-actions">
                   <button class="text-button" type="button" @click="openHost(host)">
                     {{workspace.preview.value || host.hostId ? "进入" : "配置连接"}} <ArrowRight :size="15"/>
                   </button>
-                  <IconButton v-if="!workspace.preview.value" :label="`编辑${host.displayName}连接`" @click="router.push(`/hosts/${host.serverId}/connection`)"><Pencil :size="16"/></IconButton>
+                  <IconButton v-if="!workspace.preview.value" :label="`编辑${host.displayName}连接`" @click="openConnection(host.serverId)"><Pencil :size="16"/></IconButton>
                 </div>
               </td>
             </tr>

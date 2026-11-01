@@ -190,6 +190,6 @@ P2：跨实例 MOD 配置复制、模板、通知、自愈与高级故障归因�
 ## 20. 2026-10-20：B4 删除与任务阶段记录
 
 - 新增 `preview_instance_delete` / `delete_instance`：预览绑定 registry revision、停止容器 ID/状态、network endpoint 和实例目录快照；执行时在 registry lock 内重验，并按 operationId 幂等。
-- 仅删除身份标签匹配的 stopped/created/exited/dead 容器和 network；运行容器、活动/待核实任务、外部 network endpoint、路径异常和计划变化均阻断。Master/Caves 世界目录有文件时要求保护备份；删除后实例目录归档到 retired，再释放端口。
+- 仅删除身份标签匹配的 stopped/created/exited/dead 容器和 network；运行容器、活动/待核实任务、外部 network endpoint、路径异常和计划变化均阻断。不要求删除前备份；删除后永久清除实例目录和备份，再释放端口。
 - 创建任务状态查询附带有界持久 journal 阶段记录。专服列表恢复 creating/createFailed 的远端任务，并可查看失败摘要、诊断和阶段时间线；不声称采集容器标准输出日志。
 - 继续创建仍未实现；真实删除需 Linux Docker 主机实测，隔离测试入口为 `scripts/test-instance-delete.py`。

@@ -238,10 +238,8 @@ def inspect_instance(request, registry):
     containers = inspect_containers(container_ids, host_id, instance_id)
     network_ids = docker_ids("network", instance_id)
     networks = inspect_networks(network_ids, host_id, instance_id, set(container_ids))
-    if any(item["status"] in ("running", "paused") for item in containers):
+    if any(item["status"] not in ("created", "exited", "dead") for item in containers):
         blockers.append("CONTAINER_RUNNING")
-    if any(item["status"] == "removing" for item in containers):
-        blockers.append("CONTAINER_REMOVING")
     instance_path = None
     data_snapshot = None
     has_files = False
@@ -261,6 +259,8 @@ def inspect_instance(request, registry):
                         or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))):
                     reject("INSTANCE_DELETE_DATA_UNSAFE")
                 relative = child.relative_to(instance_path).as_posix()
+                if relative == "locks" or relative.startswith("locks/"):
+                    continue
                 entries_snapshot.append([relative, "d" if stat.S_ISDIR(info.st_mode) else "f",
                                          info.st_size, info.st_mtime_ns])
                 has_files = has_files or stat.S_ISREG(info.st_mode)
@@ -268,11 +268,6 @@ def inspect_instance(request, registry):
                                             and (relative.startswith("data/Master/")
                                                  or relative.startswith("data/Caves/")))
             data_snapshot = hashlib.sha256(canonical(entries_snapshot)).hexdigest()
-    if world_data:
-        blockers.append("BACKUP_REQUIRED")
-    retired_path = ROOT / "retired" / instance_id
-    if retired_path.exists():
-        reject("INSTANCE_DELETE_DATA_CONFLICT")
     if registry["registryRevision"] >= MAX_REVISION:
         reject("REGISTRY_REVISION_EXHAUSTED")
     blockers = sorted(set(blockers))
@@ -283,7 +278,7 @@ def inspect_instance(request, registry):
     return {"hostId": host_id, "instanceId": instance_id,
             "registryRevision": registry["registryRevision"], "displayName": entry.get("displayName"),
             "lifecycle": entry.get("lifecycle"), "containers": containers, "networks": networks,
-            "dataPresent": has_files, "archived": has_files, "blockers": blockers,
+            "dataPresent": has_files, "archived": False, "blockers": blockers,
             "worldData": world_data,
             "allowed": not blockers, "planId": hashlib.sha256(canonical(snapshot)).hexdigest(),
             "snapshot": snapshot, "instancePath": instance_path}
@@ -307,6 +302,42 @@ def operation_digest(request):
     return operation_id, "sha256:" + hashlib.sha256(canonical(payload)).hexdigest()
 
 
+def open_delete_lock(path):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077):
+        os.close(fd)
+        reject("INSTANCE_DELETE_STATE_INVALID")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        reject("INSTANCE_DELETE_BUSY")
+    return fd
+
+
+def acquire_delete_locks(instance_id):
+    safe_directory(ROOT / "locks")
+    locks = []
+    try:
+        locks.append(open_delete_lock(ROOT / "locks" / "heavy.lock"))
+        instance = ROOT / "instances" / instance_id
+        if instance.exists():
+            safe_directory(instance)
+            locks_dir = instance / "locks"
+            if locks_dir.exists():
+                safe_directory(locks_dir)
+                locks.append(open_delete_lock(instance / "locks" / "world-config.lock"))
+                locks.append(open_delete_lock(instance / "locks" / "instance.lock"))
+        return locks
+    except Exception:
+        for fd in reversed(locks):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        raise
+
+
 def locked_operation(request, commit=False):
     if request.get("schemaVersion") != 1:
         reject("SCHEMA_UNSUPPORTED")
@@ -321,6 +352,7 @@ def locked_operation(request, commit=False):
     safe_directory(ROOT)
     safe_directory(ROOT / "locks")
     lock_fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    extra_locks = []
     try:
         lock_info = os.fstat(lock_fd)
         if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1
@@ -358,6 +390,7 @@ def locked_operation(request, commit=False):
             view.pop("snapshot")
             view.pop("instancePath")
             return view
+        extra_locks = acquire_delete_locks(instance_id)
         if request.get("typedName") != view["displayName"]:
             reject("INSTANCE_CONFIRMATION_MISMATCH")
         if request.get("planId") != view["planId"]:
@@ -366,11 +399,7 @@ def locked_operation(request, commit=False):
             reject(view["blockers"][0])
 
         for container in view["containers"]:
-            command = ["docker", "container", "rm"]
-            if container["status"] == "restarting":
-                command.append("--force")
-            command.append(container["id"])
-            docker_run(command)
+            docker_run(["docker", "container", "rm", container["id"]])
         for network in view["networks"]:
             docker_run(["docker", "network", "rm", network["id"]])
         if docker_ids("container", instance_id) or docker_ids("network", instance_id):
@@ -385,26 +414,38 @@ def locked_operation(request, commit=False):
             reject("INSTANCE_DELETE_PLAN_STALE")
 
         instance_path = view["instancePath"]
-        retired_root = ROOT / "retired"
-        if retired_root.exists():
-            safe_directory(retired_root)
+        trash_root = ROOT / "trash"
+        if trash_root.exists():
+            safe_directory(trash_root)
         else:
-            retired_root.mkdir(mode=0o700)
-        retired_path = retired_root / instance_id
-        moved = bool(view["dataPresent"] and instance_path is not None)
-        if moved:
-            os.rename(instance_path, retired_path)
-        elif instance_path is not None:
-            shutil.rmtree(instance_path)
+            trash_root.mkdir(mode=0o700)
+        trash_path = trash_root / operation_id
+        if trash_path.exists():
+            reject("INSTANCE_DELETE_STATE_INVALID")
+        trash_path.mkdir(mode=0o700)
+        moved = []
 
-        entry = next(item for item in current["instances"]
-                     if isinstance(item, dict) and item.get("instanceId") == instance_id)
-        if moved:
-            entry["lifecycle"] = "retired"
-            entry["relativePath"] = "retired/" + instance_id
-            entry.pop("pendingTaskId", None)
-        else:
-            current["instances"] = [item for item in current["instances"] if item is not entry]
+        def move_to_trash(source, name):
+            if not source.exists():
+                return
+            safe_directory(source)
+            target = trash_path / name
+            os.rename(source, target)
+            moved.append((target, source))
+
+        try:
+            if instance_path is not None:
+                move_to_trash(instance_path, "instance")
+            move_to_trash(ROOT / "backups" / instance_id, "backups")
+            move_to_trash(ROOT / "retired" / instance_id, "retired")
+        except Exception:
+            for target, source in reversed(moved):
+                os.rename(target, source)
+            shutil.rmtree(trash_path, ignore_errors=True)
+            raise
+
+        current["instances"] = [item for item in current["instances"]
+                                if not (isinstance(item, dict) and item.get("instanceId") == instance_id)]
         before = len(current["portReservations"])
         current["portReservations"] = [item for item in current["portReservations"]
                                         if not (isinstance(item, dict) and item.get("hostId") == host_id
@@ -415,7 +456,7 @@ def locked_operation(request, commit=False):
         result = {"hostId": host_id, "instanceId": instance_id,
                   "registryRevision": current["registryRevision"],
                   "releasedReservations": before - len(current["portReservations"]),
-                  "removed": True, "retired": moved,
+                  "removed": True, "retired": False,
                   "removedContainers": len(view["containers"]), "removedNetworks": len(view["networks"])}
         operations = current.setdefault("operations", [])
         if not isinstance(operations, list):
@@ -435,11 +476,17 @@ def locked_operation(request, commit=False):
                                 for item in observed.get("operations", []))
             except (OSError, Rejected, TypeError, ValueError, AttributeError):
                 pass
-            if moved and not committed:
-                os.rename(retired_path, instance_path)
+            if not committed:
+                for target, source in reversed(moved):
+                    os.rename(target, source)
+                shutil.rmtree(trash_path, ignore_errors=True)
             raise
+        shutil.rmtree(trash_path)
         return result
     finally:
+        for extra in reversed(extra_locks):
+            fcntl.flock(extra, fcntl.LOCK_UN)
+            os.close(extra)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
 

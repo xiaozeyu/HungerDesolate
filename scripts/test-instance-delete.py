@@ -110,23 +110,14 @@ class DeleteTests(unittest.TestCase):
         self.assertIn("CONTAINER_RUNNING", plan["blockers"])
         self.assertEqual(json.loads((self.root / "registry.json").read_text())["registryRevision"], 7)
 
-    def test_restarting_failed_container_is_force_removed(self):
+    def test_restarting_container_blocks_deletion_instead_of_force_remove(self):
         containers, networks = self.resources(("restarting",))
         self.mock_inventory([CONTAINER], [NETWORK], containers, networks)
         plan = MODULE.locked_operation(self.request())
-        self.assertTrue(plan["allowed"])
-        scans = iter(([CONTAINER], [], []))
-        network_scans = iter(([NETWORK], [], []))
-        with patch.object(MODULE, "docker_ids", side_effect=lambda kind, _id: next(scans if kind == "container" else network_scans)), \
-             patch.object(MODULE, "inspect_containers", side_effect=lambda ids, *_args: containers if ids else []), \
-             patch.object(MODULE, "inspect_networks", side_effect=lambda ids, *_args: networks if ids else []), \
-             patch.object(MODULE, "docker_run", return_value="") as docker_run:
-            request = self.request("delete")
-            request.update({"planId": plan["planId"], "operationId": OPERATION, "typedName": "测试专服"})
-            MODULE.locked_operation(request, commit=True)
-        self.assertEqual(docker_run.call_args_list[0].args[0], ["docker", "container", "rm", "--force", CONTAINER])
+        self.assertFalse(plan["allowed"])
+        self.assertIn("CONTAINER_RUNNING", plan["blockers"])
 
-    def test_world_data_requires_a_protection_backup_before_deletion(self):
+    def test_world_data_can_be_deleted_without_backup(self):
         world = self.root / "instances" / INSTANCE / "data" / "Master"
         world.mkdir(parents=True)
         (world / "server.ini").write_text("world data")
@@ -134,9 +125,43 @@ class DeleteTests(unittest.TestCase):
         containers, networks = self.resources()
         self.mock_inventory([CONTAINER], [NETWORK], containers, networks)
         plan = MODULE.locked_operation(self.request())
-        self.assertFalse(plan["allowed"])
+        self.assertTrue(plan["allowed"])
         self.assertTrue(plan["worldData"])
-        self.assertIn("BACKUP_REQUIRED", plan["blockers"])
+        self.assertNotIn("BACKUP_REQUIRED", plan["blockers"])
+
+    def test_world_data_and_backups_are_permanently_deleted(self):
+        world = self.root / "instances" / INSTANCE / "data" / "Master"
+        world.mkdir(parents=True)
+        (world / "server.ini").write_text("world data")
+        (world / "server.ini").chmod(0o600)
+        backup_id = "77777777-7777-4777-8777-777777777777"
+        backup = self.root / "backups" / INSTANCE / backup_id
+        backup.mkdir(parents=True, mode=0o700)
+        archive = backup / "archive.tar.gz"
+        archive.write_bytes(b"archive")
+        archive.chmod(0o600)
+        metadata = backup / "metadata.json"
+        metadata.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "instanceId": INSTANCE,
+            "backupId": backup_id, "verification": "verified", "checksum": "a" * 64,
+            "createdAt": "2026-11-01T00:00:00Z"}))
+        metadata.chmod(0o600)
+        containers, networks = self.resources()
+        self.mock_inventory([CONTAINER], [NETWORK], containers, networks)
+        plan = MODULE.locked_operation(self.request())
+        self.assertTrue(plan["allowed"])
+        container_scans = iter(([CONTAINER], [], []))
+        network_scans = iter(([NETWORK], [], []))
+        with patch.object(MODULE, "docker_ids", side_effect=lambda kind, _id: next(container_scans if kind == "container" else network_scans)), \
+             patch.object(MODULE, "inspect_containers", side_effect=lambda ids, *_args: containers if ids else []), \
+             patch.object(MODULE, "inspect_networks", side_effect=lambda ids, *_args: networks if ids else []), \
+             patch.object(MODULE, "docker_run", return_value=""):
+            request = self.request("delete")
+            request.update({"planId": plan["planId"], "operationId": OPERATION, "typedName": "测试专服"})
+            result = MODULE.locked_operation(request, commit=True)
+        self.assertFalse(result["retired"])
+        self.assertFalse((self.root / "instances" / INSTANCE).exists())
+        self.assertFalse((self.root / "backups" / INSTANCE).exists())
+        self.assertFalse((self.root / "retired" / INSTANCE).exists())
 
     def test_runtime_owned_private_files_are_safe_to_archive(self):
         data = self.root / "instances" / INSTANCE / "data" / "Master"
@@ -156,8 +181,7 @@ class DeleteTests(unittest.TestCase):
             containers, networks = self.resources()
             self.mock_inventory([CONTAINER], [NETWORK], containers, networks)
             plan = MODULE.locked_operation(self.request())
-        self.assertFalse(plan["allowed"])
-        self.assertIn("BACKUP_REQUIRED", plan["blockers"])
+        self.assertTrue(plan["allowed"])
         self.assertNotIn("INSTANCE_DELETE_DATA_UNSAFE", plan["blockers"])
 
     def test_changed_plan_is_rejected_before_docker_mutation(self):
@@ -188,7 +212,7 @@ class DeleteTests(unittest.TestCase):
             result = MODULE.locked_operation(request, commit=True)
             self.assertEqual(result["removedContainers"], 1)
             self.assertEqual(result["removedNetworks"], 1)
-            self.assertTrue(result["retired"])
+            self.assertFalse(result["retired"])
             self.assertEqual(docker_run.call_count, 2)
             repeated = MODULE.locked_operation(request, commit=True)
             changed = dict(request, typedName="其他专服")
@@ -199,9 +223,10 @@ class DeleteTests(unittest.TestCase):
         registry = json.loads((self.root / "registry.json").read_text())
         self.assertEqual(repeated, result)
         self.assertEqual(registry["registryRevision"], 8)
-        self.assertEqual(registry["instances"][0]["lifecycle"], "retired")
+        self.assertEqual(registry["instances"], [])
         self.assertEqual(registry["portReservations"], [])
-        self.assertTrue((self.root / "retired" / INSTANCE / "world.dat").exists())
+        self.assertFalse((self.root / "instances" / INSTANCE).exists())
+        self.assertFalse((self.root / "retired" / INSTANCE).exists())
         self.assertRegex(registry["operations"][-1]["payloadDigest"], r"^sha256:[0-9a-f]{64}$")
 
         # Updating the client must still replay a legacy receipt without deleting anything again.

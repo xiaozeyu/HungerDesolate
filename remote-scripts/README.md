@@ -26,7 +26,7 @@ Docker 安装预检只读 `/etc/os-release`、管理身份、dpkg/source 配置�
 
 `actions/instance-create-task.py` 负责持久任务目录、幂等 request、status、journal、systemd transient unit 和 interrupted 对账；`actions/instance-create-worker.py` 负责阶段更新并在部署兼容性未验证时返回固定 `DEPLOYMENT_VALIDATION_REQUIRED`。测试入口 `python3 scripts/test-instance-create-task.py`。
 
-`actions/instance-delete.py` 提供删除预览与确认执行：planId 绑定 registry revision、停止容器身份、网络端点和实例目录快照；执行时重新核验，只移除归属明确的停止容器/网络。Master/Caves 世界目录含文件时要求先完成保护备份；实例目录归档到 `retired`，仅在资源清除后释放端口。测试入口为 `python3 scripts/test-instance-delete.py`。
+`actions/instance-delete.py` 提供删除预览与确认执行：planId 绑定 registry revision、停止容器身份、网络端点和实例目录快照；执行时重新核验，只在容器全部停止后移除归属明确的容器/网络，并永久删除实例目录、实例备份和旧 `retired` 数据，不再保留归档、不要求删除前备份。测试入口为 `python3 scripts/test-instance-delete.py`。
 
 当前 worker 已实现实例目录树和初始 manifest 的安全发布；目录/manifest 完成后在 `download` 阶段等待已验证 release，不生成未验证的 Compose，不创建网络/卷，不启动游戏容器。
 

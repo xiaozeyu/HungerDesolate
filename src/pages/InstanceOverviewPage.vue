@@ -4,6 +4,7 @@ import { Play, Square, RotateCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import SummaryBar from "../components/SummaryBar.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import TaskPanel from "../components/TaskPanel.vue";
 import { useInstanceOverview } from "../composables/useInstanceOverview";
@@ -11,9 +12,10 @@ import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useOperations } from "../composables/useOperations";
 import { useTasks } from "../composables/useTasks";
+import { useTaskDrawer } from "../composables/useTaskDrawer";
 import { controlInstance } from "../api/instances";
 import type { UserError } from "../lib/commandError";
-import { firewallUdpPorts, hasReadyShardListeners } from "../lib/instanceRuntime";
+import { hasReadyShardListeners } from "../lib/instanceRuntime";
 import { activeContext } from "../context/activeContext";
 import { operationTargetKey, stageLabel, taskOperationLabel } from "../lib/operationView";
 const { data, error, loading, stale, refresh, pausePolling, resumePolling } = useInstanceOverview();
@@ -21,6 +23,7 @@ const { server, target } = usePageTarget();
 const workspace = useWorkspace();
 const operations = useOperations();
 const taskStore = useTasks();
+const { openDrawer: openTaskDrawer } = useTaskDrawer();
 const targetKey = computed(() => target.value ? operationTargetKey(target.value) : "");
 const instanceTasks = computed(() => {
   const selected = target.value;
@@ -52,17 +55,39 @@ onBeforeUnmount(() => { mounted = false; });
 const name = computed(() => data.value?.identity.displayName ?? "专服");
 const runtimeStatus = computed(() => data.value?.runtime?.status ?? data.value?.identity.runtimeStatus ?? "unknown");
 const runtime = computed(() => data.value?.runtime);
-const installedBuild = computed(() => runtime.value?.installedBuild ?? data.value?.identity.installedBuild ?? null);
 const shards = computed(() => runtime.value?.shards ?? []);
 const ports = computed(() => runtime.value?.ports.filter(port => port.hostPort !== null) ?? []);
-const firewallPorts = computed(() => firewallUdpPorts(runtime.value));
+const readyShards = computed(() => shards.value.filter(shard => shard.ready).length);
+const summaryItems = computed(() => [
+  { label: "运行状态", value: status.value, tone: runtimeStatus.value === "running" ? "success" as const : runtimeStatus.value === "degraded" || runtimeStatus.value === "failed" ? "danger" as const : runtimeStatus.value === "starting" || runtimeStatus.value === "stopping" ? "warning" as const : "default" as const },
+  { label: "分片就绪", value: `${readyShards.value}/${shards.value.length}`, tone: shards.value.length && readyShards.value === shards.value.length ? "success" as const : readyShards.value ? "warning" as const : "default" as const },
+  { label: "UDP 端口", value: ports.value.length },
+]);
 const shardName = (shard: "master" | "caves") => shard === "master" ? "主世界 · Master" : "洞穴 · Caves";
 const purposeName = (purpose: "game" | "steamMaster" | "steamAuth" | "shard") => ({
   game: "游戏", steamMaster: "Steam 查询", steamAuth: "Steam 认证", shard: "分片通信",
 }[purpose]);
+const containerLabel = (status: string) => ({
+  created: "已创建",
+  running: "运行中",
+  paused: "已暂停",
+  restarting: "重启中",
+  removing: "删除中",
+  exited: "已退出",
+  dead: "已终止",
+}[status] ?? "未知");
+const processLabel = (value: boolean | null) => value === true ? "运行中" : value === false ? "未运行" : "未采集";
+const shardTone = (shard: (typeof shards.value)[number]): "success" | "warning" | "danger" | "muted" =>
+  shard.ready ? "success" : shard.containerStatus === "running" && shard.processRunning !== false
+    ? "warning" : ["created", "exited", "dead"].includes(shard.containerStatus) ? "muted" : "danger";
+const shardStateLabel = (shard: (typeof shards.value)[number]) =>
+  shard.ready ? "就绪" : shard.processRunning === false ? "进程未运行" : shard.processRunning === true ? "端口未就绪" : containerLabel(shard.containerStatus);
+const shardPortLabel = (shard: (typeof shards.value)[number]) =>
+  shard.ready ? "端口就绪" : shard.missingPorts.length ? `缺少 ${shard.missingPorts.length} 个端口` : "未就绪";
 const status = computed(() => runtimeStatus.value === "running" ? "运行中"
   : runtimeStatus.value === "stopped" ? "已停止" : runtimeStatus.value === "degraded" ? "部分异常"
-  : runtimeStatus.value === "starting" ? "启动中" : "未知");
+  : runtimeStatus.value === "starting" ? "启动中" : runtimeStatus.value === "stopping" ? "停止中"
+  : runtimeStatus.value === "failed" ? "启动失败" : "未知");
 const canStart = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
   && !workspace.preview.value && !loading.value && !runtimeAction.value && runtimeStatus.value !== "running");
 const canStop = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
@@ -160,97 +185,29 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
       <div v-if="error && stale" class="error-strip" role="status">
         运行状态刷新失败，当前显示上次采集结果：{{error}}
       </div>
-      <section class="identity-strip">
-        <div>
-          <span class="label">
-            实例身份
-          </span>
-          <strong class="mono identity-value">
-            {{data.identity.instanceId}}
-          </strong>
+      <SummaryBar :items="summaryItems" label="运行摘要"/>
+      <section class="section-block shard-section">
+        <div class="section-heading">
+          <div><h2>分片状态</h2><p class="muted-text">容器、进程与 UDP 端口就绪情况</p></div>
+          <StatusLabel :tone="stale ? 'warning' : shards.length && readyShards === shards.length ? 'success' : 'warning'" :label="stale ? '状态可能已过期' : `${readyShards}/${shards.length} 就绪`"/>
         </div>
-        <div>
-          <span class="label">
-            实际版本
-          </span>
-          <strong class="mono">
-            {{installedBuild ?? '未知'}}
-          </strong>
+        <div v-if="shards.length" class="shard-grid">
+          <article v-for="shard in shards" :key="shard.shard" class="shard-card" :class="`tone-${shardTone(shard)}`">
+            <header>
+              <div><span class="label">{{ shardName(shard.shard) }}</span><strong>{{ shard.ready ? "已就绪" : containerLabel(shard.containerStatus) }}</strong></div>
+              <StatusLabel :tone="shardTone(shard)" :label="shardStateLabel(shard)"/>
+            </header>
+            <dl class="shard-facts">
+              <div><dt>容器</dt><dd>{{ containerLabel(shard.containerStatus) }}</dd></div>
+              <div><dt>游戏进程</dt><dd>{{ processLabel(shard.processRunning) }}</dd></div>
+              <div><dt>端口</dt><dd>{{ shardPortLabel(shard) }}</dd></div>
+              <div><dt>DST 版本</dt><dd class="mono">{{ shard.installedBuild ?? "未采集" }}</dd></div>
+            </dl>
+            <p v-if="shard.missingPorts.length" class="shard-warning">缺少 UDP {{ shard.missingPorts.join("、") }}</p>
+          </article>
         </div>
-        <StatusLabel :tone="stale?'warning':runtimeStatus==='running'?'success':runtimeStatus==='degraded'?'danger':'muted'"
-          :label="stale?'状态可能已过期':status"/>
+        <p v-else class="muted-text">尚未采集分片运行状态</p>
       </section>
-      <div class="overview-grid">
-        <section class="section-block">
-          <div class="section-heading">
-            <div>
-              <h2>
-                分片状态
-              </h2>
-            </div>
-          </div>
-          <div class="shard-list">
-            <div v-for="shard in shards" :key="shard.shard" class="shard-row">
-              <div>
-                <strong>{{shardName(shard.shard)}}</strong>
-                <small class="mono">DST {{shard.installedBuild ?? '版本未采集'}}</small>
-              </div>
-              <StatusLabel :tone="shard.ready?'success':shard.processRunning?'warning':'muted'"
-                :label="shard.ready?'进程与端口就绪':shard.processRunning?'进程运行中，端口未就绪':shard.containerStatus"/>
-            </div>
-            <p v-if="!shards.length" class="muted-text">尚未采集分片运行状态</p>
-          </div>
-        </section>
-        <section class="section-block">
-          <div class="section-heading">
-            <div>
-              <h2>
-                部署状态
-              </h2>
-            </div>
-          </div>
-          <div class="fact-list">
-            <div>
-              <span>
-                DST 版本
-              </span>
-              <strong class="mono">
-                {{installedBuild ?? '未知'}}
-              </strong>
-            </div>
-            <div>
-              <span>版本来源</span>
-              <strong>{{runtime?.buildSource==='containerFile'?'容器实际版本':runtime?.buildSource==='releaseMetadata'?'Release 元数据':'未采集'}}</strong>
-            </div>
-            <div>
-              <span>
-                MOD 发布
-              </span>
-              <StatusLabel tone="muted" label="未核实"/>
-            </div>
-            <div>
-              <span>
-                最近备份
-              </span>
-              <strong>
-                未采集
-              </strong>
-            </div>
-            <div>
-              <span>
-                配置版本
-              </span>
-              <strong>
-                {{data.manifestSummary?.configRevision ?? '未采集'}}
-              </strong>
-            </div>
-            <div>
-              <span>防火墙 UDP</span>
-              <strong class="mono">{{firewallPorts.length ? firewallPorts.join('、') : '未采集'}}</strong>
-            </div>
-          </div>
-        </section>
-      </div>
       <section class="section-block">
         <div class="section-heading">
           <div><h2>UDP 端口</h2></div>
@@ -275,9 +232,28 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
     <TaskPanel v-if="visibleTask" :title="taskOperationLabel(visibleTask.operation)" :status-label="taskStatusText"
       :stage-label="stageLabel(visibleTask.stage)" :tone="taskTone" :queue-position="visibleTask.queuePosition"
       :error="visibleTask.error">
-      <template #actions><RouterLink class="text-button" to="/tasks">任务记录</RouterLink></template>
+      <template #actions><button class="text-button" type="button" @click="openTaskDrawer">任务记录</button></template>
     </TaskPanel>
 </FloatingTask>
     </template>
   </div>
 </template>
+
+
+<style scoped>
+.shard-section { margin-bottom: 38px; }
+.shard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.shard-card { border: 1px solid var(--border); border-top: 2px solid var(--text-tertiary); padding: 16px 18px 14px; background: var(--surface); }
+.shard-card.tone-success { border-top-color: var(--success); }
+.shard-card.tone-warning { border-top-color: var(--warning); }
+.shard-card.tone-danger { border-top-color: var(--danger); }
+.shard-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.shard-card header > div { display: flex; flex-direction: column; gap: 4px; }
+.shard-card header strong { font-size: 15px; font-weight: 500; }
+.shard-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--border); }
+.shard-facts div { min-width: 0; }
+.shard-facts dt { color: var(--text-tertiary); font-size: 10px; letter-spacing: .04em; }
+.shard-facts dd { margin: 3px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.shard-warning { margin: 12px 0 0; color: var(--warning); font-size: 11px; }
+@media (max-width: 760px) { .shard-grid { grid-template-columns: 1fr; } }
+</style>

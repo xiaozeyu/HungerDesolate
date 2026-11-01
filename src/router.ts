@@ -8,7 +8,6 @@ import HostsPage from "./pages/HostsPage.vue";
 import InstanceListPage from "./pages/InstanceListPage.vue";
 import HostEnvironmentPage from "./pages/HostEnvironmentPage.vue";
 import HostModsPage from "./pages/HostModsPage.vue";
-import ConnectionSettingsPage from "./pages/ConnectionSettingsPage.vue";
 import ReleaseManagementPage from "./pages/ReleaseManagementPage.vue";
 import InstanceOverviewPage from "./pages/InstanceOverviewPage.vue";
 import WorldPage from "./pages/WorldPage.vue";
@@ -16,7 +15,6 @@ import ModsPage from "./pages/ModsPage.vue";
 import BackupsPage from "./pages/BackupsPage.vue";
 import DiagnosticsPage from "./pages/DiagnosticsPage.vue";
 import SettingsPage from "./pages/SettingsPage.vue";
-import TaskCenterPage from "./pages/TaskCenterPage.vue";
 export const router = createRouter({
     history: createWebHashHistory(),
     routes: [
@@ -25,7 +23,6 @@ export const router = createRouter({
         { path: "/hosts/:serverId/instances", component: InstanceListPage, meta: { title: "专服列表" } },
         { path: "/hosts/:serverId/mods", component: HostModsPage, meta: { title: "主机 MOD 库" } },
         { path: "/hosts/:serverId/environment", component: HostEnvironmentPage, meta: { title: "主机环境" } },
-        { path: "/hosts/:serverId/connection", component: ConnectionSettingsPage, meta: { title: "连接设置" } },
         { path: "/hosts/:serverId/releases", component: ReleaseManagementPage, meta: { title: "Release 管理" } },
         ...[
             { name: "overview", title: "概览", component: InstanceOverviewPage },
@@ -34,7 +31,6 @@ export const router = createRouter({
             { name: "backups", title: "备份", component: BackupsPage },
             { name: "diagnostics", title: "诊断", component: DiagnosticsPage },
         ].map(page => ({ path: `/hosts/:serverId/instances/:instanceId/${page.name}`, component: page.component, meta: { title: page.title } })),
-        { path: "/tasks", component: TaskCenterPage, meta: { title: "任务记录" } },
         { path: "/settings", component: SettingsPage, meta: { title: "应用设置" } },
         { path: "/:pathMatch(.*)*", redirect: "/hosts" },
     ],

@@ -283,7 +283,7 @@ planId 在远端记录，绑定目标、规范化输入、revision、环境证�
 | set_instance_autostart / setInstanceAutostart | T/InstanceTarget | enabled、expectedRevision、operationId | 保存策略、更新容器策略并验证 |
 | rename_instance / renameInstance | M/InstanceTarget | displayName、expectedRevision、operationId | revision 增加；ID/目录/项目不改 |
 | preview_instance_delete / previewInstanceDelete | P/InstanceTarget | expectedRecordVersion、expectedRegistryRevision | 核对容器/网络归属与状态、待执行任务、世界数据和归档目标，返回绑定快照的 planId |
-| delete_instance / deleteInstance | T/InstanceTarget | planId、typedName、expectedRecordVersion、expectedRegistryRevision、operationId | 二次核对后移除已停止且身份匹配的容器/网络；有世界文件时阻断并要求保护备份；其余实例目录归档到 retired，再释放端口 |
+| delete_instance / deleteInstance | T/InstanceTarget | planId、typedName、expectedRecordVersion、expectedRegistryRevision、operationId | 二次核对后仅在容器全部停止时移除身份匹配的容器/网络；永久删除实例目录与备份，不保留 retired 归档，再释放端口 |
 
 CreateInput：displayName、autostart、startAfterCreate（当前 UI 固定为 false，不提供会误导的创建后启动）、portPolicy(auto)、cavesEnabled。`cavesEnabled` 是容器拓扑字段，决定 Master/Caves 服务和完整端口计划；gameMode、maxPlayers、pvp、description 与 Token 属于容器环境完成后的世界配置，不进入创建容器预览 DTO。首期固定公网路线，创建请求不接收 networkMode。世界配置通过 `save_world_config`/`apply_world_config` 处理，人数范围以阶段 0 确认的 DST 支持范围固化。
 
@@ -550,7 +550,7 @@ interface InstanceCreationResult {
 
 无容器专服提供专用 `cleanup_orphan_instance` 确认命令：远端 registry lock 内重查任务、受管容器和网络后才允许移出活动列表并释放端口；空目录会移除，目录内有文件时整体移入 `retired/<instanceId>` 保留。它不执行备份，也不替代正常运行实例的 `preview_instance_delete/delete_instance`。
 
-`delete_instance` 只按 hostId/instanceId/schema 标签处理资源；不执行宽泛的 `compose down`、`prune` 或删镜像。预览计划绑定注册版本、容器状态/ID、网络端点和实例目录快照；执行时任一变化都要求重新预览。运行中的容器、活动或待核实任务、资源标签不匹配、归档冲突均阻断。世界数据目录存在文件时须先有保护备份；不含世界数据时移除容器与网络并将实例目录整体归档到 retired，最后才释放端口。operationId 重放返回原删除结果。
+`delete_instance` 只按 hostId/instanceId/schema 标签处理资源；不执行宽泛的 `compose down`、`prune` 或删镜像。预览计划绑定注册版本、容器状态/ID、网络端点和实例目录快照；执行时任一变化都要求重新预览。容器未全部停止、活动或待核实任务、资源标签不匹配均阻断。确认后永久删除实例目录、实例备份和旧 `retired` 数据，不保留归档，不要求删除前备份；最后才释放端口。operationId 重放返回原删除结果。
 
 创建任务的 `journal` 只包含持久化阶段变更，不代表容器 stdout/stderr。Compose/Docker 校验诊断按错误详情单独返回并限长；不读取或保存完整游戏日志。
 

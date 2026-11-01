@@ -527,14 +527,14 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
           <div class="world-option-pane">
             <div class="world-option-heading"><h3>{{ activeGroupLabel }}</h3><span>{{ selectedGroupOptions.length }} 项</span></div>
             <div class="world-option-list">
-              <label v-for="item in selectedGroupOptions" :key="item.key" class="world-option-row">
+              <div v-for="item in selectedGroupOptions" :key="item.key" class="world-option-row">
                 <span>{{ item.label }}</span>
                 <div class="world-field-control">
                   <AppSelect :model-value="optionValue(draft.worldgen[selectedShard],item,selectedShard)"
                     :options="optionValuesForShard(item,selectedShard)" :label="item.label"
                     @update:model-value="changeWorldOption(item.key,$event)"/>
                 </div>
-              </label>
+              </div>
             </div>
           </div>
         </div>

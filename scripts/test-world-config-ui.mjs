@@ -18,4 +18,7 @@ test('world save-and-apply submits one check-and-apply call without a preview di
   assert.match(page, /applyBlockerLabel\(code\)/);
   assert.match(page, /result\.warnings/);
   assert.match(page, /保存并应用/);
+  assert.doesNotMatch(page, /<label[^>]*class="world-option-row"/);
+  assert.match(page, /<div v-for="item in selectedGroupOptions"[^>]*class="world-option-row"/);
+  assert.match(page, /<AppSelect :model-value="optionValue/);
 });

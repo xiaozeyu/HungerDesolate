@@ -41,6 +41,7 @@ class BuildCacheTests(unittest.TestCase):
         if arguments[:2] == ["system", "df"]:
             return json.dumps({"Type": "Build Cache", "Size": "1.2GB", "Reclaimable": "900MB"}) + "\n"
         if arguments[:2] == ["builder", "prune"]:
+            assert arguments == ["builder", "prune", "--all", "-f"]
             return "Total:\t0B\n"
         raise AssertionError(arguments)
 
@@ -62,6 +63,7 @@ class BuildCacheTests(unittest.TestCase):
         self.assertFalse(self.context.exists())
         self.assertGreater(data["contextBytes"], 0)
         self.assertIn("Total", data["dockerOutput"])
+        self.assertEqual(data["dockerCache"]["size"], "1.2GB")
 
 
 if __name__ == "__main__":

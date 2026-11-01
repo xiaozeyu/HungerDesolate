@@ -2,7 +2,7 @@ import type { HostTarget, InstanceTarget, ServerSummary, TaskSnapshot } from "..
 
 export type OperationKind =
   | "start" | "stop" | "restart" | "worldApply"
-  | "instanceDelete" | "releaseVerify" | "hostInitialize";
+  | "instanceDelete" | "releaseVerify" | "hostInitialize" | "buildCacheCleanup";
 
 export type OperationTarget = HostTarget | InstanceTarget;
 
@@ -14,6 +14,7 @@ const operationLabels: Record<OperationKind, string> = {
   instanceDelete: "删除专服",
   releaseVerify: "验证 Release",
   hostInitialize: "初始化主机",
+  buildCacheCleanup: "清理构建缓存",
 };
 
 const taskLabels: Record<string, string> = {

@@ -29,7 +29,7 @@ test('creation form submits check-and-create in one step', async()=>{
   assert.match(api,/create_instance/);
   assert.match(releases,/verifyInstanceReleaseBase/);
   assert.match(releases,/verifyInstanceReleaseRuntime/);
-  assert.match(releases,/可用于创建/);
+  assert.match(releases,/已通过/);
   assert.match(releases,/previewInstanceReleaseDelete/);
   assert.match(releases,/deleteInstanceRelease/);
   assert.match(releases,/输入 DST 版本确认/);

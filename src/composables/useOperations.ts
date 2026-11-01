@@ -17,6 +17,7 @@ export interface OperationEntry {
   startedAt: number;
   finishedAt: number | null;
   error: UserError | null;
+  detail?: string | null;
 }
 
 export interface OperationOutcome<T> {
@@ -78,6 +79,7 @@ export function useOperations() {
     title: string;
     stage: string;
     work: (setStage: (stage: string) => void) => Promise<T>;
+    completeStage?: string | ((result: T) => string);
   }): Promise<OperationOutcome<T>> {
     const id = crypto.randomUUID();
     const targetKey = operationTargetKey(options.target);
@@ -95,7 +97,8 @@ export function useOperations() {
     });
     try {
       const result = await options.work(stage => patch(id, { stage }));
-      patch(id, { status: "succeeded", stage: "已完成", finishedAt: Date.now() });
+      const detail = typeof options.completeStage === "function" ? options.completeStage(result) : options.completeStage;
+      patch(id, { status: "succeeded", stage: "已完成", detail: detail ?? null, finishedAt: Date.now() });
       invalidateForOperation(options.target);
       return { result, error: null };
     } catch (cause) {

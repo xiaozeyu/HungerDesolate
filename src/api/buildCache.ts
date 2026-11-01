@@ -23,6 +23,7 @@ export interface BuildCacheCleanup {
   capturedAt: string;
   contextBytes: number;
   dockerOutput: string;
+  dockerCache: { size: string | null; reclaimable: string | null };
 }
 
 export function previewBuildCache(request: {

@@ -54,6 +54,9 @@ if ! flock -n 9; then
     echo 'FAMINE_BUILD_FAILED:1' >&2
     exit 1
 fi
+# Docker children inherit fd 9; release the lock explicitly on exit so a
+# successful build cannot leave the cache-cleanup lock permanently busy.
+trap 'flock -u 9 2>/dev/null || true' EXIT
 
 echo "==> 准备构建目录"
 mkdir -p "$BUILD_DIR"
@@ -74,10 +77,10 @@ IMAGE_NAME="hungerdesolate/dst-runtime"
 BUILD_TAG="release-${RELEASE_ID}"
 
 echo '==> 准备 Debian 基础镜像'
-bash "${SCRIPT_DIR}/actions/prepare-base-image.sh"
+bash "${SCRIPT_DIR}/actions/prepare-base-image.sh" 9>&-
 
 echo '==> 开始构建 Docker 镜像'
-DOCKER_BUILDKIT=1 docker build \
+DOCKER_BUILDKIT=1 docker build 9>&- \
     --platform linux/amd64 \
     --build-arg "STEAMCMD_BOOTSTRAP_DEADLINE=${STEAMCMD_BOOTSTRAP_DEADLINE}" \
     --build-arg "STEAMCMD_DOWNLOAD_DEADLINE=${STEAMCMD_DOWNLOAD_DEADLINE}" \
@@ -94,11 +97,11 @@ if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
 fi
 
 echo "==> 验证固定 SteamCMD Workshop 获取能力"
-docker run --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
+docker run 9>&- --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
     -ec 'test -x /usr/local/bin/famine-workshop-fetch && test -s /srv/capabilities/workshop-fetch && grep -Fxq steamcmd-workshop-v1 /srv/capabilities/workshop-fetch'
 
 echo "==> 提取 DST build 版本"
-DST_BUILD=$(docker run --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
+DST_BUILD=$(docker run 9>&- --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
     -ec 'cat /srv/dst/version.txt')
 if ! [[ "$DST_BUILD" =~ ^[0-9]+$ ]]; then
     echo 'DST_BUILD_INVALID: version.txt must contain a numeric DST build' >&2
@@ -151,7 +154,7 @@ echo "==> 登记 Release 到主机 catalog（等待运行时验证）"
 sudo chown root:root "${STAGING_DIR}/${RELEASE_ID}" "${STAGING_DIR}/${RELEASE_ID}/release-metadata.json"
 sudo chmod 700 "${STAGING_DIR}/${RELEASE_ID}"
 sudo chmod 600 "${STAGING_DIR}/${RELEASE_ID}/release-metadata.json"
-sudo python3 -I "${SCRIPT_DIR}/actions/register-built-release.py" "${RELEASE_ID}"
+sudo python3 -I "${SCRIPT_DIR}/actions/register-built-release.py" "${RELEASE_ID}" 9>&-
 
 echo "==> 镜像构建完成"
 echo "Release ID: ${RELEASE_ID}"
@@ -161,4 +164,5 @@ echo "DST Build: ${DST_BUILD}"
 echo "Metadata: ${STAGING_DIR}/${RELEASE_ID}/release-metadata.json"
 echo ""
 echo "镜像已保存到 Docker，可以直接使用"
+flock -u 9 2>/dev/null || true
 echo 'FAMINE_BUILD_COMPLETED'

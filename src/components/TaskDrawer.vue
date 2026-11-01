@@ -49,7 +49,7 @@ const operationRows = computed<Row[]>(() => operations.all.value.map(operation =
   id: `op-${operation.id}`,
   title: operation.title || operationKindLabel(operation.kind),
   target: displayTarget(operation.target),
-  stage: operation.stage,
+  stage: operation.detail ?? operation.stage,
   status: operation.status,
   startedAt: operation.startedAt,
   finishedAt: operation.finishedAt,

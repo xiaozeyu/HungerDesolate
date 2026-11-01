@@ -151,11 +151,13 @@ def cleanup(request):
         if CONTEXT.exists():
             import shutil
             shutil.rmtree(CONTEXT)
-        output = docker(["builder", "prune", "-f"])
+        output = docker(["builder", "prune", "--all", "-f"], timeout=300)
+        cache = docker_cache()
         return {"schemaVersion": 1, "requestId": request["requestId"],
                 "serverId": request["serverId"], "hostId": request["hostId"],
                 "recordVersion": request.get("expectedRecordVersion"), "capturedAt": now(),
-                "contextBytes": context_bytes, "dockerOutput": output[-4096:]}
+                "contextBytes": context_bytes, "dockerOutput": output[-4096:],
+                "dockerCache": cache}
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)

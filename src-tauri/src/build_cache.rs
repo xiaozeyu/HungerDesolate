@@ -62,6 +62,7 @@ pub struct CleanupResponse {
     pub captured_at: String,
     pub context_bytes: u64,
     pub docker_output: String,
+    pub docker_cache: DockerCache,
 }
 
 fn error(code: &'static str, message: &'static str) -> Box<CommandError> {

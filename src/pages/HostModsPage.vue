@@ -14,9 +14,9 @@ import { cancelHostModTask, deleteHostMod, listHostMods, prepareHostMods, type H
 import { listInstances } from "../api/instances";
 import { listInstanceMods, saveInstanceMods } from "../api/mods";
 import { createSerialQueue } from "../lib/serialQueue";
-import { getWorkshopMetadata } from "../api/workshop";
+import { getWorkshopCollection, getWorkshopMetadata } from "../api/workshop";
 import type { WorkshopItem } from "../types/workshop";
-import { normalizeWorkshopIds } from "../lib/workshopInput";
+import { normalizeWorkshopCollection, normalizeWorkshopIds } from "../lib/workshopInput";
 import { describeError } from "../lib/commandError";
 import { useQuery } from "../lib/queryClient";
 import { formatBytes } from "../lib/environmentView";
@@ -73,12 +73,21 @@ const cancelBusy = ref(false);
 const cancelMessage = ref("");
 const refresh = libraryQuery.refresh;
 const addOpen = ref(false);
+const addMode = ref<"manual" | "collection">("manual");
 const workshopInput = ref("");
+const collectionInput = ref("");
+const collectionTitle = ref("");
+const collectionSelection = ref<Set<string>>(new Set());
 const queryBusy = ref(false);
 const queryError = ref("");
 const candidates = ref<WorkshopItem[]>([]);
 const isHostModPresent = (item: WorkshopItem) => items.value.some(entry => entry.workshopId === item.workshopId);
 const addingWorkshopId = ref<string | null>(null);
+const importingCollection = ref(false);
+const selectableCandidates = computed(() => candidates.value.filter(item => item.result === 1 && !isHostModPresent(item)));
+const selectedCollectionItems = computed(() => selectableCandidates.value.filter(item => collectionSelection.value.has(item.workshopId)));
+const allCandidatesSelected = computed(() => selectableCandidates.value.length > 0
+  && selectableCandidates.value.every(item => collectionSelection.value.has(item.workshopId)));
 const task = computed<TaskSnapshot | null>(() => {
   const selected = target.value;
   if (!selected) return null;
@@ -128,6 +137,109 @@ async function query() {
   }
 }
 
+function setAddMode(mode: "manual" | "collection") {
+  addMode.value = mode;
+  candidates.value = [];
+  queryError.value = "";
+  collectionTitle.value = "";
+  collectionSelection.value = new Set();
+}
+
+async function loadCollection() {
+  const connection = server.value;
+  const hostTarget = target.value;
+  if (!connection || !hostTarget || queryBusy.value) return;
+  const parsed = normalizeWorkshopCollection(collectionInput.value);
+  if (parsed.error || !parsed.id) { queryError.value = parsed.error ?? "请输入 Steam 合集链接"; return; }
+  const collectionId = parsed.id;
+  queryBusy.value = true;
+  queryError.value = "";
+  candidates.value = [];
+  collectionTitle.value = "";
+  collectionSelection.value = new Set();
+  try {
+    const collectionRequestId = crypto.randomUUID();
+    const collection = await getWorkshopCollection({ schemaVersion: 1, requestId: collectionRequestId, collectionId });
+    if (collection.requestId !== collectionRequestId || collection.collectionId !== collectionId) throw new Error("合集查询响应身份不匹配");
+    if (!collection.children.length) throw new Error("合集里没有可导入的 MOD");
+    if (server.value?.serverId !== connection.serverId || server.value.hostId !== connection.hostId
+        || server.value.recordVersion !== connection.recordVersion) throw new Error("主机连接已变化，已停止查询合集");
+    const ids = [...new Set([collectionId, ...collection.children])];
+    const fetched = new Map<string, WorkshopItem>();
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const requestId = crypto.randomUUID();
+      const response = await getWorkshopMetadata({ schemaVersion: 1, requestId,
+        serverId: connection.serverId, expectedRecordVersion: connection.recordVersion,
+        workshopIds: ids.slice(offset, offset + 100) });
+      if (response.requestId !== requestId || response.serverId !== connection.serverId
+          || response.recordVersion !== connection.recordVersion) throw new Error("Workshop 查询响应身份不匹配");
+      if (server.value?.serverId !== connection.serverId || server.value.hostId !== connection.hostId
+          || server.value.recordVersion !== connection.recordVersion) throw new Error("主机连接已变化，已停止查询合集");
+      for (const item of response.items) fetched.set(item.workshopId, item);
+    }
+    collectionTitle.value = fetched.get(collectionId)?.title ?? `合集 ${collectionId}`;
+    const childIds = ids.filter(id => id !== collectionId);
+    if (!childIds.length) throw new Error("合集里没有可导入的 MOD");
+    candidates.value = childIds.map(id => fetched.get(id) ?? {
+      workshopId: id, result: 0, title: null, description: null, creatorSteamId: null,
+      author: null, creatorAppId: null, consumerAppId: null, timeCreated: null,
+      timeUpdated: null, fileSize: null, previewUrl: null, contentHandle: null,
+    });
+  } catch (cause) {
+    queryError.value = describeError(cause).message;
+  } finally {
+    queryBusy.value = false;
+  }
+}
+
+function toggleCollectionItem(id: string) {
+  if (!selectableCandidates.value.some(item => item.workshopId === id)) return;
+  const next = new Set(collectionSelection.value);
+  if (next.has(id)) next.delete(id);
+  else if (next.size >= 50) { queryError.value = "一次最多导入 50 个 MOD"; return; }
+  else next.add(id);
+  collectionSelection.value = next;
+}
+
+function toggleAllCollectionItems() {
+  if (allCandidatesSelected.value) {
+    collectionSelection.value = new Set();
+    return;
+  }
+  const eligible = selectableCandidates.value;
+  if (eligible.length > 50) queryError.value = "合集超过 50 个可用 MOD，已选择前 50 个";
+  collectionSelection.value = new Set(eligible.slice(0, 50).map(item => item.workshopId));
+}
+
+async function importCollection() {
+  const connection = server.value;
+  const hostTarget = target.value;
+  const selected = selectedCollectionItems.value;
+  if (!connection || !hostTarget || importingCollection.value || !selected.length) return;
+  if (selected.length > 50) { queryError.value = "一次最多导入 50 个 MOD"; return; }
+  importingCollection.value = true;
+  queryError.value = "";
+  try {
+    const operationId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const metadata = Object.fromEntries(selected.map(item => [item.workshopId, {
+      name: item.title, author: item.author, previewUrl: item.previewUrl,
+    }]));
+    const response = await prepareHostMods({ schemaVersion: 1, requestId, target: hostTarget,
+      expectedRecordVersion: connection.recordVersion, operationId,
+      workshopIds: selected.map(item => item.workshopId), metadata });
+    if (response.requestId !== requestId || response.task.operationId !== operationId) throw new Error("主机 MOD 准备响应身份不匹配");
+    taskStore.receive(response.task);
+    addOpen.value = false;
+    candidates.value = [];
+    collectionSelection.value = new Set();
+  } catch (cause) {
+    queryError.value = describeError(cause).message;
+  } finally {
+    importingCollection.value = false;
+  }
+}
+
 async function addCandidate(item: WorkshopItem) {
   const connection = server.value;
   const hostTarget = target.value;
@@ -142,6 +254,8 @@ async function addCandidate(item: WorkshopItem) {
       metadata: { [item.workshopId]: { name: item.title, author: item.author, previewUrl: item.previewUrl } } });
     if (response.requestId !== requestId || response.task.operationId !== operationId) throw new Error("主机 MOD 准备响应身份不匹配");
     taskStore.receive(response.task);
+    addOpen.value = false;
+    candidates.value = [];
   } catch (cause) {
     queryError.value = describeError(cause).message;
   } finally {
@@ -333,6 +447,10 @@ watch(task, async (next, previous) => {
 
 function openAdd() {
   workshopInput.value = "";
+  collectionInput.value = "";
+  addMode.value = "manual";
+  collectionTitle.value = "";
+  collectionSelection.value = new Set();
   candidates.value = [];
   queryError.value = "";
   addOpen.value = true;
@@ -343,7 +461,8 @@ watch([() => server.value?.serverId, () => server.value?.recordVersion, () => wo
   cancelMessage.value = "";
   deleteTarget.value = null;
 }, { immediate: true });
-watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
+watch(workshopInput, () => { if (addMode.value === 'manual') { candidates.value = []; queryError.value = ""; } });
+watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.value = []; collectionTitle.value = ""; collectionSelection.value = new Set(); queryError.value = ""; } });
 </script>
 
 <template>
@@ -405,35 +524,56 @@ watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
 </FloatingTask>
-    <AppDialog v-model:open="addOpen" title="添加主机 MOD">
-      <div class="form-field">
+    <AppDialog v-model:open="addOpen" title="添加主机 MOD" size="lg">
+      <div class="add-mod-tabs" role="tablist" aria-label="添加方式">
+        <button type="button" :class="{ active: addMode === 'manual' }" @click="setAddMode('manual')">手动输入</button>
+        <button type="button" :class="{ active: addMode === 'collection' }" @click="setAddMode('collection')">从合集导入</button>
+      </div>
+      <div v-if="addMode === 'manual'" class="form-field">
         <label for="host-mod-input">Workshop ID 或链接</label>
         <textarea id="host-mod-input" v-model="workshopInput" rows="3" placeholder="每行一个 ID 或链接" @keydown.ctrl.enter="query" />
       </div>
-      <div v-if="queryError" class="error-strip">{{ queryError }}</div>
-      <div v-if="queryBusy" class="muted-text" role="status">正在查询 Workshop…</div>
-      <div v-else-if="candidates.length" class="table-wrap">
-        <table>
-          <thead><tr><th>图片</th><th>条目</th><th>作者</th><th>状态</th><th class="table-action">操作</th></tr></thead>
-          <tbody>
-            <tr v-for="item in candidates" :key="item.workshopId">
-              <td><img v-if="item.previewUrl" class="workshop-thumbnail" :src="item.previewUrl" :alt="item.title ?? item.workshopId" loading="lazy" /><span v-else class="muted-text">无图</span></td>
-              <td><strong>{{ item.title ?? item.workshopId }}</strong><small class="table-sub mono">{{ item.workshopId }}</small></td>
-              <td>{{ item.author ?? item.creatorSteamId ?? "未知" }}</td>
-              <td><StatusLabel :tone="item.result !== 1 ? 'danger' : isHostModPresent(item) ? 'muted' : 'success'" :label="item.result !== 1 ? '不可用' : isHostModPresent(item) ? '已在主机库' : '可添加'" /></td>
-              <td class="table-action">
-                <button class="button button-compact primary" :disabled="addingWorkshopId !== null || item.result !== 1 || isHostModPresent(item)" @click="addCandidate(item)">
-                  {{ isHostModPresent(item) ? "已在主机库" : addingWorkshopId === item.workshopId ? "添加中…" : "添加到主机库" }}
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div v-else class="form-field">
+        <label for="host-mod-collection">Steam 合集链接或 ID</label>
+        <input id="host-mod-collection" v-model="collectionInput" type="text" placeholder="https://steamcommunity.com/sharedfiles/filedetails/?id=..." @keydown.enter="loadCollection"/>
       </div>
+      <div v-if="queryError" class="error-strip" role="alert">{{ queryError }}</div>
+      <div v-if="queryBusy" class="muted-text" role="status">{{ addMode === 'collection' ? "正在读取合集…" : "正在查询 Workshop…" }}</div>
+      <template v-else-if="candidates.length">
+        <div v-if="addMode === 'collection'" class="collection-toolbar">
+          <div><strong>{{ collectionTitle }}</strong><span class="muted-text">{{ candidates.length }} 项</span></div>
+          <div class="collection-selection">
+            <button class="text-button" type="button" :disabled="!selectableCandidates.length" @click="toggleAllCollectionItems">{{ allCandidatesSelected ? "取消全选" : "全选可导入" }}</button>
+            <span class="muted-text">已选 {{ collectionSelection.size }} / 50</span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th v-if="addMode === 'collection'" class="collection-check"/><th>图片</th><th>条目</th><th>作者</th><th v-if="addMode === 'collection'">大小</th><th>状态</th><th v-if="addMode === 'manual'" class="table-action">操作</th></tr></thead>
+            <tbody>
+              <tr v-for="item in candidates" :key="item.workshopId">
+                <td v-if="addMode === 'collection'" class="collection-check"><input type="checkbox" :checked="collectionSelection.has(item.workshopId)" :disabled="item.result !== 1 || isHostModPresent(item)" @change="toggleCollectionItem(item.workshopId)"/></td>
+                <td><img v-if="item.previewUrl" class="workshop-thumbnail" :src="item.previewUrl" :alt="item.title ?? item.workshopId" loading="lazy" /><span v-else class="muted-text">无图</span></td>
+                <td><strong>{{ item.title ?? item.workshopId }}</strong><small class="table-sub mono">{{ item.workshopId }}</small></td>
+                <td>{{ item.author ?? item.creatorSteamId ?? "未知" }}</td>
+                <td v-if="addMode === 'collection'">{{ item.fileSize === null ? "未知" : formatBytes(item.fileSize) }}</td>
+                <td><StatusLabel :tone="item.result !== 1 ? 'danger' : isHostModPresent(item) ? 'muted' : 'success'" :label="item.result !== 1 ? '不可用' : isHostModPresent(item) ? '已在主机库' : addMode === 'collection' ? '可导入' : '可添加'" /></td>
+                <td v-if="addMode === 'manual'" class="table-action">
+                  <button class="button button-compact primary" :disabled="addingWorkshopId !== null || item.result !== 1 || isHostModPresent(item)" @click="addCandidate(item)">
+                    {{ isHostModPresent(item) ? "已在主机库" : addingWorkshopId === item.workshopId ? "添加中…" : "添加到主机库" }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
 
       <template #footer>
         <button class="button" type="button" @click="addOpen = false">关闭</button>
-        <button class="button primary" type="button" :disabled="queryBusy" @click="query">{{ queryBusy ? "查询中…" : "查询" }}</button>
+        <button v-if="addMode === 'manual'" class="button primary" type="button" :disabled="queryBusy" @click="query">{{ queryBusy ? "查询中…" : "查询" }}</button>
+        <button v-else class="button" type="button" :disabled="queryBusy" @click="loadCollection">{{ queryBusy ? "读取中…" : "读取合集" }}</button>
+        <button v-if="addMode === 'collection'" class="button primary" type="button" :disabled="queryBusy || importingCollection || !selectedCollectionItems.length" @click="importCollection">{{ importingCollection ? "导入中…" : `导入所选${selectedCollectionItems.length ? ` (${selectedCollectionItems.length})` : ""}` }}</button>
       </template>
     </AppDialog>
     <AppDialog :open="!!syncTarget" title="同步到专服" @update:open="value => { if (!value && !syncBusy) syncTarget = null }">
@@ -494,4 +634,14 @@ watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
 .host-mod-copy small { color: var(--text-tertiary); font-size: 10px; }
 .host-mod-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; }
 .host-mod-delete { color: var(--danger); }
+
+.add-mod-tabs { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--border); }
+.add-mod-tabs button { padding: 8px 0; margin-right: 20px; border-bottom: 1px solid transparent; color: var(--text-tertiary); font-size: 12px; }
+.add-mod-tabs button.active { border-bottom-color: var(--text); color: var(--text); }
+.collection-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.collection-toolbar > div { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.collection-toolbar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.collection-selection { flex: 0 0 auto; align-items: center; }
+.collection-check { width: 34px; padding-right: 0 !important; }
+.collection-check input { width: 14px; height: 14px; accent-color: var(--accent); }
 </style>

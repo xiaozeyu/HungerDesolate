@@ -43,6 +43,9 @@ test('app shell exposes a global task center and operation bar without the updat
   assert.doesNotMatch(world, /applyBusy\.value = true/);
   assert.doesNotMatch(mods, /scheduleApplyPoll|getInstanceModApplyTask/);
   assert.match(mods, /taskStore\.tasks\.value/);
+  assert.match(mods, /addSelectedHostLibrary/);
+  assert.match(mods, /toggleHostLibraryItem/);
+  assert.match(mods, /selectedHostLibraryItems/);
   assert.doesNotMatch(hostMods, /scheduleTaskPoll|getHostModTask/);
   assert.match(hostMods, /taskStore\.tasks\.value/);
   assert.doesNotMatch(creation, /getInstanceCreateStatus|stopPolling/);

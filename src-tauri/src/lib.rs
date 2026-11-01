@@ -29,6 +29,7 @@ mod ssh;
 mod ssh_dto;
 mod ssh_state;
 mod workshop;
+mod workshop_collection;
 mod world_config;
 
 use std::{error::Error, path::PathBuf};
@@ -97,6 +98,7 @@ pub fn run() -> tauri::Result<()> {
             commands::get_world_config,
             commands::reveal_world_config_secrets,
             commands::get_workshop_metadata,
+            commands::get_workshop_collection,
             commands::list_instance_mods,
             commands::save_instance_mods,
             commands::preview_apply_instance_mods,

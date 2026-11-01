@@ -15,3 +15,10 @@ export function normalizeWorkshopIds(input: string): { ids: string[]; error: str
   if (ids.some(value => !ID_PATTERN.test(value))) return { ids: [], error: "Workshop ID 必须是数字" };
   return { ids, error: null };
 }
+
+export function normalizeWorkshopCollection(input: string): { id: string | null; error: string | null } {
+  const parsed = normalizeWorkshopIds(input);
+  if (parsed.error) return { id: null, error: parsed.error };
+  if (parsed.ids.length !== 1) return { id: null, error: "一次只能导入一个 Steam 合集" };
+  return { id: parsed.ids[0]!, error: null };
+}

@@ -142,7 +142,7 @@ fn safe_preview_url(value: Option<String>) -> Option<String> {
     })
 }
 
-fn ensure_tls_provider() -> CommandResult<()> {
+pub(crate) fn ensure_tls_provider() -> CommandResult<()> {
     if rustls::crypto::CryptoProvider::get_default().is_none()
         && rustls::crypto::ring::default_provider()
             .install_default()

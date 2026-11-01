@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { Eye, Library, Package, Pencil, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
 import AppDialog from "../components/AppDialog.vue";
+import OptionSelect, { type OptionSelectItem } from "../components/OptionSelect.vue";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
@@ -36,6 +37,30 @@ const revision = ref<number | null>(null);
 const loading = ref(false);
 const error = ref("");
 const hostLibraryOpen = ref(false), hostLibraryItems = ref<HostModItem[]>([]), hostLibraryLoading = ref(false), hostLibraryError = ref("");
+const hostLibrarySelected = ref<Set<string>>(new Set());
+const hostLibraryKey = (item: HostModItem) => `${item.workshopId}:${item.contentDigest}`;
+const currentHostMod = (item: HostModItem) => items.value.find(current => current.workshopId === item.workshopId && current.desiredEnabled !== null);
+const isHostLibraryCurrent = (item: HostModItem) => currentHostMod(item)?.artifactDigest === item.contentDigest;
+const hostLibraryCandidates = computed(() => {
+  const latest = new Map<string, HostModItem>();
+  for (const item of hostLibraryItems.value) {
+    if (isHostLibraryCurrent(item)) continue;
+    const current = latest.get(item.workshopId);
+    if (!current || (Date.parse(item.preparedAt ?? "") || 0) > (Date.parse(current.preparedAt ?? "") || 0)) latest.set(item.workshopId, item);
+  }
+  return [...latest.values()];
+});
+const selectedHostLibraryItems = computed(() => hostLibraryItems.value.filter(item => hostLibrarySelected.value.has(hostLibraryKey(item)) && !isHostLibraryCurrent(item)));
+const allHostLibrarySelected = computed(() => hostLibraryCandidates.value.length > 0
+  && hostLibraryCandidates.value.every(item => hostLibrarySelected.value.has(hostLibraryKey(item))));
+const hostModMetadata = computed(() => {
+  const byWorkshop = new Map<string, HostModItem>();
+  for (const item of hostLibraryItems.value) {
+    if (!byWorkshop.has(item.workshopId)) byWorkshop.set(item.workshopId, item);
+  }
+  return byWorkshop;
+});
+const hostMetadataFor = (item: InstanceModSummary) => hostModMetadata.value.get(item.workshopId);
 const savingWorkshopId = ref<string | null>(null);
 const applyTask = computed<TaskSnapshot | null>(() => {
   const selected = target.value;
@@ -150,6 +175,7 @@ function resetContext() {
   savingWorkshopId.value = null;
   hostLibraryOpen.value = false;
   hostLibraryItems.value = [];
+  hostLibrarySelected.value = new Set();
   hostLibraryLoading.value = false;
   hostLibraryError.value = "";
   applyTaskError.value = "";
@@ -173,6 +199,7 @@ function resetContext() {
   finalizedPrepareTasks.clear();
 }
 async function openHostLibrary() {
+  hostLibrarySelected.value = new Set();
   hostLibraryOpen.value = true;
   await loadHostLibrary();
 }
@@ -204,11 +231,35 @@ async function loadHostLibrary() {
   }
 }
 
-async function addHostLibraryItem(item: HostModItem) {
+function toggleHostLibraryItem(item: HostModItem) {
+  if (isHostLibraryCurrent(item)) return;
+  const next = new Set(hostLibrarySelected.value);
+  const key = hostLibraryKey(item);
+  if (next.has(key)) next.delete(key);
+  else {
+    for (const current of next) {
+      if (current.startsWith(`${item.workshopId}:`)) next.delete(current);
+    }
+    next.add(key);
+  }
+  hostLibrarySelected.value = next;
+}
+
+function toggleAllHostLibrary() {
+  if (allHostLibrarySelected.value) {
+    hostLibrarySelected.value = new Set();
+    return;
+  }
+  hostLibrarySelected.value = new Set(hostLibraryCandidates.value.map(hostLibraryKey));
+}
+
+async function addSelectedHostLibrary() {
+  await saveHostLibraryItems(selectedHostLibraryItems.value);
+}
+
+async function saveHostLibraryItems(selectedItems: HostModItem[]) {
   const connection = server.value, instanceTarget = target.value, expectedRevision = revision.value;
-  if (!connection || !instanceTarget || expectedRevision === null || savingWorkshopId.value !== null) return;
-  const existing = items.value.find(current => current.workshopId === item.workshopId && current.desiredEnabled !== null);
-  if (existing?.artifactDigest === item.contentDigest) return;
+  if (!connection || !instanceTarget || expectedRevision === null || savingWorkshopId.value !== null || !selectedItems.length) return;
   const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
   const recordVersion = connection.recordVersion;
   const requestEpoch = epoch;
@@ -216,10 +267,19 @@ async function addHostLibraryItem(item: HostModItem) {
     workshopId: current.workshopId,
     enabled: current.desiredEnabled === true,
     configurationOptions: current.desiredConfiguration ?? {},
-    artifactDigest: current.workshopId === item.workshopId ? item.contentDigest : current.artifactDigest,
+    artifactDigest: current.artifactDigest,
   }));
-  if (!existing) mods.push({ workshopId: item.workshopId, enabled: true, configurationOptions: {}, artifactDigest: item.contentDigest });
-  savingWorkshopId.value = item.workshopId;
+  const positions = new Map(mods.map((mod, index) => [mod.workshopId, index]));
+  for (const item of selectedItems) {
+    const position = positions.get(item.workshopId);
+    if (position === undefined) {
+      positions.set(item.workshopId, mods.length);
+      mods.push({ workshopId: item.workshopId, enabled: true, configurationOptions: {}, artifactDigest: item.contentDigest });
+    } else {
+      mods[position] = { ...mods[position]!, artifactDigest: item.contentDigest };
+    }
+  }
+  savingWorkshopId.value = selectedItems.length === 1 ? selectedItems[0]!.workshopId : "__batch__";
   taskError.value = "";
   try {
     const requestId = crypto.randomUUID();
@@ -235,6 +295,7 @@ async function addHostLibraryItem(item: HostModItem) {
       throw new Error("MOD 保存响应身份或版本不匹配");
     }
     hostLibraryOpen.value = false;
+    hostLibrarySelected.value = new Set();
     await refresh();
   } catch (cause) {
     if (requestEpoch === epoch && target.value
@@ -244,6 +305,10 @@ async function addHostLibraryItem(item: HostModItem) {
   } finally {
     if (requestEpoch === epoch) savingWorkshopId.value = null;
   }
+}
+
+async function addHostLibraryItem(item: HostModItem) {
+  await saveHostLibraryItems([item]);
 }
 
 async function setModEnabled(item: InstanceModSummary) {
@@ -380,6 +445,16 @@ function scalarFieldValue(group: ModFieldGroup): string | number | boolean {
 
 function markConfigurationChanged(name: string) {
   if (!configChangedFields.value.includes(name)) configChangedFields.value = [...configChangedFields.value, name];
+}
+
+function configOptionsFor(group: ModFieldGroup): OptionSelectItem[] {
+  const options: OptionSelectItem[] = [];
+  if (configOptionSelection.value[group.name] === "__unmapped__") {
+    options.push({ label: "当前值不在此版本选项中", value: "__unmapped__", disabled: true });
+  }
+  options.push({ label: "使用 MOD 默认值", value: "" });
+  options.push(...group.options.map((option, index) => ({ label: option.label, value: String(index) })));
+  return options;
 }
 
 function updateOptionSelection(group: ModFieldGroup, value: string) {
@@ -665,6 +740,7 @@ watch(applyTask, (next, previous) => {
 async function refreshAll() {
   await refresh();
   await refreshApplyTasks();
+  await loadHostLibrary();
 }
 
 function runtimeLabel(status: string | null) {
@@ -675,6 +751,7 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
   resetContext();
   void refresh();
   void refreshApplyTasks();
+  void loadHostLibrary();
 }, { immediate: true });
 </script>
 
@@ -706,7 +783,16 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
         <thead><tr><th>MOD</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th class="table-action">操作</th></tr></thead>
         <tbody>
           <tr v-for="item in items" :key="item.workshopId">
-            <td><div class="table-primary"><Package :size="17"/><strong>{{ item.schema.metadata.name ?? item.workshopId }}</strong></div><small class="table-sub mono">Workshop · {{ item.workshopId }}</small></td>
+            <td>
+              <div class="instance-mod-main">
+                <img v-if="hostMetadataFor(item)?.previewUrl" class="instance-mod-thumb" :src="hostMetadataFor(item)?.previewUrl ?? undefined" :alt="item.schema.metadata.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
+                <span v-else class="instance-mod-thumb instance-mod-placeholder"><Package :size="17"/></span>
+                <span class="instance-mod-copy">
+                  <strong>{{ item.schema.metadata.name ?? item.workshopId }}</strong>
+                  <small class="table-sub mono">Workshop · {{ item.workshopId }}</small>
+                </span>
+              </div>
+            </td>
             <td><StatusLabel :tone="item.desiredEnabled === null ? 'warning' : item.desiredEnabled ? 'success' : 'muted'" :label="item.desiredEnabled === null ? '已移出期望' : item.desiredEnabled ? '启用' : '禁用'" /></td>
             <td>
               <StatusLabel :tone="modNeedsApply(item) ? 'warning' : 'success'" :label="modNeedsApply(item) ? '待应用' : '一致'" />
@@ -745,32 +831,44 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
     <AppDialog v-model:open="hostLibraryOpen" title="从主机 MOD 库添加" size="lg">
       <div v-if="hostLibraryError" class="error-strip">{{ hostLibraryError }}</div>
       <div v-if="hostLibraryLoading" class="muted-text" role="status">读取主机 MOD 库…</div>
-      <div v-else-if="!hostLibraryItems.length" class="empty-state"><h2>主机 MOD 库为空</h2><p class="muted-text">请先在主机级“MOD 库”添加内容。</p></div>
-      <div v-else class="table-wrap">
-        <table class="host-library-table">
-          <thead><tr><th>图片</th><th>名称</th><th>ID</th><th>作者</th><th>版本</th><th class="table-action">操作</th></tr></thead>
-          <tbody>
-            <tr v-for="item in hostLibraryItems" :key="`${item.workshopId}:${item.contentDigest}`">
-              <td>
-                <img v-if="item.previewUrl" class="host-library-thumb" :src="item.previewUrl" :alt="item.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
-                <span v-else class="host-library-thumb host-library-placeholder"><Package :size="16"/></span>
-              </td>
-              <td><strong class="host-library-name">{{ item.name ?? "—" }}</strong></td>
-              <td class="mono">{{ item.workshopId }}</td>
-              <td>{{ item.author ?? "未知" }}</td>
-              <td class="mono">{{ item.version ?? "—" }}</td>
-              <td class="table-action">
-                <button class="text-button"
-                  :disabled="savingWorkshopId === item.workshopId || items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null && current.artifactDigest === item.contentDigest)"
-                  @click="addHostLibraryItem(item)">
-                  {{ savingWorkshopId === item.workshopId ? "保存中…" : items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null && current.artifactDigest === item.contentDigest) ? "已在实例" : items.some(current => current.workshopId === item.workshopId && current.desiredEnabled !== null) ? "更新到此版本" : "加入实例" }}
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <template #footer><button class="button" type="button" @click="hostLibraryOpen = false">关闭</button></template>
+      <template v-else-if="hostLibraryItems.length">
+        <div class="host-library-toolbar">
+          <span class="muted-text">已选 {{ selectedHostLibraryItems.length }}</span>
+          <button class="text-button" type="button" :disabled="!hostLibraryCandidates.length || savingWorkshopId !== null" @click="toggleAllHostLibrary">{{ allHostLibrarySelected ? "取消全选" : "全选未加入" }}</button>
+        </div>
+        <div class="table-wrap">
+          <table class="host-library-table">
+            <thead><tr><th class="host-library-check"><input type="checkbox" :checked="allHostLibrarySelected" :disabled="!hostLibraryCandidates.length || savingWorkshopId !== null" @change="toggleAllHostLibrary"/></th><th>图片</th><th>名称</th><th>ID</th><th>作者</th><th>版本</th><th class="table-action">操作</th></tr></thead>
+            <tbody>
+              <tr v-for="item in hostLibraryItems" :key="`${item.workshopId}:${item.contentDigest}`">
+                <td class="host-library-check"><input type="checkbox" :checked="hostLibrarySelected.has(hostLibraryKey(item))" :disabled="isHostLibraryCurrent(item) || savingWorkshopId !== null" @change="toggleHostLibraryItem(item)"/></td>
+                <td>
+                  <img v-if="item.previewUrl" class="host-library-thumb" :src="item.previewUrl" :alt="item.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
+                  <span v-else class="host-library-thumb host-library-placeholder"><Package :size="16"/></span>
+                </td>
+                <td><strong class="host-library-name">{{ item.name ?? "—" }}</strong></td>
+                <td class="mono">{{ item.workshopId }}</td>
+                <td>{{ item.author ?? "未知" }}</td>
+                <td class="mono">{{ item.version ?? "—" }}</td>
+                <td class="table-action">
+                  <button class="text-button" type="button"
+                    :disabled="savingWorkshopId !== null || isHostLibraryCurrent(item)"
+                    @click="addHostLibraryItem(item)">
+                    {{ isHostLibraryCurrent(item) ? "已在实例" : currentHostMod(item) ? "更新到此版本" : savingWorkshopId === item.workshopId ? "保存中…" : "加入实例" }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+      <div v-else class="empty-state"><h2>主机 MOD 库为空</h2><p class="muted-text">请先在主机级“MOD 库”添加内容。</p></div>
+      <template #footer>
+        <button class="button" type="button" @click="hostLibraryOpen = false">关闭</button>
+        <button class="button primary" type="button" :disabled="savingWorkshopId !== null || !selectedHostLibraryItems.length" @click="addSelectedHostLibrary">
+          {{ savingWorkshopId === "__batch__" ? "保存中…" : `加入所选${selectedHostLibraryItems.length ? ` (${selectedHostLibraryItems.length})` : ""}` }}
+        </button>
+      </template>
     </AppDialog>
 
     <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod?.schema.metadata.name ?? editingMod?.workshopId ?? ''}`" size="lg">
@@ -788,15 +886,9 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
               :disabled="configSaving || !configChangedFields.includes(group.name) && !Object.hasOwn(configBase, group.name)"
               @click="resetConfigurationField(group)"><RotateCcw :size="14"/></button>
           </div>
-          <select v-if="group.control === 'choice'" :id="`mod-config-${group.name}`"
-            :value="configOptionSelection[group.name] ?? ''" :disabled="configSaving"
-            @change="updateOptionSelection(group, ($event.target as HTMLSelectElement).value)">
-            <option v-if="configOptionSelection[group.name] === '__unmapped__'" value="__unmapped__" disabled>当前值不在此版本选项中</option>
-            <option value="">使用 MOD 默认值</option>
-            <option v-for="(option, index) in group.options" :key="index" :value="String(index)" :title="option.hover ?? undefined">
-              {{ option.label }}
-            </option>
-          </select>
+          <OptionSelect v-if="group.control === 'choice'" :model-value="configOptionSelection[group.name] ?? ''"
+            :options="configOptionsFor(group)" :label="group.label" :disabled="configSaving"
+            @update:model-value="updateOptionSelection(group, $event)"/>
           <label v-else-if="group.control === 'boolean'" class="mod-config-toggle" :for="`mod-config-${group.name}`">
             <input :id="`mod-config-${group.name}`" type="checkbox" :checked="scalarFieldValue(group) === true"
               :disabled="configSaving" @change="updateScalarField(group, $event)" />
@@ -885,13 +977,23 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
 
 
 <style scoped>
+.instance-mod-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.instance-mod-thumb { display: block; width: 40px; height: 40px; min-width: 40px; max-width: 40px; min-height: 40px; max-height: 40px; object-fit: cover; border: 1px solid var(--border); border-radius: 2px; background: var(--surface-muted); }
+.instance-mod-placeholder { display: grid; place-items: center; color: var(--text-tertiary); }
+.instance-mod-copy { display: grid; min-width: 0; gap: 3px; }
+.instance-mod-copy strong { overflow-wrap: anywhere; font-weight: 500; }
+.instance-mod-copy .table-sub { margin: 0; }
 .host-library-table { table-layout: fixed; }
-.host-library-table th:nth-child(1) { width: 68px; }
-.host-library-table th:nth-child(2) { width: 28%; }
-.host-library-table th:nth-child(3) { width: 17%; }
-.host-library-table th:nth-child(4) { width: 23%; }
-.host-library-table th:nth-child(5) { width: 72px; }
-.host-library-table th:nth-child(6) { width: 82px; }
+.host-library-table th:nth-child(1) { width: 34px; }
+.host-library-table th:nth-child(2) { width: 56px; }
+.host-library-table th:nth-child(3) { width: 26%; }
+.host-library-table th:nth-child(4) { width: 16%; }
+.host-library-table th:nth-child(5) { width: 20%; }
+.host-library-table th:nth-child(6) { width: 64px; }
+.host-library-table th:nth-child(7) { width: 82px; }
+.host-library-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.host-library-check { width: 34px; padding-right: 0 !important; }
+.host-library-check input { width: 14px; height: 14px; accent-color: var(--accent); }
 .host-library-table td { vertical-align: middle; }
 .host-library-table td:nth-child(3) { overflow-wrap: anywhere; }
 .host-library-thumb {

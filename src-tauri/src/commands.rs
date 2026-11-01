@@ -274,6 +274,18 @@ pub async fn get_workshop_metadata(
 }
 
 #[tauri::command]
+pub async fn get_workshop_collection(
+    request: crate::workshop_collection::Request,
+) -> CommandResult<crate::workshop_collection::Response> {
+    ssh_blocking(
+        "getWorkshopCollection",
+        safe_request_id(&request.request_id),
+        move || crate::workshop_collection::get(request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn list_instance_mods(
     state: State<'_, AppState>,
     request: crate::mods::ListRequest,

@@ -20,6 +20,7 @@ import { normalizeWorkshopIds } from "../lib/workshopInput";
 import { describeError } from "../lib/commandError";
 import { useQuery } from "../lib/queryClient";
 import { formatBytes } from "../lib/environmentView";
+import { stageLabel } from "../lib/operationView";
 import type { TaskSnapshot } from "../types/contracts";
 
 const route = useRoute();
@@ -56,7 +57,7 @@ const taskTone = computed<"running"|"success"|"danger"|"warning"|"muted">(() => 
 });
 const taskStatusLabel = computed(() => {
   const status = task.value?.status;
-  return status === "succeeded" ? "已加入主机库" : status === "failed" ? "准备失败" : status === "interrupted" ? "准备中断" : status === "cancelled" ? "已取消" : "准备中";
+  return status === "succeeded" ? "已加入主机库" : status === "failed" ? "准备失败" : status === "interrupted" ? "准备中断" : status === "cancelled" ? "已取消" : status === "queued" ? "排队中" : "准备 MOD";
 });
 const taskActive = computed(() => !!task.value && ["queued", "running"].includes(task.value.status));
 const modLibrarySummary = computed(() => [
@@ -71,12 +72,12 @@ const mutationError = ref("");
 const cancelBusy = ref(false);
 const cancelMessage = ref("");
 const refresh = libraryQuery.refresh;
-const message = ref("");
 const addOpen = ref(false);
 const workshopInput = ref("");
 const queryBusy = ref(false);
 const queryError = ref("");
 const candidates = ref<WorkshopItem[]>([]);
+const isHostModPresent = (item: WorkshopItem) => items.value.some(entry => entry.workshopId === item.workshopId);
 const addingWorkshopId = ref<string | null>(null);
 const task = computed<TaskSnapshot | null>(() => {
   const selected = target.value;
@@ -130,7 +131,7 @@ async function query() {
 async function addCandidate(item: WorkshopItem) {
   const connection = server.value;
   const hostTarget = target.value;
-  if (!connection || !hostTarget || addingWorkshopId.value !== null || item.result !== 1) return;
+  if (!connection || !hostTarget || addingWorkshopId.value !== null || item.result !== 1 || isHostModPresent(item)) return;
   const operationId = crypto.randomUUID();
   addingWorkshopId.value = item.workshopId;
   queryError.value = "";
@@ -172,7 +173,6 @@ async function updateHostMod(item: HostModItem) {
       metadata: { [item.workshopId]: { name: candidate.title, author: candidate.author, previewUrl: candidate.previewUrl } } });
     if (response.requestId !== requestId || response.task.operationId !== operationId) throw new Error("主机 MOD 更新响应身份不匹配");
     taskStore.receive(response.task);
-    message.value = "已提交更新，正在检查最新版本";
   } catch (cause) {
     mutationError.value = describeError(cause).message;
   } finally {
@@ -263,7 +263,6 @@ async function confirmSync() {
         syncErrors.value.push(`${entry.displayName}：${describeError(cause).message}`);
       }
     }
-    message.value = `已同步 ${done}/${entries.length} 个专服的期望 MOD 版本；未自动应用。`;
     await refresh();
     if (!syncErrors.value.length) syncTarget.value = null;
   } catch (cause) {
@@ -304,7 +303,6 @@ async function remove() {
       expectedRecordVersion: connection.recordVersion, workshopId: item.workshopId, contentDigest: item.contentDigest });
     if (response.requestId !== requestId) throw new Error("主机 MOD 删除响应身份不匹配");
     deleteTarget.value = null;
-    message.value = "已删除未被使用的主机 MOD 版本";
     await refresh();
   } catch (cause) {
     mutationError.value = describeError(cause).message;
@@ -321,7 +319,6 @@ watch(task, async (next, previous) => {
     return;
   }
   if (previous?.taskId === next.taskId && previous.status === next.status) return;
-  message.value = "主机 MOD 库已更新";
   addOpen.value = false;
   candidates.value = [];
   await refresh();
@@ -342,7 +339,6 @@ function openAdd() {
 }
 
 watch([() => server.value?.serverId, () => server.value?.recordVersion, () => workspace.preview.value], () => {
-  message.value = "";
   mutationError.value = "";
   cancelMessage.value = "";
   deleteTarget.value = null;
@@ -357,7 +353,6 @@ watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
         <button class="button primary" :disabled="!target || workspace.preview.value" @click="openAdd"><Plus :size="16"/>添加 MOD</button>
       </template>
     </PageHeader>
-    <p v-if="message" class="success-message" role="status">{{ message }}</p>
     <SummaryBar v-if="items.length" :items="modLibrarySummary" label="主机 MOD 摘要"/>
     <div v-if="error" class="environment-error" role="alert">
       <strong>{{ error.message }}</strong>
@@ -403,7 +398,7 @@ watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
       </table>
     </div>
 <FloatingTask v-if="task" label="主机 MOD">
-    <TaskPanel v-if="task" title="准备主机 MOD" :status-label="taskStatusLabel" :stage-label="task.stage" :tone="taskTone"
+    <TaskPanel v-if="task" title="准备主机 MOD" :status-label="taskStatusLabel" :stage-label="stageLabel(task.stage)" :tone="taskTone"
       :queue-position="task.queuePosition" :error="task.error"
       :cancellable="!!task.cancelAllowed && ['queued','running'].includes(task.status)" :busy="cancelBusy" @cancel="cancelPrepare">
       <span v-if="task.status === 'succeeded'" class="muted-text">内容已固定，可供所有专服选择</span>
@@ -425,10 +420,10 @@ watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
               <td><img v-if="item.previewUrl" class="workshop-thumbnail" :src="item.previewUrl" :alt="item.title ?? item.workshopId" loading="lazy" /><span v-else class="muted-text">无图</span></td>
               <td><strong>{{ item.title ?? item.workshopId }}</strong><small class="table-sub mono">{{ item.workshopId }}</small></td>
               <td>{{ item.author ?? item.creatorSteamId ?? "未知" }}</td>
-              <td><StatusLabel :tone="item.result === 1 ? 'success' : 'danger'" :label="item.result === 1 ? '可用' : '不可用'" /></td>
+              <td><StatusLabel :tone="item.result !== 1 ? 'danger' : isHostModPresent(item) ? 'muted' : 'success'" :label="item.result !== 1 ? '不可用' : isHostModPresent(item) ? '已在主机库' : '可添加'" /></td>
               <td class="table-action">
-                <button class="button button-compact primary" :disabled="addingWorkshopId !== null || item.result !== 1" @click="addCandidate(item)">
-                  {{ addingWorkshopId === item.workshopId ? "添加中…" : "添加到主机库" }}
+                <button class="button button-compact primary" :disabled="addingWorkshopId !== null || item.result !== 1 || isHostModPresent(item)" @click="addCandidate(item)">
+                  {{ isHostModPresent(item) ? "已在主机库" : addingWorkshopId === item.workshopId ? "添加中…" : "添加到主机库" }}
                 </button>
               </td>
             </tr>
@@ -436,7 +431,6 @@ watch(workshopInput, () => { candidates.value = []; queryError.value = ""; });
         </table>
       </div>
 
-      <TaskPanel class="dialog-task-panel" v-if="task" title="准备主机 MOD" :status-label="taskStatusLabel" :stage-label="task.stage" :tone="taskTone" :queue-position="task.queuePosition" :error="task.error" :cancellable="!!task.cancelAllowed && ['queued','running'].includes(task.status)" :busy="cancelBusy" @cancel="cancelPrepare"/>
       <template #footer>
         <button class="button" type="button" @click="addOpen = false">关闭</button>
         <button class="button primary" type="button" :disabled="queryBusy" @click="query">{{ queryBusy ? "查询中…" : "查询" }}</button>

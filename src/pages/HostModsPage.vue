@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Package, Plus } from "@lucide/vue";
+import { Package, Plus, RefreshCw } from "@lucide/vue";
 import { useRoute } from "vue-router";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
@@ -10,6 +10,8 @@ import TaskPanel from "../components/TaskPanel.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useTasks } from "../composables/useTasks";
+import { useOperations } from "../composables/useOperations";
+import { useHostModBatch } from "../composables/useHostModBatch";
 import { cancelHostModTask, deleteHostMod, listHostMods, prepareHostMods, type HostModItem } from "../api/hostMods";
 import { listInstances } from "../api/instances";
 import { listInstanceMods, saveInstanceMods } from "../api/mods";
@@ -26,6 +28,8 @@ import type { TaskSnapshot } from "../types/contracts";
 const route = useRoute();
 const workspace = useWorkspace();
 const taskStore = useTasks();
+const hostModBatch = useHostModBatch();
+const operations = useOperations();
 const server = computed(() => workspace.servers.value.find(item => item.serverId === route.params.serverId) ?? null);
 const target = computed(() => server.value?.hostId ? { serverId: server.value.serverId, hostId: server.value.hostId } : null);
 const key = computed(() => {
@@ -82,8 +86,105 @@ const queryBusy = ref(false);
 const queryError = ref("");
 const candidates = ref<WorkshopItem[]>([]);
 const isHostModPresent = (item: WorkshopItem) => items.value.some(entry => entry.workshopId === item.workshopId);
+const versionedPreview = (url: string | null, digest: string | null) => {
+  if (!url || !digest) return url ?? undefined;
+  return `${url}${url.includes("?") ? "&" : "?"}v=${digest.slice(0, 12)}`;
+};
+const sourceHandlesFor = (entries: WorkshopItem[]) => Object.fromEntries(entries
+  .filter(item => item.contentHandle)
+  .map(item => [item.workshopId, item.contentHandle!]));
 const addingWorkshopId = ref<string | null>(null);
 const importingCollection = ref(false);
+type UpdateCheckStatus = "checking" | "latest" | "outdated" | "failed";
+interface UpdateCheck { status: UpdateCheckStatus; message: string; candidate: WorkshopItem | null; }
+const updateChecks = ref<Record<string, UpdateCheck>>({});
+const checkingUpdates = ref(false);
+const latestHostItem = (item: HostModItem | WorkshopItem) => {
+  const versions = items.value.filter(entry => entry.workshopId === item.workshopId);
+  return versions.sort((left, right) => (Date.parse(right.preparedAt ?? "") || 0) - (Date.parse(left.preparedAt ?? "") || 0))[0] ?? null;
+};
+const outdatedCandidates = computed(() => {
+  const result = new Map<string, WorkshopItem>();
+  for (const [workshopId, check] of Object.entries(updateChecks.value)) {
+    if (check.status === "outdated" && check.candidate) result.set(workshopId, check.candidate);
+  }
+  return [...result.values()];
+});
+const checkLabel = (status: UpdateCheckStatus) => status === "latest" ? "已是最新" : status === "outdated" ? "可更新" : status === "failed" ? "检查失败" : "检查中";
+
+async function checkUpdates(targets: HostModItem[]) {
+  const connection = server.value;
+  const hostTarget = target.value;
+  if (!connection || !hostTarget || checkingUpdates.value || hostModBatch.state.running) return;
+  const latest = new Map<string, HostModItem>();
+  for (const item of targets) {
+    const current = latest.get(item.workshopId);
+    if (!current || (Date.parse(item.preparedAt ?? "") || 0) > (Date.parse(current.preparedAt ?? "") || 0)) latest.set(item.workshopId, item);
+  }
+  const ids = [...latest.keys()];
+  if (!ids.length) return;
+  checkingUpdates.value = true;
+  const checks = { ...updateChecks.value };
+  for (const id of ids) checks[id] = { status: "checking", message: "", candidate: null };
+  updateChecks.value = checks;
+  try {
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const chunk = ids.slice(offset, offset + 100);
+      const requestId = crypto.randomUUID();
+      const response = await getWorkshopMetadata({ schemaVersion: 1, requestId,
+        serverId: connection.serverId, expectedRecordVersion: connection.recordVersion, workshopIds: chunk });
+      if (server.value?.serverId !== connection.serverId || server.value.recordVersion !== connection.recordVersion
+          || response.requestId !== requestId || response.serverId !== connection.serverId
+          || response.recordVersion !== connection.recordVersion) throw new Error("Workshop 更新检查响应身份不匹配");
+      const byId = new Map(response.items.map(item => [item.workshopId, item]));
+      const next = { ...updateChecks.value };
+      for (const id of chunk) {
+        const candidate = byId.get(id);
+        const item = latest.get(id)!;
+        if (!candidate || candidate.result !== 1) {
+          next[id] = { status: "failed", message: "Workshop 条目当前不可用", candidate: null };
+        } else if (item.sourceHandle && candidate.contentHandle === item.sourceHandle) {
+          next[id] = { status: "latest", message: "", candidate };
+        } else {
+          next[id] = { status: "outdated", message: "", candidate };
+        }
+      }
+      updateChecks.value = next;
+    }
+  } catch (cause) {
+    const failure = describeError(cause);
+    for (const id of ids) {
+      if (updateChecks.value[id]?.status === "checking") {
+        updateChecks.value = { ...updateChecks.value, [id]: { status: "failed", message: failure.message, candidate: null } };
+      }
+    }
+    operations.recordFailure({ kind: "hostModCheck", target: hostTarget, title: "检查主机 MOD 更新", stage: "查询 Workshop", error: failure });
+  } finally {
+    checkingUpdates.value = false;
+  }
+}
+
+async function checkAllUpdates() {
+  await checkUpdates(items.value);
+}
+
+async function checkOneUpdate(item: HostModItem) {
+  await checkUpdates([latestHostItem(item) ?? item]);
+}
+
+async function startBatchUpdate() {
+  const connection = server.value;
+  const hostTarget = target.value;
+  if (!connection || !hostTarget || !outdatedCandidates.value.length) return;
+  await hostModBatch.start({ serverId: connection.serverId, hostId: hostTarget.hostId, recordVersion: connection.recordVersion }, outdatedCandidates.value);
+  updateChecks.value = {};
+}
+
+async function refreshLibrary() {
+  updateChecks.value = {};
+  await refresh();
+}
+
 const selectableCandidates = computed(() => candidates.value.filter(item => item.result === 1 && !isHostModPresent(item)));
 const selectedCollectionItems = computed(() => selectableCandidates.value.filter(item => collectionSelection.value.has(item.workshopId)));
 const allCandidatesSelected = computed(() => selectableCandidates.value.length > 0
@@ -113,7 +214,6 @@ const syncErrors = ref<string[]>([]);
 const syncLoading = ref(false);
 const syncBusy = ref(false);
 const syncProgress = ref("");
-const pendingUpdateSync = ref<{ workshopId: string } | null>(null);
 async function query() {
   const connection = server.value;
   const hostTarget = target.value;
@@ -227,7 +327,7 @@ async function importCollection() {
     }]));
     const response = await prepareHostMods({ schemaVersion: 1, requestId, target: hostTarget,
       expectedRecordVersion: connection.recordVersion, operationId,
-      workshopIds: selected.map(item => item.workshopId), metadata });
+      workshopIds: selected.map(item => item.workshopId), sourceHandles: sourceHandlesFor(selected), metadata });
     if (response.requestId !== requestId || response.task.operationId !== operationId) throw new Error("主机 MOD 准备响应身份不匹配");
     taskStore.receive(response.task);
     addOpen.value = false;
@@ -251,6 +351,7 @@ async function addCandidate(item: WorkshopItem) {
     const requestId = crypto.randomUUID();
     const response = await prepareHostMods({ schemaVersion: 1, requestId, target: hostTarget,
       expectedRecordVersion: connection.recordVersion, operationId, workshopIds: [item.workshopId],
+      sourceHandles: sourceHandlesFor([item]),
       metadata: { [item.workshopId]: { name: item.title, author: item.author, previewUrl: item.previewUrl } } });
     if (response.requestId !== requestId || response.task.operationId !== operationId) throw new Error("主机 MOD 准备响应身份不匹配");
     taskStore.receive(response.task);
@@ -271,7 +372,7 @@ async function updateHostMod(item: HostModItem) {
   addingWorkshopId.value = item.workshopId;
   queryError.value = "";
   mutationError.value = "";
-  pendingUpdateSync.value = { workshopId: item.workshopId };
+  const operationId = operations.begin({ kind: "hostModUpdate", target: hostTarget, title: "更新主机 MOD", stage: "检查最新版本" });
   try {
     const metadataRequestId = crypto.randomUUID();
     const metadata = await getWorkshopMetadata({ schemaVersion: 1, requestId: metadataRequestId,
@@ -280,15 +381,26 @@ async function updateHostMod(item: HostModItem) {
         || metadata.recordVersion !== requestEpoch) throw new Error("Workshop 更新查询响应身份不匹配");
     const candidate = metadata.items.find(entry => entry.workshopId === item.workshopId);
     if (!candidate || candidate.result !== 1) throw new Error("Workshop 条目当前不可用");
-    const operationId = crypto.randomUUID();
+    if (item.sourceHandle && candidate.contentHandle === item.sourceHandle) {
+      updateChecks.value = { ...updateChecks.value, [item.workshopId]: { status: "latest", message: "", candidate } };
+      operations.succeed(operationId);
+      operations.dismiss(operationId);
+      return;
+    }
+    operations.setStage(operationId, "启动更新任务");
     const requestId = crypto.randomUUID();
     const response = await prepareHostMods({ schemaVersion: 1, requestId, target: hostTarget,
       expectedRecordVersion: connection.recordVersion, operationId, workshopIds: [item.workshopId],
+      sourceHandles: sourceHandlesFor([candidate]),
       metadata: { [item.workshopId]: { name: candidate.title, author: candidate.author, previewUrl: candidate.previewUrl } } });
     if (response.requestId !== requestId || response.task.operationId !== operationId) throw new Error("主机 MOD 更新响应身份不匹配");
     taskStore.receive(response.task);
+    operations.succeed(operationId);
+    operations.dismiss(operationId);
   } catch (cause) {
-    mutationError.value = describeError(cause).message;
+    const failure = describeError(cause);
+    updateChecks.value = { ...updateChecks.value, [item.workshopId]: { status: "failed", message: failure.message, candidate: null } };
+    operations.fail(operationId, failure);
   } finally {
     addingWorkshopId.value = null;
   }
@@ -427,22 +539,12 @@ async function remove() {
 
 watch(task, async (next, previous) => {
   if (!next || next.status === "queued" || next.status === "running") return;
-  const pending = pendingUpdateSync.value;
-  if (next.status !== "succeeded") {
-    pendingUpdateSync.value = null;
-    return;
-  }
+  if (next.status !== "succeeded") return;
   if (previous?.taskId === next.taskId && previous.status === next.status) return;
   addOpen.value = false;
   candidates.value = [];
+  updateChecks.value = {};
   await refresh();
-  if (!pending) return;
-  pendingUpdateSync.value = null;
-  const prepared = next.result?.preparedMods?.find(item => item.workshopId === pending.workshopId);
-  if (!prepared) return;
-  const updated = items.value.find(item => item.workshopId === prepared.workshopId
-    && item.contentDigest === prepared.contentDigest);
-  if (updated) void previewSync(updated);
 }, { flush: "sync" });
 
 function openAdd() {
@@ -469,6 +571,15 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
   <div class="page">
     <PageHeader eyebrow="主机公共资源" title="MOD 库">
       <template #actions>
+        <button class="button" :disabled="!items.length || checkingUpdates || hostModBatch.state.running || workspace.preview.value" @click="checkAllUpdates">
+          <RefreshCw :size="15" :class="{ spinning: checkingUpdates }"/>{{ checkingUpdates ? "检查中…" : "批量检查更新" }}
+        </button>
+        <button class="button" :disabled="loading || hostModBatch.state.running" @click="refreshLibrary">
+          <RefreshCw :size="15" :class="{ spinning: loading }"/>刷新
+        </button>
+        <button v-if="outdatedCandidates.length || hostModBatch.state.running" class="button primary" :disabled="hostModBatch.state.running || !outdatedCandidates.length" @click="startBatchUpdate">
+          {{ hostModBatch.state.running ? `更新中 ${hostModBatch.state.accepted}/${hostModBatch.state.total}` : `批量更新 (${outdatedCandidates.length})` }}
+        </button>
         <button class="button primary" :disabled="!target || workspace.preview.value" @click="openAdd"><Plus :size="16"/>添加 MOD</button>
       </template>
     </PageHeader>
@@ -491,7 +602,7 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
           <tr v-for="item in items" :key="`${item.workshopId}:${item.contentDigest}`">
             <td>
               <div class="host-mod-main">
-                <img v-if="item.previewUrl" class="host-mod-thumb" :src="item.previewUrl" :alt="item.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
+                <img v-if="item.previewUrl" class="host-mod-thumb" :src="versionedPreview(item.previewUrl, item.contentDigest)" :alt="item.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
                 <span v-else class="host-mod-thumb host-mod-placeholder"><Package :size="17"/></span>
                 <span class="host-mod-copy">
                   <strong>{{ item.name ?? item.workshopId }}</strong>
@@ -501,13 +612,18 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
             </td>
             <td>{{ item.author ?? "未知" }}</td>
             <td>{{ item.sizeBytes === null ? "未知" : formatBytes(item.sizeBytes) }}</td>
-            <td class="mono">{{ item.version ?? "—" }}</td>
+            <td>
+              <span class="mono">{{ item.version ?? "—" }}</span>
+              <small v-if="updateChecks[item.workshopId]" class="table-sub" :class="`update-${updateChecks[item.workshopId]!.status}`">{{ checkLabel(updateChecks[item.workshopId]!.status) }}</small>
+            </td>
             <td class="table-action">
               <div class="host-mod-actions">
+                <button class="text-button" type="button" title="检查此 MOD 的最新版本" :disabled="workspace.preview.value || checkingUpdates || hostModBatch.state.running || addingWorkshopId !== null || deleteBusy"
+                  @click="checkOneUpdate(item)">检查</button>
                 <button class="text-button" type="button" title="同步该版本到使用此 MOD 的专服" :disabled="workspace.preview.value || syncLoading || addingWorkshopId !== null || deleteBusy"
                   @click="previewSync(item)">同步</button>
-                <button class="text-button" type="button" title="更新到 Workshop 最新版本" :disabled="workspace.preview.value || addingWorkshopId !== null || deleteBusy"
-                  @click="updateHostMod(item)">{{ addingWorkshopId === item.workshopId ? "更新中…" : "更新" }}</button>
+                <button class="text-button" type="button" title="更新到 Workshop 最新版本" :disabled="workspace.preview.value || addingWorkshopId !== null || deleteBusy || updateChecks[item.workshopId]?.status === 'latest' || hostModBatch.state.running"
+                  @click="updateHostMod(item)">{{ updateChecks[item.workshopId]?.status === 'latest' ? "已是最新" : addingWorkshopId === item.workshopId ? "更新中…" : "更新" }}</button>
                 <button class="text-button host-mod-delete" type="button" title="删除该版本" :disabled="workspace.preview.value || deleteBusy || addingWorkshopId !== null"
                   @click="deleteTarget = item">删除</button>
               </div>
@@ -633,6 +749,11 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
 .host-mod-copy strong { font-weight: 500; overflow-wrap: anywhere; }
 .host-mod-copy small { color: var(--text-tertiary); font-size: 10px; }
 .host-mod-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; }
+.update-latest { color: var(--success); }
+.update-outdated { color: var(--warning); }
+.update-failed { color: var(--danger); }
+.update-checking { color: var(--text-tertiary); }
+
 .host-mod-delete { color: var(--danger); }
 
 .add-mod-tabs { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--border); }

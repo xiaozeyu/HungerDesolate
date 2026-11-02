@@ -74,7 +74,8 @@ export function useWorkspace() {
       servers.value=servers.value.map(item=>item.serverId===response.serverId?{...item,hostId:response.hostId}:item);
       instanceCache.value={...instanceCache.value,[response.hostId]:{serverId:response.serverId,recordVersion:response.recordVersion,revision:response.registryRevision,items:response.instances}};
     }
-    grant.value=null;
+    // A background refresh may finish after the user already selected an instance.
+    // Keep that selection; clearing it here causes the first instance-page navigation to be redirected.
   }
   function commitInstanceOverview(serverId: string, recordVersion: number, identity: InstanceSummary) {
     const server = servers.value.find(item => item.serverId === serverId);

@@ -678,6 +678,20 @@ def worker(task_id):
                 _, old_size, old_digest = content_files(final / "content")
                 if old_digest != content_digest or old_size != old.get("sizeBytes"):
                     reject("HOST_MOD_PREPARED_ARTIFACT_INVALID")
+                info = modinfo_fields(final / "content")
+                supplied = request.get("metadata", {}).get(workshop_id, {}) if isinstance(request.get("metadata"), dict) else {}
+                refreshed = dict(old)
+                for field in ("name", "author"):
+                    value = info.get(field) or supplied.get(field)
+                    if value and value != refreshed.get(field):
+                        refreshed[field] = value
+                if supplied.get("previewUrl") and supplied.get("previewUrl") != refreshed.get("previewUrl"):
+                    refreshed["previewUrl"] = supplied.get("previewUrl")
+                handle = source_handles.get(workshop_id)
+                if handle and handle != refreshed.get("sourceHandle"):
+                    refreshed["sourceHandle"] = handle
+                if refreshed != old:
+                    atomic_json(final / "manifest.json", refreshed)
                 shutil.rmtree(work, ignore_errors=True)
             else:
                 CURRENT_STAGE = "publish"

@@ -2,7 +2,8 @@ import type { HostTarget, InstanceTarget, ServerSummary, TaskSnapshot } from "..
 
 export type OperationKind =
   | "start" | "stop" | "restart" | "worldApply"
-  | "instanceDelete" | "releaseVerify" | "hostInitialize" | "buildCacheCleanup";
+  | "instanceDelete" | "releaseVerify" | "hostInitialize" | "buildCacheCleanup"
+  | "hostModUpdate" | "hostModCheck";
 
 export type OperationTarget = HostTarget | InstanceTarget;
 
@@ -15,6 +16,8 @@ const operationLabels: Record<OperationKind, string> = {
   releaseVerify: "验证 Release",
   hostInitialize: "初始化主机",
   buildCacheCleanup: "清理构建缓存",
+  hostModUpdate: "更新主机 MOD",
+  hostModCheck: "检查主机 MOD 更新",
 };
 
 const taskLabels: Record<string, string> = {

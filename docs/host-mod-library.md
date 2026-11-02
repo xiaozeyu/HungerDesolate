@@ -125,3 +125,15 @@ python3 scripts/test-instance-mods.py
 
 前端：`npm run check`  
 Rust：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`
+
+## 8. 当前扩展能力
+
+- 添加 MOD 支持 Workshop 链接/ID 和 Steam 合集。
+- 合集内容通过 `GetCollectionDetails` 读取，再按每批 100 个获取元数据。
+- 主机库支持检查更新：比较 Steam `contentHandle` 与固定产物 `sourceHandle`。
+- 支持单行检查和批量检查；只对可更新项执行批量更新。
+- 批量更新按每批最多 50 个创建持久任务，任务进入全局任务记录。
+- 专服 MOD 页面支持从主机库多选加入。
+- 复用相同内容摘要时更新 manifest 的名称、作者、预览图和来源 handle。
+- 图片 URL 带内容摘要缓存参数，版本变化后刷新预览图。
+- `modinfo.lua` 的数字选项描述会转换为文本；解析失败时保留已读取的元数据，并回退主机库名称/版本。

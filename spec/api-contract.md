@@ -702,4 +702,4 @@ interface CommandError {
 
 失效按 hostId + instanceId 匹配，所有本地连接别名共享脏标记；只有活动页面匹配且可连接时立即重查，其他对象延迟至进入时重查。草稿从不作为失效目标。
 
-联调 fixture 必备：两个主机各三个实例；A/B 同名；空洞穴；未知玩家；stale 快照；revision 冲突；queued 重任务；下载完成但部署失败；A 任务在 B 页面完成；重复 operationId；retired 备份；事件丢失与乱序。完整场景编号见[验收计划](implementation-roadmap.md)。
+联调 fixture 必备：两个主机各三个实例；A/B 同名；空洞穴；未知玩家；stale 快照；revision 冲突；queued 重任务；下载完成但部署失败；A 任务在 B 页面完成；重复 operationId；retired 备份；事件丢失与乱序。联调场景应覆盖这些身份、任务和恢复边界。

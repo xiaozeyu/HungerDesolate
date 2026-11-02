@@ -1,6 +1,6 @@
 {
   "name": "hunger-desolate",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "private": true,
   "type": "module",
   "engines": {
@@ -13,10 +13,11 @@
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop:dev": "npm run version:sync && tauri dev",
+    "desktop:build": "npm run version:sync && tauri build",
     "check:metadata": "node scripts/check-metadata.mjs",
-    "check": "npm run check:metadata && npm run test:frontend && npm run build"
+    "check": "npm run check:metadata && npm run test:frontend && npm run build",
+    "version:sync": "node scripts/sync-version.mjs"
   },
   "dependencies": {
     "@lucide/vue": "1.28.0",

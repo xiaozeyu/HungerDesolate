@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -10,6 +10,7 @@ import { useTasks } from "./composables/useTasks";
 import { useOperations } from "./composables/useOperations";
 import { useBuildTasks } from "./composables/useBuildTasks";
 import { useTaskDrawer } from "./composables/useTaskDrawer";
+import { getBootstrapSnapshot } from "./api/bootstrap";
 import IconButton from "./components/IconButton.vue";
 import TaskDrawer from "./components/TaskDrawer.vue";
 import ConnectionSettingsDialog from "./components/ConnectionSettingsDialog.vue";
@@ -25,11 +26,17 @@ const operations = useOperations();
 const buildTasks = useBuildTasks();
 const { openDrawer: openTaskDrawer } = useTaskDrawer();
 const { theme, toggleTheme } = useTheme();
-const activeServerId = computed(() => String(route.params.serverId ?? ""));
-const activeInstanceId = computed(() => String(route.params.instanceId ?? ""));
+const appVersion = ref(__APP_VERSION__);
+const settingsReturnPath = ref("/hosts");
+watch(() => route.fullPath, (path, previous) => {
+  if (path === "/settings" && previous && previous !== "/settings") settingsReturnPath.value = previous;
+}, { immediate: true });
+const contextRoute = computed(() => route.path === "/settings" ? router.resolve(settingsReturnPath.value) : route);
+const activeServerId = computed(() => String(contextRoute.value.params.serverId ?? ""));
+const activeInstanceId = computed(() => String(contextRoute.value.params.instanceId ?? ""));
 const activeServer = computed(() => workspace.servers.value.find(server => server.serverId === activeServerId.value));
 const activeInstance = computed(() => activeServer.value?.hostId ? workspace.instances(activeServer.value.hostId).find(instance => instance.instanceId === activeInstanceId.value) : undefined);
-const breadcrumb = computed(() => [activeServer.value?.displayName, activeInstance.value?.displayName, String(route.meta.title ?? "主机")].filter(Boolean).join(" / "));
+const breadcrumb = computed(() => [activeServer.value?.displayName, activeInstance.value?.displayName, route.path === "/settings" ? "应用设置" : String(route.meta.title ?? "主机")].filter(Boolean).join(" / "));
 const instancePages = [
     { name: "overview", label: "概览", icon: Gauge }, { name: "world", label: "世界", icon: Globe2 },
     { name: "mods", label: "MOD", icon: Wrench }, { name: "backups", label: "备份", icon: HardDrive },
@@ -73,6 +80,11 @@ function pollTasks() {
     void refreshBuildTasks(workspace.servers.value);
 }
 onMounted(async () => {
+    try {
+        appVersion.value = (await getBootstrapSnapshot()).productVersion;
+    } catch {
+        // Browser preview has no Tauri bootstrap; keep the package version.
+    }
     await workspace.refresh();
     if (disposed) return;
     if (isTauri()) {
@@ -165,16 +177,21 @@ onUnmounted(() => {
             版本
           </span>
           <span>
-            1.0.1 Bate
+            {{ appVersion }} Bate
           </span>
         </div>
       </div>
     </aside>
     <main class="app-main">
       <header class="app-topbar">
-        <span class="breadcrumb">
-          {{breadcrumb}}
-        </span>
+        <div class="topbar-leading">
+          <IconButton v-if="route.path==='/settings'" label="返回上一页" @click="router.push(settingsReturnPath)">
+            <ArrowLeft :size="17"/>
+          </IconButton>
+          <span class="breadcrumb">
+            {{breadcrumb}}
+          </span>
+        </div>
         <IconButton :label="theme==='light'?'切换暗色主题':'切换亮色主题'" @click="toggleTheme">
           <Moon v-if="theme==='light'" :size="17"/>
           <Sun v-else :size="17"/>

@@ -64,6 +64,62 @@ export function useOperations() {
     return runningFor(targetKey, kinds) !== null;
   }
 
+  function begin(options: {
+    kind: OperationKind;
+    target: OperationTarget;
+    title: string;
+    stage: string;
+  }): string {
+    const id = crypto.randomUUID();
+    commit({
+      id,
+      kind: options.kind,
+      target: options.target,
+      targetKey: operationTargetKey(options.target),
+      title: options.title,
+      stage: options.stage,
+      status: "running",
+      startedAt: Date.now(),
+      finishedAt: null,
+      error: null,
+    });
+    return id;
+  }
+
+  function setStage(id: string, stage: string) {
+    patch(id, { stage });
+  }
+
+  function succeed(id: string, detail?: string) {
+    patch(id, { status: "succeeded", stage: "已完成", detail: detail ?? null, finishedAt: Date.now() });
+  }
+
+  function fail(id: string, error: UserError) {
+    patch(id, { status: "failed", error, finishedAt: Date.now() });
+  }
+
+  function recordFailure(options: {
+    kind: OperationKind;
+    target: OperationTarget;
+    title: string;
+    stage: string;
+    error: UserError;
+  }) {
+    const now = Date.now();
+    commit({
+      id: crypto.randomUUID(),
+      kind: options.kind,
+      target: options.target,
+      targetKey: operationTargetKey(options.target),
+      title: options.title,
+      stage: options.stage,
+      status: "failed",
+      startedAt: now,
+      finishedAt: now,
+      error: options.error,
+    });
+  }
+
   function dismiss(id: string) {
     const current = entries.value.get(id);
     if (!current || current.status === "running") return;
@@ -109,5 +165,5 @@ export function useOperations() {
     }
   }
 
-  return { all, running, latestFor, runningFor, isRunningFor, dismiss, run };
+  return { all, running, latestFor, runningFor, isRunningFor, begin, setStage, succeed, fail, dismiss, recordFailure, run };
 }

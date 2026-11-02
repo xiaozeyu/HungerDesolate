@@ -325,39 +325,17 @@ if (response.requestSeq !== latest.requestSeq) {
 - 不挂 Docker socket
 - 限制可写目录
 
-## 下一步开发
+## 当前重点
 
-优先级顺序（参见 `spec/implementation-roadmap.md`）：
+当前版本已完成主机连接、环境与 Docker 安装、Release 构建/导入/验证、专服生命周期、世界配置、主机/专服 MOD、备份恢复、诊断、构建缓存清理和全局任务记录。
 
-1. **S3-01: 世界配置** (P0)
-   - 配置 UI
-   - Token 管理
-   - Revision 冲突
+后续工作只保留真实功能缺口，不再维护阶段工作包。具体能力与边界见：
 
-2. **S3-02: MOD 管理** (P0)
-   - MOD 搜索/添加
-   - 配置 UI
-   - 下载/应用
-
-3. **阶段 0: 真实验证**
-   - Ubuntu 26.04 部署
-   - 三实例同时运行
-   - 网络验证（公网/LAN/Steam）
-
-4. **S3-03: 备份恢复** (P0)
-   - 停服备份
-   - 校验/下载
-   - 恢复/回滚
-
-5. **S3-04: 更新** (P0)
-   - DST 版本更新
-   - MOD 更新
-   - 失败回滚
+- [当前状态](current-status.md)
 
 ## 相关文档
 
 - [后端实施文档](../spec/backend-implementation.md) - Rust/远端脚本设计
 - [前端实施文档](../spec/frontend-implementation.md) - Vue/状态管理设计
-- [实施路线图](../spec/implementation-roadmap.md) - 工作包与验收
 - [DST Release 准备指南](./dst-release-setup.md) - 如何构建镜像
 - [当前状态](./current-status.md) - 已完成功能与限制

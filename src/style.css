@@ -41,6 +41,7 @@ strong { font-weight: 600; } small { font-size: 12px; }
 .app-topbar { display: flex; align-items: center; gap: var(--space-4); padding: 0 var(--space-6); border-bottom: 1px solid var(--border); }
 .breadcrumb { display: flex; gap: var(--space-2); align-items: center; text-align: left; font-size: 13px; min-width: 0; }
 .app-topbar > .icon-button { margin-left: auto; }
+.topbar-leading { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .topbar-actions, .header-actions { display: flex; align-items: center; gap: var(--space-2); }
 .route-scroll { min-height: 0; overflow: auto; } .page { max-width: 1120px; padding: var(--space-6); margin: 0 auto; }
 .page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-6); margin-bottom: var(--space-6); }

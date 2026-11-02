@@ -35,11 +35,11 @@ pub async fn pick_private_key_file(app: tauri::AppHandle) -> CommandResult<Optio
 }
 
 #[tauri::command]
-pub fn get_bootstrap_snapshot() -> BootstrapSnapshot {
+pub fn get_bootstrap_snapshot(app: tauri::AppHandle) -> BootstrapSnapshot {
     BootstrapSnapshot {
         schema_version: 1,
         product_name: "荒野中枢",
-        product_version: env!("CARGO_PKG_VERSION"),
+        product_version: app.package_info().version.to_string(),
         application_id: "app.hungerdesolate.hub",
         remote_operations_available: false,
     }

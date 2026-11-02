@@ -196,7 +196,22 @@ fn parse_inner(source: &str, folder_name: &str, locale: &str) -> Result<ModSchem
             diagnostics: Vec::new(),
         });
     };
-    let fields = read_fields(options)?;
+    let fields = match read_fields(options) {
+        Ok(fields) => fields,
+        Err(error) => {
+            return Ok(ModSchema {
+                status: SchemaStatus::Failed,
+                folder_name: folder_name.to_string(),
+                locale: locale.to_string(),
+                metadata,
+                fields: Vec::new(),
+                diagnostics: vec![ModDiagnostic {
+                    code: error.code().into(),
+                    message: error.message(),
+                }],
+            });
+        }
+    };
     let status = if fields.is_empty() {
         SchemaStatus::NoOptions
     } else if fields.iter().any(|field| !field.editable) {
@@ -270,6 +285,22 @@ fn optional_string(table: &LuaTable, key: &str) -> Result<Option<String>, ParseF
     }
 }
 
+fn optional_display_string(table: &LuaTable, key: &str) -> Result<Option<String>, ParseFailure> {
+    match table.get::<LuaValue>(key).map_err(map_lua_error)? {
+        LuaValue::Nil => Ok(None),
+        LuaValue::String(value) => Ok(Some(
+            value
+                .to_str()
+                .map_err(|_| ParseFailure::UnsupportedValue("MOD 文本不是 UTF-8"))?
+                .to_string(),
+        )),
+        LuaValue::Integer(value) => Ok(Some(value.to_string())),
+        LuaValue::Number(value) if value.is_finite() => Ok(Some(value.to_string())),
+        LuaValue::Boolean(value) => Ok(Some(value.to_string())),
+        _ => Ok(None),
+    }
+}
+
 fn optional_integer(table: &LuaTable, key: &str) -> Result<Option<i64>, ParseFailure> {
     match table.get::<LuaValue>(key).map_err(map_lua_error)? {
         LuaValue::Nil => Ok(None),
@@ -322,8 +353,8 @@ fn read_field(field: &LuaTable) -> Result<ModField, ParseFailure> {
                     break;
                 }
             };
-            let option_label =
-                optional_string(option, "description")?.unwrap_or_else(|| option_value.to_string());
+            let option_label = optional_display_string(option, "description")?
+                .unwrap_or_else(|| option_value.to_string());
             options.push(ModOption {
                 label: option_label,
                 value: option_value,
@@ -471,6 +502,29 @@ mod tests {
         assert_eq!(schema.status, SchemaStatus::Failed);
         assert_eq!(schema.fields.len(), 0);
         assert_eq!(schema.diagnostics[0].code, "MOD_RUNTIME_ERROR");
+    }
+
+    #[test]
+    fn preserves_metadata_when_configuration_parsing_fails() {
+        let schema = parse_modinfo(
+            r#"name = "Example"; version = "1.2.3"; configuration_options = {{ name = "mode", default = function() end }}"#,
+            "workshop-123",
+            "zh",
+        );
+        assert_eq!(schema.status, SchemaStatus::Failed);
+        assert_eq!(schema.metadata.name.as_deref(), Some("Example"));
+        assert_eq!(schema.metadata.version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn accepts_numeric_option_descriptions() {
+        let schema = parse_modinfo(
+            "configuration_options = {{ name = 'auto_close', options = {{ data = 1, description = 1 }, { data = 2, description = 2 }}, default = 1 }}",
+            "workshop-123",
+            "zh",
+        );
+        assert_eq!(schema.status, SchemaStatus::Available);
+        assert_eq!(schema.fields[0].options[0].label, "1");
     }
 
     #[test]

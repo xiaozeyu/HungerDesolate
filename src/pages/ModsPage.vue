@@ -56,11 +56,22 @@ const allHostLibrarySelected = computed(() => hostLibraryCandidates.value.length
 const hostModMetadata = computed(() => {
   const byWorkshop = new Map<string, HostModItem>();
   for (const item of hostLibraryItems.value) {
-    if (!byWorkshop.has(item.workshopId)) byWorkshop.set(item.workshopId, item);
+    const current = byWorkshop.get(item.workshopId);
+    if (!current || (Date.parse(item.preparedAt ?? "") || 0) > (Date.parse(current.preparedAt ?? "") || 0)) byWorkshop.set(item.workshopId, item);
   }
   return byWorkshop;
 });
-const hostMetadataFor = (item: InstanceModSummary) => hostModMetadata.value.get(item.workshopId);
+const hostMetadataFor = (item: InstanceModSummary) => {
+  const versions = hostLibraryItems.value.filter(entry => entry.workshopId === item.workshopId);
+  return versions.find(entry => entry.contentDigest === item.artifactDigest) ?? hostModMetadata.value.get(item.workshopId);
+};
+const instanceModName = (item: InstanceModSummary) => item.schema.metadata.name ?? hostMetadataFor(item)?.name ?? item.workshopId;
+const instanceModVersion = (item: InstanceModSummary) => item.schema.metadata.version ?? hostMetadataFor(item)?.version ?? null;
+const schemaDiagnostic = (item: InstanceModSummary) => item.schema.diagnostics[0]?.message ?? "";
+const versionedPreview = (url: string | null, digest: string | null) => {
+  if (!url || !digest) return url ?? undefined;
+  return `${url}${url.includes("?") ? "&" : "?"}v=${digest.slice(0, 12)}`;
+};
 const savingWorkshopId = ref<string | null>(null);
 const applyTask = computed<TaskSnapshot | null>(() => {
   const selected = target.value;
@@ -785,10 +796,10 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
           <tr v-for="item in items" :key="item.workshopId">
             <td>
               <div class="instance-mod-main">
-                <img v-if="hostMetadataFor(item)?.previewUrl" class="instance-mod-thumb" :src="hostMetadataFor(item)?.previewUrl ?? undefined" :alt="item.schema.metadata.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
+                <img v-if="hostMetadataFor(item)?.previewUrl" class="instance-mod-thumb" :src="versionedPreview(hostMetadataFor(item)?.previewUrl ?? null, hostMetadataFor(item)?.contentDigest ?? null)" :alt="instanceModName(item)" width="40" height="40" loading="lazy"/>
                 <span v-else class="instance-mod-thumb instance-mod-placeholder"><Package :size="17"/></span>
                 <span class="instance-mod-copy">
-                  <strong>{{ item.schema.metadata.name ?? item.workshopId }}</strong>
+                  <strong>{{ instanceModName(item) }}</strong>
                   <small class="table-sub mono">Workshop · {{ item.workshopId }}</small>
                 </span>
               </div>
@@ -799,19 +810,19 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
               <small class="table-sub">{{ item.deployedVersion ? displayVersion(item.deployedVersion) : '运行版本未知' }}</small>
             </td>
             <td><StatusLabel :tone="statusTone(item.schema.status)" :label="statusLabel(item.schema.status)" /></td>
-            <td class="mono">{{ displayVersion(item.schema.metadata.version) }}</td>
+            <td class="mono"><span :title="schemaDiagnostic(item)">{{ displayVersion(instanceModVersion(item)) }}</span></td>
             <td class="table-action">
               <button v-if="item.desiredEnabled !== null" class="icon-button" type="button"
-                :aria-label="item.desiredEnabled ? `禁用 ${item.schema.metadata.name ?? item.workshopId}` : `启用 ${item.schema.metadata.name ?? item.workshopId}`"
+                :aria-label="item.desiredEnabled ? `禁用 ${instanceModName(item)}` : `启用 ${instanceModName(item)}`"
                 :title="item.desiredEnabled ? '禁用 MOD' : '启用 MOD'"
                 :disabled="workspace.preview.value || savingWorkshopId !== null || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
                 @click="setModEnabled(item)"><Power :size="15"/></button>
               <button v-if="item.desiredEnabled !== null" class="icon-button" type="button"
-                :aria-label="`移除 ${item.schema.metadata.name ?? item.workshopId}`" title="移除 MOD"
+                :aria-label="`移除 ${instanceModName(item)}`" title="移除 MOD"
                 :disabled="workspace.preview.value || savingWorkshopId !== null || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
                 @click="removeTarget = item; removeError = ''"><Trash2 :size="15"/></button>
               <button v-if="canEditConfiguration(item)" class="icon-button" type="button"
-                :aria-label="`编辑 ${item.schema.metadata.name ?? item.workshopId} 配置`"
+                :aria-label="`编辑 ${instanceModName(item)} 配置`"
                 title="编辑配置" :disabled="workspace.preview.value || configSaving || loading"
                 @click="openConfigurationEditor(item)"><Pencil :size="15"/></button>
             </td>
@@ -871,11 +882,11 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
       </template>
     </AppDialog>
 
-    <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod?.schema.metadata.name ?? editingMod?.workshopId ?? ''}`" size="lg">
+    <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod ? instanceModName(editingMod) : ''}`" size="lg">
       <div v-if="editingMod" class="mod-config-editor">
         <div class="mod-config-meta">
           <span class="mono">{{ editingMod.workshopId }}</span>
-          <span>{{ editingMod.schema.metadata.version ?? '版本未知' }}</span>
+          <span>{{ instanceModVersion(editingMod) ?? '版本未知' }}</span>
           <span class="mono">{{ editingMod.preparedDigest?.slice(0, 12) }}</span>
         </div>
         <div v-for="group in configFieldGroups" :key="group.name" class="mod-config-field">
@@ -960,7 +971,7 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
     <AppDialog :open="!!removeTarget" title="移除 MOD" description="移除后，世界中由该 MOD 添加的物品或角色数据可能无法读取。" @update:open="value => { if (!value && !removeBusy) { removeTarget = null; removeError = ''; } }">
       <div v-if="removeTarget" class="form-stack">
         <div class="form-facts">
-          <div><span>MOD</span><strong>{{ removeTarget.schema.metadata.name ?? removeTarget.workshopId }}</strong></div>
+          <div><span>MOD</span><strong>{{ instanceModName(removeTarget) }}</strong></div>
           <div><span>Workshop ID</span><strong class="mono">{{ removeTarget.workshopId }}</strong></div>
         </div>
         <div v-if="removeError" class="error-strip" role="alert">{{ removeError }}</div>

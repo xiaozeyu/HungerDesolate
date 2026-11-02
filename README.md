@@ -2,18 +2,29 @@
 
 Windows/macOS 桌面控制台，通过 SSH/SFTP 管理 Linux 上的独立 DST Docker Compose 专服。
 
-当前版本 `0.1.0` 已具备项目骨架与本地连接管理。桌面环境可以添加、编辑、删除连接元数据；远端流程均从真实主机连接进入，不使用演示主机入口。
+当前版本：**1.0.1（Bate）**。版本号只在 [package.json](package.json) 中维护。
 
-SSH 连接设置已接入指纹扫描与确认、密码/私钥保存到系统凭据库、只读登录验证和 hostId 发现。“主机环境”已支持真实系统、Docker/Compose、资源和目录权限检查。已支持管理目录初始化与 Ubuntu 26.04 root SSH 的 Docker/Compose 安装。用户已确认安装主路径通过；真实 DST 部署仍待阶段 0 验证。
+## 功能
+
+- 主机连接管理：SSH 指纹确认、系统凭据库、登录验证与 hostId 发现。
+- 主机环境：系统、Docker/Compose、资源和目录权限检查；Docker/Compose 安装。
+- Docker 镜像与 Release：构建、导入、验证、删除和构建缓存清理。
+- 专服：创建、启停、删除、概览、诊断和运行日志。
+- 世界配置：Master/Caves 分片、规则、生成参数、Token/密码和应用。
+- 主机 MOD 库：Workshop 链接/ID 导入、Steam 合集批量导入、检查更新、批量更新和同步到专服。
+- 专服 MOD：从主机库批量选择、配置解析、启用/禁用、应用和版本更新。
+- 备份：创建、下载、恢复和保护点。
+- 全局任务记录：远端任务、构建任务和本地操作统一在任务抽屉中查看；切换页面后任务继续执行。
+- 应用设置：主题和本地数据信息；设置页保留进入前的导航上下文，可返回原页面。
 
 ## 开发环境
 
 - Node.js 22.18+、npm 10+
 - Rust stable 与对应平台 Tauri 2 构建环境
 - macOS 需要 Xcode Command Line Tools；Windows 需要 MSVC 构建工具与 WebView2
-- 远端 Linux amd64/Docker Compose 的最低兼容版本尚待阶段 0 实测
+- 远端 Linux amd64，Docker Compose 路线
 
-前后端依赖已用 lockfile 固定；Node 和 Rust 是不同构建链。本项目不使用 Maven。
+前后端依赖已用 lockfile 固定。本项目不使用 Maven。
 
 ## 启动
 
@@ -22,13 +33,37 @@ npm ci
 npm run dev
 ```
 
-浏览器访问本地 `http://127.0.0.1:1421`。首次显示空主机列表；远端功能需要在桌面环境中添加并连接真实主机。
+浏览器预览地址：`http://127.0.0.1:1421`。浏览器模式不连接真实后端。
 
 ```bash
 npm run desktop:dev
 ```
 
-桌面开发启动 Tauri 窗口与 Rust 后端。新应用标识为 `app.hungerdesolate.hub`，数据库文件为 `hunger-desolate.sqlite3`，独立于旧项目 `app.famine.ecs`。
+桌面模式使用应用标识 `app.hungerdesolate.hub`，数据库为 `hunger-desolate.sqlite3`。
+
+## 版本管理
+
+版本唯一来源：
+
+```text
+package.json
+```
+
+发布流程：
+
+1. 修改 `package.json` 的 `version`；
+2. 运行 `npm run desktop:build`，构建前自动执行 `version:sync`；
+3. `version:sync` 将版本同步到 `src-tauri/Cargo.toml`；
+4. Tauri 通过 `src-tauri/tauri.conf.json` 的 `"version": "../package.json"` 读取应用版本；
+5. 界面通过 `get_bootstrap_snapshot` 显示运行时版本。
+
+仅同步 Rust/Cargo 版本：
+
+```bash
+npm run version:sync
+```
+
+界面显示的 `Bate` 后缀是产品文案，不属于版本号。
 
 ## 检查与构建
 
@@ -41,132 +76,41 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 npm run desktop:build
 ```
 
-本地依赖缓存完整时，Cargo 可以额外带 `--offline`。仅编译桌面程序、不生成安装包：`npm run tauri -- build --debug --no-bundle`。Windows/macOS 安装包需要分别在相应环境构建，签名与正式发布尚未配置。
+仅编译桌面程序、不生成安装包：
+
+```bash
+npm run tauri -- build --debug --no-bundle
+```
 
 ## 目录
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/pages` | 主机、专服列表、环境、连接、概览、世界、MOD、备份、更新、诊断与设置 |
-| `src/components` | 页面标题、状态、Reka Select/Tooltip 与预览提示 |
-| `src/api` | Tauri 调用入口；远端未实现功能显式返回不可用 |
-| `src/context`、`src/composables` | 活动实例代次、列表选择授权、请求隔离与任务事件 |
-| `src/lib` | 生产调用的身份/请求/事件合并规则及回归测试 |
-| `src/fixtures` | 自动化测试 fixture，不作为产品入口数据 |
-| `src-tauri/src` | Rust command、DTO、本地 SQLite 初始化、连接 CRUD 与输入校验 |
+| `src/pages` | 主机、专服、环境、Release、世界、MOD、备份、诊断与设置 |
+| `src/components` | 通用组件、任务面板和对话框 |
+| `src/api` | Tauri command 调用入口 |
+| `src/composables` | 工作区、任务、操作、设置和弹窗状态 |
+| `src/lib` | 请求隔离、任务合并、配置解析、持久化规则及测试 |
+| `src-tauri/src` | Rust command、DTO、SQLite、SSH、任务与远端脚本编排 |
 | `src-tauri/migrations` | 追加式数据库迁移 |
-| `remote-scripts`、`docker` | 只读环境探测脚本；部署编排和生产镜像待实现 |
-| `spec` | 产品实施文档与验收工作包 |
+| `remote-scripts`、`docker` | 远端动作、探测脚本和运行时镜像 |
+| `spec` | 接口契约、前后端实现与功能设计 |
+| `docs` | 架构、当前状态、诊断、Release 和 MOD 库说明 |
 
-## 已实现与边界
+## 关键约束
 
-已实现独立应用标识、项目锁文件、两层路由、列表选择约束、上下文代次/序号校验、固定任务目标的事件合并、本地 SQLite 版本迁移、真实连接元数据 CRUD、记录版本冲突与幂等处理、版本一致性检查。
+- 远端实例业务必须携带完整 target；不能依赖“当前选中实例”。
+- 查询、写入、任务和草稿绑定主机连接版本与请求身份。
+- 密码、Token、SSH 密钥不进入 SQLite、草稿、日志、事件或诊断。
+- 远端 Docker 路线固定，不引入第二套部署实现。
+- 界面保持极简，不恢复阶段说明性常驻文案。
 
-添加主机时可直接填写 SSH 密码，或输入/选择本机私钥文件路径及可选口令；连接设置中也支持粘贴完整私钥。元数据和凭据分别提交，秘密只存入系统凭据库，不回显、不写 SQLite/草稿/日志。Docker 安装、专服创建执行、世界配置、MOD 管理、备份/恢复和专服诊断链路均已接入；浏览器只预览，文件选择与真实保存需桌面环境。默认字体使用系统回退，Inter/JetBrains Mono 本地字体与正式发行图标仍待固化。
+## 文档
 
-## 验证真实主机
-
-1. 使用 `npm run desktop:dev`，退出界面预览后添加主机。选择密码时输入 SSH 密码；选择密钥时填写/选择私钥文件路径（如 `~/.ssh/id_ed25519`）及可选口令，然后保存。保存后从提示进入连接设置。
-2. 点击“扫描指纹”，通过主机控制台或可信渠道核对 SHA-256 指纹，再勾选确认。
-3. 添加时已保存的凭据在首次确认指纹后继续可用；需要修改时点击“替换凭据”。私钥文件内容导入独立系统凭据库 `app.hungerdesolate.hub.ssh`，后续更改原文件需重新导入；不要选择 `.pub` 公钥文件。
-4. 点击“验证登录”。验证成功后从提示进入主机环境。管理目录不存在时显示“未初始化”；已存在则只读校验 `/var/lib/famine-hub/host.json` 并绑定 hostId，不创建目录、不部署服务。
-5. 旧凭据清理失败时，可使用“清理旧凭据”重试；失败项不会被标为已删除。
-
-操作只验证当时的登录与身份，结束后关闭 SSH 会话；不代表持续连接或游戏运行正常。当前不实现跳板机、SSH agent、keyboard-interactive 或任意远端命令输入。macOS 构建通过；系统钥匙串授权交互与 Windows 实机行为仍需在目标机器验证。
-
-可选本机 SSH 集成测试（需 OpenSSH 工具）：
-
-```bash
-python3 scripts/test-local-ssh.py
-```
-
-脚本只启动临时 loopback SSH 服务并使用临时密钥，结束清理；不改用户 SSH 配置或 authorized_keys。普通 cargo test 跳过这个需要服务的测试，脚本单独运行它。
-
-先阅读 [实施入口](spec/README.md) 和 [当前骨架状态](spec/scaffold-status.md)。
-
-如果添加时主机已创建但凭据保存失败，可在原弹窗修正并重试（沿用原记录），或关闭后到该主机连接设置补充凭据。关闭弹窗会清空敏感输入。
-
-后续开发顺序见 [后续功能清单](spec/next-features.md)。
-
-## 专服列表
-
-桌面环境选择主机 → 专服列表，会通过已确认 SSH 连接读取 `/var/lib/famine-hub/registry.json`，并核对活动实例 manifest。可以刷新、选择实例和进入真实身份概览。未初始化、注册表缺失/损坏、权限不足或身份不符均明确报错，不自动创建远端文件。
-
-当前是只读发现：运行状态、玩家数与实际版本保持未知，直到接入容器/进程运行探测。创建失败且没有 manifest 的记录保留在表中；已归档实例不显示。新建、启停、更新和远端注册写入仍在后续部署工作包中。
-
-最小读取 schema 示例见 `src-tauri/tests/fixtures/registry-v1.json` 与 `manifest-v1.json`，仅用于测试参考；它们不代表存在可运行 DST 专服，请勿把示例覆盖到已有管理目录。本轮 SSH fixture 脚本已同时覆盖 registry/manifest 读成功及损坏/缺失/符号链接/错误归属等场景。
-
-## 主机环境检查
-
-桌面环境选择已添加主机 → 主机环境，进入时自动执行只读检查，可点击“重新检查”。未确认指纹或凭据缺失时，页面提供连接设置入口。
-
-结果包括系统/架构、UID、内存、管理目录所在盘、Docker 客户端/服务端、Compose、Docker 数据盘、必要工具及权限。缺失/权限/不可访问分开表示，未知资源不作为 0。展开阻断项查看恢复步骤；环境检查本身只读；初始化与 Docker 安装通过各自确认入口执行。
-
-当前检查固定本机 rootful socket `/var/run/docker.sock`，不采用远端 Docker context；rootless 自定义 socket 尚未支持。检查通过不代表阶段 0 三专服联网/更新/恢复验证完成，也不保证资源足以运行任意实例。
-
-隔离探测测试：`python3 scripts/test-host-environment.py`，使用临时目录、命令 fixture 和 Unix socket，不操作真实 Docker。`python3 scripts/test-local-ssh.py` 同时验证脚本通过已认证 SSH 通道执行。
-
-## 新建专服与 DST Release
-
-### 当前状态
-
-专服列表读取成功后，点击“新建专服”，填写专服名称、DST Release、启动策略和洞穴开关即可。网络路线固定为公网并自动分配端口。点击“创建专服”后，应用会在内部执行注册表、端口、资源和 Release 检查，通过后直接接纳创建任务；有阻断项时在同一对话框显示，不再要求先进入独立预览页。
-
-创建成功后从列表提示进入该专服的世界配置页。世界字段和 Klei Token 在容器创建后配置；创建表单不再提供没有实际启动行为的“创建后启动”选项。浏览器只预览，真实创建需要桌面环境。流程简化说明见 [主流程简化说明](docs/flow-optimization.md)。
-
-### 主机 MOD 库
-
-主机侧新增“MOD 库”，用于查询 Workshop 元数据、下载和保存公共内容；添加前会显示图片、名称、作者和可用状态。实例的 MOD 页面从主机库选择版本加入，不需要再次下载；实例仍独立保存启用状态、配置和应用结果。
-
-主机库删除版本前会检查实例 desired/deployed 和活动 MOD Release 引用。备份只记录 MOD 引用，不保存活动 MOD Release 内容；恢复使用主机库当前最新版本，缺失时提示但允许继续。详见 [主机级 MOD 库](docs/host-mod-library.md)。
-
-专服诊断页面提供运行摘要、Master/Caves 最近日志、失败任务证据和脱敏处理，详见 [专服诊断](docs/diagnostics.md)。
-
-### DST Release 管理
-
-Release 管理提供“清理构建缓存”：预览构建目录和 Docker Build Cache 可回收空间，确认后删除 `/var/lib/famine-hub/image-build/dst-runtime-build` 并执行受控 `docker builder prune -f`。不会删除 Release 镜像、容器或实例数据。
-
-创建专服需要基础验证通过的 DST release（包含 DST Dedicated Server 的 Docker 镜像）。当前阶段需要手动构建和导入 release；Klei 配置 ZIP 只用于可选的隔离运行验证：
-
-**1. 构建 DST runtime 镜像**
-
-```bash
-cd docker/runtime
-./build.sh
-```
-
-脚本通过 SteamCMD 下载 DST 服务端，构建 Docker 镜像，并生成 release 元数据和 tar 包。
-
-**2. 传输到远端主机**
-
-```bash
-# 获取 release ID
-RELEASE_ID=$(jq -r '.releaseId' release-metadata.json)
-
-# 创建 staging 目录
-ssh user@host “sudo mkdir -p /var/lib/famine-hub/staging/${RELEASE_ID} && \
-               sudo chown $(whoami) /var/lib/famine-hub/staging/${RELEASE_ID}”
-
-# 传输文件
-scp release-metadata.json user@host:/var/lib/famine-hub/staging/${RELEASE_ID}/
-scp dst-runtime-*.tar user@host:/var/lib/famine-hub/staging/${RELEASE_ID}/artifact.tar
-
-# 加载镜像
-ssh user@host “cd /var/lib/famine-hub/staging/${RELEASE_ID} && sudo docker load -i artifact.tar”
-```
-
-**3. 在应用中导入**
-
-创建专服对话框会检测到 staging 中的 release 并提供导入选项。导入成功后，该 release 可用于创建新实例。
-
-详细步骤参见 [DST Release 准备指南](docs/dst-release-setup.md)。
-
-### 限制与未来计划
-
-当前阶段 0 游戏镜像和部署兼容性尚未验证。Docker 安装成功不等于游戏部署门禁通过。未来版本将支持：
-- 官方预构建镜像（无需本地构建）
-- 从容器仓库自动拉取
-- 版本更新通知
-- 一键更新流程
-
-完整实施状态见 [当前状态文档](docs/current-status.md)。
+- [文档入口](spec/README.md)
+- [当前状态](docs/current-status.md)
+- [架构概览](docs/architecture-overview.md)
+- [接口契约](spec/api-contract.md)
+- [主机 MOD 库](docs/host-mod-library.md)
+- [专服诊断](docs/diagnostics.md)
+- [DST Release 准备](docs/dst-release-setup.md)

@@ -7,7 +7,7 @@ pub type CommandResult<T> = Result<T, Box<CommandError>>;
 pub struct BootstrapSnapshot {
     pub schema_version: u32,
     pub product_name: &'static str,
-    pub product_version: &'static str,
+    pub product_version: String,
     pub application_id: &'static str,
     pub remote_operations_available: bool,
 }

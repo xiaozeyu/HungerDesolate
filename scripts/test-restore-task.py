@@ -476,5 +476,38 @@ class RestoreTaskStateTests(unittest.TestCase):
                 self.assertEqual(MODULE.load(TASK_ID)["sequence"], 2)
 
 
+class RestoreBoundaryTests(unittest.TestCase):
+    def test_preserves_current_access_policy_and_digest(self):
+        current = {"settings": {"advanced": {"adminList": ["current-admin"], "whitelist": ["current-white"],
+                                              "blocklist": ["current-block"], "whitelistSlots": 1}}}
+        desired = {"settings": {"advanced": {"adminList": ["old"], "whitelist": [], "blocklist": [], "whitelistSlots": 0}}}
+        deployed = {"settings": {"advanced": {"adminList": ["old"], "whitelist": [], "blocklist": [], "whitelistSlots": 0}},
+                    "digest": "old"}
+        MODULE.preserve_access_policy(desired, deployed, current)
+        self.assertEqual(desired["settings"]["advanced"]["adminList"], ["current-admin"])
+        self.assertEqual(deployed["settings"]["advanced"]["whitelistSlots"], 1)
+        self.assertEqual(deployed["digest"], "sha256:" + __import__("hashlib").sha256(
+            MODULE.canonical(deployed["settings"])).hexdigest())
+
+    def test_preserves_current_cluster_access_fields(self):
+        with tempfile.TemporaryDirectory(prefix="restore-cluster-") as temporary:
+            instance = Path(temporary) / "instance"
+            staging = Path(temporary) / "staging"
+            for directory in (instance, staging, instance / "config", staging / "config",
+                              instance / "config" / "Cluster_1", staging / "config" / "Cluster_1"):
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                directory.chmod(0o700)
+            (instance / "config" / "Cluster_1" / "cluster.ini").write_text(
+                "[NETWORK]\ncluster_password = current-password\n[SHARD]\ncluster_key = current-key\n[GAMEPLAY]\nwhitelist_slots = 4\n")
+            (staging / "config" / "Cluster_1" / "cluster.ini").write_text(
+                "[NETWORK]\ncluster_password = old-password\n[SHARD]\ncluster_key = old-key\n[GAMEPLAY]\nwhitelist_slots = 9\n")
+            MODULE.preserve_cluster_access(instance, staging)
+            data = (staging / "config" / "Cluster_1" / "cluster.ini").read_text()
+            self.assertIn("current-password", data)
+            self.assertIn("current-key", data)
+            self.assertIn("whitelist_slots = 4", data)
+            self.assertNotIn("old-password", data)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -332,6 +332,7 @@ if (response.requestSeq !== latest.requestSeq) {
 后续工作只保留真实功能缺口，不再维护阶段工作包。具体能力与边界见：
 
 - [当前状态](current-status.md)
+- [备份与恢复文件边界](backup-restore-boundaries.md)
 
 ## 相关文档
 

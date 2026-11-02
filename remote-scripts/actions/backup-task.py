@@ -1,5 +1,8 @@
 """Persistent, identity-bound backup task admission and worker."""
+import configparser
 import fcntl
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -460,6 +463,39 @@ def wait_lock(fd, cancel_path):
             time.sleep(0.5)
 
 
+ACCESS_FIELDS = ("adminList", "whitelist", "blocklist", "whitelistSlots")
+
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def sanitize_cluster_ini(path):
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str
+    parser.read_string(path.read_text(encoding="utf-8"))
+    for section, key in (("NETWORK", "cluster_password"), ("SHARD", "cluster_key"),
+                         ("GAMEPLAY", "whitelist_slots")):
+        if parser.has_option(section, key):
+            parser.remove_option(section, key)
+    output = io.StringIO()
+    parser.write(output)
+    return output.getvalue().encode("utf-8")
+
+
+def sanitize_world_snapshot(path):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    settings = value.get("settings") if isinstance(value, dict) else None
+    advanced = settings.get("advanced") if isinstance(settings, dict) else None
+    if not isinstance(advanced, dict):
+        return canonical(value)
+    for field in ACCESS_FIELDS:
+        advanced[field] = 0 if field == "whitelistSlots" else []
+    if "digest" in value:
+        value["digest"] = digest(settings)
+    return canonical(value)
+
+
 def _worker_impl(task_id):
     archive_module = {}
     if os.geteuid() != 0:
@@ -614,7 +650,15 @@ def _worker_impl(task_id):
                 "configRevision": request["expectedRevision"],
                 "dstReleaseId": release_id, "modsReleaseId": active.get("modsReleaseId"), "reason": request["reason"]}
             archive_path = backup_stage / "archive.tar.gz"
-            created = archive_module["create_archive"](instance, archive_path, backup_identity, roots)
+            overrides = {}
+            cluster_path = instance / "config" / "Cluster_1" / "cluster.ini"
+            if cluster_path.is_file():
+                overrides["config/Cluster_1/cluster.ini"] = sanitize_cluster_ini(cluster_path)
+            for relative in ("desired/world.json", "deployed-world.json"):
+                path = instance / relative
+                if path.is_file():
+                    overrides[relative] = sanitize_world_snapshot(path)
+            created = archive_module["create_archive"](instance, archive_path, backup_identity, roots, overrides)
             verified = archive_module["inspect_archive"](archive_path, request["hostId"],
                                                            request["instanceId"], created["checksum"])
             set_status(directory, "running", "backupVerify", completed="backup")

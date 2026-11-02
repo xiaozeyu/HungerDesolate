@@ -39,6 +39,16 @@ class BackupArchiveTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_override_content_replaces_source_file_and_is_verified(self):
+        target = "config/Cluster_1/Master/server.ini"
+        created = MODULE.create_archive(self.source, self.archive, self.identity,
+                                        overrides={target: b"[NETWORK]\nserver_port = 12000\n"})
+        verified = MODULE.inspect_archive(self.archive, HOST, INSTANCE, created["checksum"])
+        staging = self.root / "staging"
+        MODULE.extract_to_staging(self.archive, staging, HOST, INSTANCE, created["checksum"])
+        self.assertEqual((staging / target).read_text(), "[NETWORK]\nserver_port = 12000\n")
+        self.assertEqual(verified["manifest"]["fileCount"], 2)
+
     def test_create_verify_and_extract_excludes_secret_files(self):
         created = MODULE.create_archive(self.source, self.archive, self.identity)
         verified = MODULE.inspect_archive(self.archive, HOST, INSTANCE, created["checksum"])

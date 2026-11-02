@@ -1,5 +1,6 @@
 """Create and inspect identity-bound, secret-free instance backup archives."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -50,7 +51,7 @@ def checked_open(path, expected_device, expected_inode):
     return fd, opened
 
 
-def checked_files(source_root, include_paths=None):
+def checked_files(source_root, include_paths=None, overrides=None):
     root = Path(source_root)
     root_info = root.lstat()
     if not stat.S_ISDIR(root_info.st_mode) or root.is_symlink():
@@ -58,6 +59,7 @@ def checked_files(source_root, include_paths=None):
     entries = []
     total = 0
     selected = include_paths or ["."]
+    overrides = overrides or {}
     def add_file(path, relative):
         nonlocal total
         name = path.name
@@ -68,6 +70,14 @@ def checked_files(source_root, include_paths=None):
             reject("BACKUP_SOURCE_UNSAFE")
         if not safe_member_name(relative):
             reject("BACKUP_SOURCE_UNSAFE")
+        if relative in overrides:
+            payload = overrides[relative]
+            total += len(payload)
+            if len(entries) >= MAX_FILES or total > MAX_BYTES:
+                reject("BACKUP_SIZE_LIMIT")
+            entries.append({"path": relative, "sizeBytes": len(payload),
+                            "sha256": None, "mode": 0o600, "_content": payload})
+            return
         total += info.st_size
         if len(entries) >= MAX_FILES or total > MAX_BYTES:
             reject("BACKUP_SIZE_LIMIT")
@@ -121,7 +131,7 @@ def safe_member_name(name):
             and all(part not in ("", ".", "..") for part in path.parts))
 
 
-def create_archive(source_root, output_path, identity, include_paths=None):
+def create_archive(source_root, output_path, identity, include_paths=None, overrides=None):
     if (not isinstance(identity, dict) or identity.get("schemaVersion") != 1
             or not isinstance(identity.get("hostId"), str)
             or not isinstance(identity.get("instanceId"), str)
@@ -134,7 +144,7 @@ def create_archive(source_root, output_path, identity, include_paths=None):
             and (identity["runtimeStatus"] != "stopped" or not identity["runtimeVerified"])):
         reject("BACKUP_COLD_REQUIRES_VERIFIED_STOP")
     started_at = datetime.now(timezone.utc).isoformat()
-    entries, total = checked_files(source_root, include_paths)
+    entries, total = checked_files(source_root, include_paths, overrides)
     manifest = None
     output = Path(output_path)
     if output.exists() or output.is_symlink():
@@ -143,6 +153,19 @@ def create_archive(source_root, output_path, identity, include_paths=None):
     try:
         with tarfile.open(temporary, "x:gz", format=tarfile.PAX_FORMAT) as archive:
             for item in entries:
+                payload = item.get("_content")
+                if payload is not None:
+                    info = tarfile.TarInfo("data/" + item["path"])
+                    info.size = len(payload)
+                    info.mode = item["mode"]
+                    info.mtime = 0
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    archive.addfile(info, io.BytesIO(payload))
+                    item["sha256"] = hashlib.sha256(payload).hexdigest()
+                    continue
                 path = Path(source_root) / item["path"]
                 fd, opened = checked_open(path, item["_device"], item["_inode"])
                 try:
@@ -191,7 +214,6 @@ def create_archive(source_root, output_path, identity, include_paths=None):
             info = tarfile.TarInfo("backup-manifest.json")
             info.size = len(raw)
             info.mode = 0o600
-            import io
             archive.addfile(info, io.BytesIO(raw))
         with temporary.open("rb") as bundle:
             os.fsync(bundle.fileno())

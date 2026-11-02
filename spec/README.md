@@ -1,6 +1,6 @@
 # 荒野中枢项目文档
 
-- 版本：1.0.1（Bate）
+- 版本：1.0.5（Bate）
 - 产品规划：[新项目规划](../new-product-plan.md)
 - 当前状态：[当前状态](../docs/current-status.md)
 

@@ -1,4 +1,5 @@
 """Read and CAS-save desired DST world settings for one managed instance."""
+import configparser
 import fcntl
 import hashlib
 import json
@@ -625,6 +626,22 @@ def preview_apply(request):
         os.close(lock_fd)
 
 
+def restart_services_for(relative_paths):
+    services = set()
+    for relative in relative_paths:
+        parts = PurePosixPath(relative).parts
+        if (len(parts) >= 3 and parts[0] == "Cluster_1"
+                and parts[1] in ("Master", "Caves") and parts[2] == "worldgenoverride.lua"):
+            continue
+        if len(parts) >= 3 and parts[0] == "Cluster_1" and parts[1] == "Master":
+            services.add("master")
+        elif len(parts) >= 3 and parts[0] == "Cluster_1" and parts[1] == "Caves":
+            services.add("caves")
+        else:
+            services.update(("master", "caves"))
+    return services
+
+
 def compose_command(instance, project, *arguments, timeout=120, capture=False):
     environment = dict(os.environ)
     for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "DOCKER_CONFIG"):
@@ -788,23 +805,43 @@ def apply_config(request):
         if work.exists():
             reject("WORLD_APPLY_OUTCOME_UNKNOWN")
         safe_directory(work, create=True)
-        staged_config = work / "new-config"
-        safe_directory(staged_config, create=True)
+
         for relative, content in rendered.items():
             relative_path = PurePosixPath(relative) if isinstance(relative, str) else None
             if (relative_path is None or relative_path.is_absolute() or ".." in relative_path.parts
                     or not isinstance(content, bytes)):
                 reject("WORLD_CONFIG_RENDER_UNSUPPORTED")
-            path = staged_config.joinpath(*relative_path.parts)
-            safe_directory(path.parent, create=True)
-            atomic_bytes(path, content, 0o600)
-        for directory, _, filenames in os.walk(staged_config):
-            os.chmod(directory, 0o700)
-            os.chown(directory, DST_RUNTIME_UID, DST_RUNTIME_UID)
-            for filename in filenames:
-                path = Path(directory) / filename
-                os.chmod(path, 0o600)
-                os.chown(path, DST_RUNTIME_UID, DST_RUNTIME_UID)
+
+        config_dir = instance / "config"
+        if config_dir.is_symlink():
+            reject("WORLD_CONFIG_PATH_UNSAFE")
+        if config_dir.exists():
+            info = config_dir.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid()):
+                reject("WORLD_CONFIG_PATH_UNSAFE")
+        else:
+            safe_directory(config_dir.parent)
+            config_dir.mkdir(mode=0o700)
+        os.chown(config_dir, DST_RUNTIME_UID, DST_RUNTIME_UID)
+        os.chmod(config_dir, 0o700)
+
+        changed = []
+        previous = {}
+        for relative, content in rendered.items():
+            target = config_dir.joinpath(*PurePosixPath(relative).parts)
+            if target.is_symlink():
+                reject("WORLD_CONFIG_PATH_UNSAFE")
+            if target.exists():
+                info = target.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    reject("WORLD_CONFIG_FILE_INVALID")
+                old = target.read_bytes()
+                if old == content:
+                    continue
+                previous[relative] = old
+            else:
+                previous[relative] = None
+            changed.append((relative, content))
 
         project = manifest.get("composeProject")
         if not isinstance(project, str) or not re.fullmatch(r"fh_[0-9a-f]{32}", project):
@@ -812,47 +849,41 @@ def apply_config(request):
         running = parse_running_services(
             compose_command(instance, project, "ps", "--services", "--status", "running", capture=True)
         )
-        config_dir = instance / "config"
-        previous_config = work / "previous-config"
-        if config_dir.is_symlink():
-            reject("WORLD_CONFIG_PATH_UNSAFE")
-        had_config = config_dir.exists()
-        if had_config:
-            info = config_dir.lstat()
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                reject("WORLD_CONFIG_PATH_UNSAFE")
-        switched = False
-        try:
-            if running:
-                compose_command(instance, project, "stop")
-            if had_config:
-                os.replace(config_dir, previous_config)
-            os.replace(staged_config, config_dir)
-            switched = True
-            compose_command(instance, project, "create", "--force-recreate")
-            if running:
-                compose_command(instance, project, "start", *sorted(running))
-            applied = {"schemaVersion": 1, "instanceId": instance_id, "revision": desired["revision"],
-                       "digest": settings_digest, "settings": settings,
-                       "appliedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                       "runtimeVerified": False}
-            atomic_json(instance / "deployed-world.json", applied)
-        except (Rejected, OSError):
-            if switched:
-                try:
-                    if running:
-                        compose_command(instance, project, "stop")
-                    if config_dir.exists():
-                        os.replace(config_dir, work / "failed-config")
-                    if had_config and previous_config.exists():
-                        os.replace(previous_config, config_dir)
-                    compose_command(instance, project, "create", "--force-recreate")
-                    if running:
-                        compose_command(instance, project, "start", *sorted(running))
-                    shutil.rmtree(work, ignore_errors=True)
-                except (Rejected, OSError):
-                    reject("WORLD_APPLY_ROLLBACK_FAILED")
-            raise
+        affected = restart_services_for([relative for relative, _ in changed]) & running
+        if changed:
+            try:
+                for relative, content in changed:
+                    target = config_dir.joinpath(*PurePosixPath(relative).parts)
+                    safe_directory(target.parent, create=True)
+                    atomic_bytes(target, content)
+                    os.chown(target, DST_RUNTIME_UID, DST_RUNTIME_UID)
+                    os.chmod(target, 0o600)
+                    current = target.parent
+                    while current != config_dir:
+                        os.chown(current, DST_RUNTIME_UID, DST_RUNTIME_UID)
+                        os.chmod(current, 0o700)
+                        current = current.parent
+                if affected:
+                    compose_command(instance, project, "restart", *sorted(affected))
+            except (Rejected, OSError):
+                for relative, old in previous.items():
+                    target = config_dir.joinpath(*PurePosixPath(relative).parts)
+                    if old is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        safe_directory(target.parent, create=True)
+                        atomic_bytes(target, old)
+                        os.chown(target, DST_RUNTIME_UID, DST_RUNTIME_UID)
+                        os.chmod(target, 0o600)
+                if affected:
+                    compose_command(instance, project, "restart", *sorted(affected))
+                raise
+
+        applied = {"schemaVersion": 1, "instanceId": instance_id, "revision": desired["revision"],
+                   "digest": settings_digest, "settings": settings,
+                   "appliedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                   "runtimeVerified": False}
+        atomic_json(instance / "deployed-world.json", applied)
 
         result = {"schemaVersion": 1, "requestId": request_id,
                   "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},

@@ -1,6 +1,9 @@
 """Identity-bound world restore task with protection point and rollback."""
 import configparser
+import copy
 import fcntl
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -511,6 +514,46 @@ def write_player_lists(staging, preserved):
         atomic_bytes(config_root / name, payload, 0o600)
 
 
+def preserve_access_policy(desired, deployed, current):
+    current_settings = current.get("settings") if isinstance(current, dict) else None
+    current_advanced = current_settings.get("advanced") if isinstance(current_settings, dict) else None
+    if not isinstance(current_advanced, dict):
+        return desired, deployed
+    for document in (desired, deployed):
+        settings = document.get("settings") if isinstance(document, dict) else None
+        advanced = settings.get("advanced") if isinstance(settings, dict) else None
+        if not isinstance(advanced, dict):
+            continue
+        for field in ("adminList", "whitelist", "blocklist", "whitelistSlots"):
+            if field in current_advanced:
+                advanced[field] = copy.deepcopy(current_advanced[field])
+        if "digest" in document:
+            document["digest"] = "sha256:" + hashlib.sha256(canonical(settings)).hexdigest()
+    return desired, deployed
+
+
+def preserve_cluster_access(instance, staging):
+    current_path = instance / "config" / "Cluster_1" / "cluster.ini"
+    backup_path = staging / "config" / "Cluster_1" / "cluster.ini"
+    if not current_path.is_file() or not backup_path.is_file():
+        return
+    current = configparser.ConfigParser(interpolation=None)
+    current.optionxform = str
+    current.read(current_path, encoding="utf-8")
+    backup = configparser.ConfigParser(interpolation=None)
+    backup.optionxform = str
+    backup.read(backup_path, encoding="utf-8")
+    for section, key in (("NETWORK", "cluster_password"), ("SHARD", "cluster_key"),
+                         ("GAMEPLAY", "whitelist_slots")):
+        if current.has_option(section, key):
+            backup.set(section, key, current.get(section, key))
+        else:
+            backup.remove_option(section, key)
+    output = io.StringIO()
+    backup.write(output)
+    atomic_bytes(backup_path, output.getvalue().encode("utf-8"), 0o600)
+
+
 def restore_cluster_token(instance, staging, desired):
     secrets = desired.get("secrets") if isinstance(desired, dict) else None
     token_ref = secrets.get("tokenRef") if isinstance(secrets, dict) else None
@@ -948,6 +991,8 @@ def _worker_impl(task_id):
         failure_step = "rebaseSnapshots"
         restore_desired, restore_deployed = rebase_world_config(
             restore_desired, restore_deployed, request["instanceId"], new_revision)
+        restore_desired, restore_deployed = preserve_access_policy(
+            restore_desired, restore_deployed, current_desired_world)
         restore_desired = preserve_current_secret_refs(restore_desired, current_desired_world)
         restore_desired_mods, restore_deployed_mods = rebase_mod_states(
             restore_desired_mods, restore_deployed_mods, request["instanceId"], new_revision)
@@ -962,6 +1007,7 @@ def _worker_impl(task_id):
         failure_step = "restoreCredentials"
         preserved_lists = preserve_player_lists(instance)
         write_player_lists(staging, preserved_lists)
+        preserve_cluster_access(instance, staging)
         restore_cluster_token(instance, staging, restore_desired)
         failure_step = "assignRuntimeOwnership"
         for relative in ("data/Master", "data/Caves", "config/Cluster_1"):

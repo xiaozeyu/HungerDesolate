@@ -185,5 +185,30 @@ class BackupTaskTests(unittest.TestCase):
         self.assertEqual(envelope["data"]["status"], "queued")
 
 
+class BackupSanitizerTests(unittest.TestCase):
+    def test_sanitizes_cluster_secrets_and_access_fields(self):
+        with tempfile.TemporaryDirectory(prefix="backup-sanitize-") as temporary:
+            path = Path(temporary) / "cluster.ini"
+            path.write_text("[NETWORK]\ncluster_password = secret\n[SHARD]\ncluster_key = 0123456789abcdef0123456789abcdef\n[GAMEPLAY]\nwhitelist_slots = 3\n")
+            data = MODULE.sanitize_cluster_ini(path).decode()
+            self.assertNotIn("cluster_password", data)
+            self.assertNotIn("cluster_key", data)
+            self.assertNotIn("whitelist_slots", data)
+
+    def test_sanitizes_world_access_policy_and_recomputes_digest(self):
+        with tempfile.TemporaryDirectory(prefix="backup-world-") as temporary:
+            path = Path(temporary) / "world.json"
+            settings = {"advanced": {"adminList": ["admin"], "whitelist": ["white"],
+                                     "blocklist": ["block"], "whitelistSlots": 2}}
+            path.write_text(json.dumps({"schemaVersion": 1, "settings": settings,
+                                        "digest": MODULE.digest(settings)}))
+            value = json.loads(MODULE.sanitize_world_snapshot(path))
+            self.assertEqual(value["settings"]["advanced"]["adminList"], [])
+            self.assertEqual(value["settings"]["advanced"]["whitelist"], [])
+            self.assertEqual(value["settings"]["advanced"]["blocklist"], [])
+            self.assertEqual(value["settings"]["advanced"]["whitelistSlots"], 0)
+            self.assertEqual(value["digest"], MODULE.digest(value["settings"]))
+
+
 if __name__ == "__main__":
     unittest.main()

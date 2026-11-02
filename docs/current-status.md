@@ -1,6 +1,6 @@
 # 荒野中枢 - 当前状态
 
-- 版本：1.0.1（Bate）
+- 版本：1.0.5（Bate）
 - 平台：Windows/macOS 桌面端；远端 Linux amd64
 - 部署：Docker Compose
 
@@ -61,6 +61,7 @@
 
 - [架构概览](architecture-overview.md)
 - [专服诊断](diagnostics.md)
+- [备份与恢复文件边界](backup-restore-boundaries.md)
 - [主机 MOD 库](host-mod-library.md)
 - [DST Release 准备](dst-release-setup.md)
 - [接口契约](../spec/api-contract.md)

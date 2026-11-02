@@ -2,7 +2,7 @@
 
 Windows/macOS 桌面控制台，通过 SSH/SFTP 管理 Linux 上的独立 DST Docker Compose 专服。
 
-当前版本：**1.0.1（Bate）**。版本号只在 [package.json](package.json) 中维护。
+当前版本：**1.0.5（Bate）**。版本号只在 [package.json](package.json) 中维护。
 
 ## 功能
 
@@ -113,4 +113,5 @@ npm run tauri -- build --debug --no-bundle
 - [接口契约](spec/api-contract.md)
 - [主机 MOD 库](docs/host-mod-library.md)
 - [专服诊断](docs/diagnostics.md)
+- [备份与恢复文件边界](docs/backup-restore-boundaries.md)
 - [DST Release 准备](docs/dst-release-setup.md)

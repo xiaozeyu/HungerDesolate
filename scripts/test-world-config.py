@@ -275,14 +275,14 @@ class WorldConfigTests(unittest.TestCase):
         self.assertEqual(result["activeReleaseId"], release_id)
         self.assertEqual(result["runningShards"], ["master"])
         self.assertEqual(actions, [
-            ("ps", "--services", "--status", "running"), ("stop",),
-            ("create", "--force-recreate"), ("start", "master"),
+            ("ps", "--services", "--status", "running"), ("restart", "master"),
         ])
         deployed = json.loads((self.instance / "deployed-world.json").read_text())
         self.assertEqual(deployed["digest"], MODULE.digest(settings))
         refreshed = MODULE.get_config(self.request(expectedRevision=1))
         self.assertEqual(refreshed["data"]["deployedRevision"], 1)
         self.assertTrue((self.instance / "config/Cluster_1/cluster.ini").is_file())
+        self.assertTrue((self.instance / "config/Cluster_1/adminlist.txt").is_file())
         self.assertNotIn("secret-token", (self.instance / "deployed-world.json").read_text())
         replay = MODULE.apply_config({"schemaVersion": 1, "action": "apply", "requestId": "99999999-9999-4999-8999-999999999999",
             "operationId": "88888888-8888-4888-8888-888888888888", "serverId": SERVER,
@@ -295,6 +295,25 @@ class WorldConfigTests(unittest.TestCase):
         self.assertEqual(secret_only_update["data"]["revision"], 2)
         self.assertEqual(secret_only_update["data"]["deployedRevision"], 1)
 
+        config_dir = self.instance / "config"
+        inode_before = config_dir.stat().st_ino
+        admin_settings = self.settings()
+        admin_settings["advanced"]["adminList"] = ["76561198000000000"]
+        MODULE.save_config(self.request("save", expectedRevision=2, settings=admin_settings, operationId="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"))
+        actions.clear()
+        with patch.object(MODULE, "compose_command", side_effect=compose), \
+             patch.object(MODULE.os, "chown", return_value=None):
+            admin_result = MODULE.apply_config({"schemaVersion": 1, "action": "apply", "requestId": REQUEST,
+                "operationId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "serverId": SERVER,
+                "hostId": HOST, "instanceId": INSTANCE, "expectedRevision": 3,
+                "desiredDigest": MODULE.digest(admin_settings), "activeReleaseId": release_id})
+        self.assertEqual(admin_result["runningShards"], ["master"])
+        self.assertEqual(actions, [
+            ("ps", "--services", "--status", "running"), ("restart", "master"),
+        ])
+        self.assertEqual(config_dir.stat().st_ino, inode_before)
+        self.assertEqual((config_dir / "Cluster_1/adminlist.txt").read_text(), "76561198000000000\n")
+
     def test_running_service_response_normalizes_case_and_whitespace(self):
         self.assertEqual(MODULE.parse_running_services("\n Master \r\nCaves\n\n"), {"master", "caves"})
         with self.assertRaises(MODULE.Rejected) as failure:
@@ -302,7 +321,7 @@ class WorldConfigTests(unittest.TestCase):
         self.assertEqual(str(failure.exception), "WORLD_DOCKER_RESPONSE_INVALID")
         self.assertEqual(failure.exception.details, {"failureKey": "unknown-service"})
 
-    def test_apply_rolls_back_config_when_compose_recreation_fails(self):
+    def test_apply_rolls_back_config_when_service_restart_fails(self):
         release_id = "77777777-7777-4777-8777-777777777777"
         (self.root / "releases").mkdir(mode=0o700)
         (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
@@ -327,7 +346,7 @@ class WorldConfigTests(unittest.TestCase):
             calls.append(arguments)
             if capture:
                 return "master\n"
-            if arguments[:2] == ("create", "--force-recreate") and calls.count(arguments) == 1:
+            if arguments[:1] == ("restart",) and calls.count(arguments) == 1:
                 raise MODULE.Rejected("WORLD_DOCKER_OPERATION_FAILED")
             return ""
 
@@ -341,7 +360,7 @@ class WorldConfigTests(unittest.TestCase):
         self.assertEqual(str(failure.exception), "WORLD_DOCKER_OPERATION_FAILED")
         self.assertEqual(old_file.read_text(), "old-config")
         self.assertFalse((self.instance / "deployed-world.json").exists())
-        self.assertEqual(calls[-2:], [("create", "--force-recreate"), ("start", "master")])
+        self.assertEqual(calls[-2:], [("restart", "master"), ("restart", "master")])
 
     def test_apply_allows_existing_world_files_when_only_config_is_replaced(self):
         release_id = "77777777-7777-4777-8777-777777777777"

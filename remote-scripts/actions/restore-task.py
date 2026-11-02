@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -25,13 +26,14 @@ MISSING = object()
 
 
 class Rejected(Exception):
-    def __init__(self, code):
+    def __init__(self, code, details=None):
         super().__init__(code)
         self.code = code
+        self.details = details or {}
 
 
-def reject(code):
-    raise Rejected(code)
+def reject(code, details=None):
+    raise Rejected(code, details)
 
 
 def valid_uuid(value):
@@ -59,7 +61,15 @@ def safe_dir(path, create=False):
         path.mkdir(mode=0o700)
         info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077:
-        reject("BACKUP_PATH_UNSAFE")
+        reject("BACKUP_PATH_UNSAFE", {"failurePath": str(path)})
+    return info
+
+
+def safe_release_dir(path):
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+            or info.st_mode & 0o022):
+        reject("BACKUP_PATH_UNSAFE", {"failurePath": str(path)})
     return info
 
 
@@ -124,6 +134,28 @@ def registry_lock():
     return fd
 
 
+def abandon_stale_pending(task_id):
+    directory = TASKS / task_id
+    try:
+        state = read_json(directory / "status.json")
+        request = read_json(directory / "request.json")
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    if state.get("status") != "queued":
+        return False
+    state.update({"status": "interrupted", "stage": state.get("stage", "queued"),
+                  "sequence": state.get("sequence", 0) + 1, "finishedAt": now(),
+                  "cancelAllowed": False, "observation": "reconciling",
+                  "error": error_payload("BACKUP_RESTORE_INTERRUPTED", request, task_id, False,
+                                         {"stalePending": True})})
+    atomic_json(directory / "status.json", state)
+    journal = directory / "journal.jsonl"
+    previous = journal.read_bytes() if journal.exists() else b""
+    atomic_bytes(journal, previous + canonical({"sequence": state["sequence"], "status": "interrupted",
+                                                 "stage": state["stage"], "at": now()}) + b"\n")
+    return True
+
+
 def admit_queue(request):
     task_id = request["operationId"]
     lock_fd = registry_lock()
@@ -140,7 +172,22 @@ def admit_queue(request):
             reject("BACKUP_REGISTRY_INVALID")
         pending = entry.get("pendingTaskId")
         if pending and pending != task_id:
-            reject("INSTANCE_BUSY")
+            pending_state = read_json(TASKS / pending / "status.json", missing=None)
+            terminal = isinstance(pending_state, dict) and pending_state.get("status") in (
+                "succeeded", "failed", "cancelled", "interrupted")
+            stale_queued = (isinstance(pending_state, dict)
+                            and pending_state.get("status") == "queued"
+                            and not controller_active()
+                            and not queued_recently(pending_state))
+            if stale_queued:
+                abandon_stale_pending(pending)
+                entry["pendingTaskId"] = None
+                registry["heavyQueue"] = [item for item in registry["heavyQueue"]
+                                          if item.get("taskId") != pending]
+            elif not terminal:
+                reject("INSTANCE_BUSY")
+            else:
+                entry["pendingTaskId"] = None
         entry["pendingTaskId"] = task_id
         queue = [item for item in registry["heavyQueue"] if item.get("taskId") != task_id]
         queue.append({"taskId": task_id, "operation": "backupRestore", "instanceId": request["instanceId"],
@@ -236,7 +283,7 @@ def load(task_id):
             or state.get("status") not in ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")):
         reject("BACKUP_TASK_STATE_INVALID")
     state["journal"] = journal_tail(directory)
-    if status in ("succeeded", "failed", "cancelled", "interrupted"):
+    if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
         release_queue(directory.name)
     return state
 
@@ -259,6 +306,8 @@ def set_status(directory, status, stage, completed=None, result=None, error=None
     previous = journal.read_bytes() if journal.exists() else b""
     atomic_bytes(journal, previous + canonical({"sequence": state["sequence"], "status": status, "stage": stage, "at": now()}) + b"\n")
     state["journal"] = journal_tail(directory)
+    if status in ("succeeded", "failed", "cancelled", "interrupted"):
+        release_queue(directory.name)
     return state
 
 
@@ -554,6 +603,20 @@ def preserve_cluster_access(instance, staging):
     atomic_bytes(backup_path, output.getvalue().encode("utf-8"), 0o600)
 
 
+def normalize_restored_runtime_permissions(instance, mods_release_id):
+    config_root = instance / "config" / "Cluster_1"
+    assign_runtime_ownership(config_root)
+    if mods_release_id is None:
+        return
+    release_root = instance / "mods" / "releases" / mods_release_id
+    assign_runtime_ownership(release_root)
+    os.chown(release_root, 0, 0)
+    os.chmod(release_root, 0o755)
+    manifest = release_root / "manifest.json"
+    os.chown(manifest, 0, 0)
+    os.chmod(manifest, 0o600)
+
+
 def restore_cluster_token(instance, staging, desired):
     secrets = desired.get("secrets") if isinstance(desired, dict) else None
     token_ref = secrets.get("tokenRef") if isinstance(secrets, dict) else None
@@ -574,6 +637,9 @@ def restore_cluster_token(instance, staging, desired):
     finally:
         os.close(fd)
     if not token.endswith(b"\n") or len(token) > 8192 or any(byte < 0x20 and byte != 0x0a for byte in token):
+        reject("WORLD_SECRET_FILE_INVALID")
+    token = token.rstrip(b"\r\n")
+    if not token:
         reject("WORLD_SECRET_FILE_INVALID")
     config_root = staging / "config" / "Cluster_1"
     config_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -744,6 +810,8 @@ def rebuild_restore_mods(staging, instance_id, desired, new_revision, task_id, r
         for shard in roles:
             shard_root = staging / "config" / "Cluster_1" / shard.title()
             shard_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chown(shard_root, 0, 0)
+            os.chmod(shard_root, 0o700)
             atomic_bytes(shard_root / "modoverrides.lua", apply_ns["modoverrides"](mods), 0o600)
         return None, warnings
     mod_release_id = str(uuid.uuid4())
@@ -761,13 +829,14 @@ def rebuild_restore_mods(staging, instance_id, desired, new_revision, task_id, r
         for name in names:
             path = Path(current) / name
             os.chown(path, 1000, 1000); os.chmod(path, 0o644)
-    os.chown(setup_release, 0, 0); os.chmod(setup_release, 0o755)
+    os.chown(setup_release, 0, 0); os.chmod(setup_release, 0o700)
     mods_digest = apply_ns["digest"](mods)
     atomic_json(setup_release / "manifest.json", {"schemaVersion": 1, "modsReleaseId": mod_release_id,
         "hostId": request_host_id(staging), "instanceId": instance_id, "desiredDigest": mods_digest,
         "mods": [{"workshopId": item["workshopId"], "enabled": item["enabled"],
                   "artifactDigest": item["artifactDigest"]} for item in mods],
         "createdAt": now(), "sourceDigests": sorted({item["artifactDigest"] for item in enabled})})
+    os.chmod(setup_release, 0o755)
     try:
         apply_ns["verify_mod_release"](setup_release, mods, roles, download_ns)
     except Exception:
@@ -776,6 +845,8 @@ def rebuild_restore_mods(staging, instance_id, desired, new_revision, task_id, r
     for shard in roles:
         shard_root = staging / "config" / "Cluster_1" / shard.title()
         shard_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chown(shard_root, 0, 0)
+        os.chmod(shard_root, 0o700)
         atomic_bytes(shard_root / "modoverrides.lua", apply_ns["modoverrides"](mods), 0o600)
     active.update({"modsReleaseId": mod_release_id, "modsDigest": mods_digest, "modsAppliedRevision": new_revision})
     atomic_json(staging / "active-release.json", active)
@@ -802,10 +873,53 @@ def wait_lock(handle, cancel_path):
 
 
 def controller_active():
-    result = subprocess.run(["systemctl", "is-active", "--quiet", "famine-queue-controller"],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, timeout=5, check=False)
+    try:
+        result = subprocess.run(["systemctl", "is-active", "--quiet", "famine-queue-controller"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
     return result.returncode == 0
+
+
+def wait_controller_active(seconds=5):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if controller_active():
+            return True
+        time.sleep(0.1)
+    return controller_active()
+
+
+def launch_controller():
+    try:
+        result = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect",
+                                 "--unit", "famine-queue-controller", "--property=Type=exec",
+                                 "/usr/bin/python3", "-I", str(ROOT / "queue-controller.py"), "controller"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def queued_recently(state, seconds=20):
+    try:
+        created = datetime.fromisoformat(state["createdAt"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (datetime.now(timezone.utc) - created).total_seconds() < seconds
+
+
+def wait_controller_lock(fd, cancel_path):
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if cancel_path.exists():
+                return False
+            time.sleep(0.5)
 
 
 CONTROLLER_TASKS = {
@@ -847,10 +961,9 @@ def controller_main():
             head = ordered[0]
             task_id = head.get("taskId")
             task_dir = CONTROLLER_TASKS.get(head.get("operation"))
-            if not valid_uuid(task_id):
-                return
-            if task_dir is None:
-                time.sleep(1)
+            if not valid_uuid(task_id) or task_dir is None:
+                dequeue(task_id)
+                release_queue(task_id)
                 continue
             worker = task_dir / task_id / "worker.py"
             if not worker.exists():
@@ -868,18 +981,31 @@ def controller_main():
                 release_queue(task_id)
                 continue
             request = read_json(task_dir / task_id / "request.json")
+            cancel_path = task_dir / task_id / "cancel.request"
             instance_id = request.get("instanceId")
             instance = ROOT / "instances" / instance_id if isinstance(instance_id, str) else None
             heavy = maintenance = instance_lock = None
             try:
                 heavy = os.open(ROOT / "locks" / "heavy.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-                fcntl.flock(heavy, fcntl.LOCK_EX)
+                if not wait_controller_lock(heavy, cancel_path):
+                    set_status(task_dir / task_id, "cancelled", "cancelled")
+                    dequeue(task_id)
+                    release_queue(task_id)
+                    continue
                 if instance is not None:
                     safe_dir(instance / "locks")
                     maintenance = os.open(instance / "locks" / "world-config.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-                    fcntl.flock(maintenance, fcntl.LOCK_EX)
+                    if not wait_controller_lock(maintenance, cancel_path):
+                        set_status(task_dir / task_id, "cancelled", "cancelled")
+                        dequeue(task_id)
+                        release_queue(task_id)
+                        continue
                     instance_lock = os.open(instance / "locks" / "instance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-                    fcntl.flock(instance_lock, fcntl.LOCK_EX)
+                    if not wait_controller_lock(instance_lock, cancel_path):
+                        set_status(task_dir / task_id, "cancelled", "cancelled")
+                        dequeue(task_id)
+                        release_queue(task_id)
+                        continue
                 env = dict(os.environ)
                 env["FAMINE_CONTROLLER_LEASE"] = task_id
                 subprocess.run([sys.executable, "-I", str(worker), "worker", task_id],
@@ -1039,7 +1165,7 @@ def _worker_impl(task_id):
         if not release:
             reject("DST_RELEASE_UNAVAILABLE")
         release_dir = ROOT / "staging" / restored_release
-        safe_dir(release_dir)
+        safe_release_dir(release_dir)
         release_metadata = read_json(release_dir / "release-metadata.json", 262144)
         release_metadata.pop("schemaVersion", None)
         if release_metadata != release:
@@ -1159,6 +1285,7 @@ def _worker_impl(task_id):
         atomic_json(active_path, active_release)
         atomic_json(instance / "manifest.json", manifest)
         atomic_bytes(instance / "compose.yaml", compose_text.encode("utf-8"), 0o600)
+        normalize_restored_runtime_permissions(instance, mod_release_id)
         if runtime_before == "running":
             failure_step = "createRestoredContainers"
             compose(instance, manifest, "create", "--force-recreate", *roles)
@@ -1209,9 +1336,11 @@ def _worker_impl(task_id):
         failed_state = load(task_id)
         failure_stage = failed_state.get("stage", "preflight")
         if not restore_changed_live_state(stop_attempted, stopped, moved):
+            details = {"failureStep": failure_step, "failureCause": failure_cause}
+            if isinstance(getattr(failure, "details", None), dict):
+                details.update(failure.details)
             return set_status(directory, "failed", failure_stage,
-                error=error_payload(code, request, task_id, False,
-                    {"failureStep": failure_step, "failureCause": failure_cause}))
+                error=error_payload(code, request, task_id, False, details))
         rollback_stage = "readRestoreTransaction"
         rollback_failure = None
         rollback_health = None
@@ -1321,7 +1450,6 @@ def start(request):
         "lastCompletedStage": None, "progress": {"kind": "indeterminate"}, "sequence": 1, "createdAt": created, "startedAt": None, "finishedAt": None,
         "cancelAllowed": True, "observation": "live", "result": None, "error": None})
     atomic_bytes(directory / "journal.jsonl", canonical({"sequence": 1, "status": "queued", "stage": "queued", "at": created}) + b"\n")
-    unit = "famine-queue-controller"
     worker_path = directory / "worker.py"
     worker_source = globals().get("RESTORE_SOURCE")
     archive_source = globals().get("ARCHIVE_SOURCE")
@@ -1332,8 +1460,8 @@ def start(request):
                         mods_apply_source, mods_download_source)
     admit_queue(request)
     atomic_bytes(ROOT / "queue-controller.py", worker_source.encode(), 0o700)
-    launch = subprocess.run(["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect", "--unit", unit, "--property=Type=exec", "/usr/bin/python3", "-I", str(ROOT / "queue-controller.py"), "controller"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
-    if launch.returncode != 0 and not controller_active():
+    launch = launch_controller()
+    if not launch or not wait_controller_active():
         return set_status(directory, "failed", "queued", error=error_payload("BACKUP_CONTROLLER_START_FAILED", request, request["operationId"], False))
     return load(request["operationId"])
 
@@ -1346,6 +1474,8 @@ def cancel(request):
     if state["status"] in ("succeeded", "failed", "cancelled", "interrupted"):
         return state
     atomic_json(TASKS / task_id / "cancel.request", {"requestedAt": now()})
+    if not controller_active():
+        launch_controller()
     return state
 
 
@@ -1363,6 +1493,9 @@ def status(request):
         unit = "famine-queue-controller"
         active = subprocess.run(["systemctl", "is-active", "--quiet", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
         if active.returncode != 0:
+            if state["status"] == "queued":
+                if queued_recently(state) or launch_controller():
+                    return state
             state = reconcile_interrupted(request, state)
     return state
 
@@ -1464,7 +1597,8 @@ def list_tasks(request):
                 unit = "famine-queue-controller"
                 active = subprocess.run(["systemctl", "is-active", "--quiet", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
                 if active.returncode != 0:
-                    state = reconcile_interrupted(read_json(child / "request.json"), state)
+                    if state["status"] != "queued" or not (queued_recently(state) or launch_controller()):
+                        state = reconcile_interrupted(read_json(child / "request.json"), state)
             result.append(state)
     result.sort(key=lambda item: item.get("createdAt", ""), reverse=True)
     return result[:100]
@@ -1488,7 +1622,7 @@ def main(request=None):
 
 
 if __name__ == "__main__":
-    if len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "controller":
+    if len(sys.argv) > 1 and sys.argv[1] == "controller":
         controller_main()
-    elif len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "worker":
-        worker(__import__("sys").argv[2])
+    elif len(sys.argv) > 1 and sys.argv[1] == "worker":
+        worker(sys.argv[2])

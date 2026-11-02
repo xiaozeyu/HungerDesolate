@@ -81,7 +81,7 @@ test('app shell exposes a global task center and operation bar without the updat
   assert.match(releaseList, /useQuery/);
   assert.doesNotMatch(releaseList, /currentConnection|onBeforeUnmount/);
   assert.match(instanceList, /useQuery/);
-  assert.doesNotMatch(instanceList, /currentConnection|onBeforeUnmount/);
+  assert.doesNotMatch(instanceList, /currentConnection/);
   assert.match(instanceOverview, /useQuery/);
   assert.doesNotMatch(instanceOverview, /isCurrentQuery|QueryTicket/);
   assert.match(hostModsPage, /useQuery/);

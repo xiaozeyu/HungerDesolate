@@ -18,6 +18,7 @@ ROOT = Path("/var/lib/famine-hub")
 TASKS = ROOT / "backup-tasks"
 MAX_REVISION = 9007199254740991
 MAX_TASKS = 200
+MISSING = object()
 
 
 class Rejected(Exception):
@@ -65,8 +66,13 @@ def safe_dir(path, create=False):
     return info
 
 
-def read_json(path, limit=262144):
-    info = path.lstat()
+def read_json(path, limit=262144, missing=MISSING):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if missing is not MISSING:
+            return missing
+        raise
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit
             or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077):
         reject("BACKUP_TASK_STATE_INVALID")
@@ -153,7 +159,11 @@ def admit_queue(request):
             reject("BACKUP_REGISTRY_INVALID")
         pending = entry.get("pendingTaskId")
         if pending and pending != task_id:
-            reject("INSTANCE_BUSY")
+            pending_state = read_json(TASKS / pending / "status.json", missing=None)
+            if not isinstance(pending_state, dict) or pending_state.get("status") not in (
+                    "succeeded", "failed", "cancelled", "interrupted"):
+                reject("INSTANCE_BUSY")
+            entry["pendingTaskId"] = None
         entry["pendingTaskId"] = task_id
         queue = [item for item in registry["heavyQueue"] if item.get("taskId") != task_id]
         queue.append({"taskId": task_id, "operation": "backupCreate", "instanceId": request["instanceId"],

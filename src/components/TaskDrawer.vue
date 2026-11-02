@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { RefreshCw, X } from "@lucide/vue";
+import { RefreshCw, Trash2, X } from "@lucide/vue";
 import TaskRow from "./TaskRow.vue";
 import { useOperations } from "../composables/useOperations";
 import { useTasks } from "../composables/useTasks";
@@ -8,7 +8,7 @@ import { useBuildTasks } from "../composables/useBuildTasks";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useTaskDrawer } from "../composables/useTaskDrawer";
 import { elapsedLabel, operationKindLabel, stageLabel, targetRoute, taskOperationLabel, taskRoute, taskStatusLabel } from "../lib/operationView";
-import { refreshActiveTasks } from "../lib/taskRefresh";
+import { reconcileTasks, refreshActiveTasks } from "../lib/taskRefresh";
 import { refreshBuildTasks } from "../lib/buildRefresh";
 import type { OperationEntry } from "../composables/useOperations";
 import type { HostTarget, InstanceTarget, TaskSnapshot, TaskTarget } from "../types/contracts";
@@ -21,6 +21,7 @@ const buildTasks = useBuildTasks();
 const workspace = useWorkspace();
 const now = ref(Date.now());
 const refreshing = ref(false);
+const cleaning = ref(false);
 let timer: ReturnType<typeof setInterval> | undefined;
 
 function displayTarget(target: TaskTarget | HostTarget | InstanceTarget): string {
@@ -117,6 +118,16 @@ async function refresh() {
   }
 }
 function close() { drawer.closeDrawer(); }
+async function cleanupStaleTasks() {
+  if (cleaning.value) return;
+  cleaning.value = true;
+  try {
+    await reconcileTasks(taskStore.tasks.value, workspace.servers.value,
+      task => taskStore.receive(task), taskId => taskStore.discard(taskId));
+  } finally {
+    cleaning.value = false;
+  }
+}
 function onKeydown(event: KeyboardEvent) {
   if (event.key === "Escape" && drawer.open.value) close();
 }
@@ -143,6 +154,7 @@ onBeforeUnmount(() => {
             <div><span class="eyebrow">本次会话</span><h2>任务记录</h2></div>
             <div class="task-drawer-actions">
               <button class="icon-button" type="button" title="刷新任务" :disabled="refreshing" @click="refresh"><RefreshCw :size="16" :class="{ spinning: refreshing }"/></button>
+              <button class="icon-button" type="button" title="清理失效的本地任务记录" :disabled="cleaning" @click="cleanupStaleTasks"><Trash2 :size="16"/></button>
               <button class="icon-button" type="button" aria-label="关闭任务记录" @click="close"><X :size="18"/></button>
             </div>
           </header>

@@ -38,7 +38,7 @@ test('creation form submits check-and-create in one step', async()=>{
   assert.match(instanceList,/planId:plan\.planId/);
   assert.match(instanceList,/manifestAvailable/);
   assert.match(instanceList,/确认并归档删除/);
-  assert.match(instanceList,/selectedTask\.journal/);
+  assert.doesNotMatch(instanceList,/selectedTask\.journal/);
   assert.match(instanceList,/输入专服名称确认/);
   assert.doesNotMatch(hosts,/查看界面预览|退出预览|setPreview/);
   assert.doesNotMatch(source,/端口策略|容器拓扑/);

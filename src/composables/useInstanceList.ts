@@ -1,4 +1,4 @@
-import { computed, watch, type Ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, watch, type Ref } from "vue";
 import { getInstanceCreateStatus, listInstances, type InstanceListResponse } from "../api/instances";
 import { demoInstances } from "../fixtures/workspace";
 import { validateInstanceList } from "../lib/instanceList";
@@ -17,7 +17,14 @@ export function useInstanceList(server: Ref<ServerSummary | null>, preview: Read
       : null;
   });
 
+  let disposed = false, mounted = false;
+  let generation = 0, requestSequence = 0;
+  let pollDelay = 15000;
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  watch(key, () => { generation++; pollDelay = 15000; schedulePoll(); }, { flush: "sync" });
+
   const query = useQuery(key, async queryKey => {
+    const currentGeneration = generation, sequence = ++requestSequence;
     const target = server.value;
     if (!target) throw new Error("缺少主机连接");
     const expectedHostId = target.hostId;
@@ -36,7 +43,8 @@ export function useInstanceList(server: Ref<ServerSummary | null>, preview: Read
           instances: demoInstances(expectedHostId ?? ""),
         }
       : await listInstances(request);
-    if (server.value?.serverId !== target.serverId
+    if (disposed || generation !== currentGeneration || requestSequence !== sequence
+        || server.value?.serverId !== target.serverId
         || server.value.recordVersion !== target.recordVersion) {
       throw new Error("专服列表请求上下文已失效");
     }
@@ -51,6 +59,42 @@ export function useInstanceList(server: Ref<ServerSummary | null>, preview: Read
   });
 
   const { data, error, loading, stale, refresh } = query;
+
+  function schedulePoll() {
+    if (pollTimer !== undefined) clearTimeout(pollTimer);
+    pollTimer = undefined;
+    if (!mounted || disposed || !key.value || preview.value || document.visibilityState === "hidden") return;
+    pollTimer = setTimeout(() => { void poll(); }, pollDelay);
+  }
+
+  async function poll() {
+    if (pollTimer !== undefined) clearTimeout(pollTimer);
+    pollTimer = undefined;
+    const queryKey = key.value, pollGeneration = generation;
+    if (!disposed && queryKey && !preview.value && document.visibilityState !== "hidden" && !loading.value) {
+      await refresh();
+      if (generation !== pollGeneration || disposed) return;
+      if (key.value === queryKey) pollDelay = error.value ? Math.min(pollDelay * 2, 60000) : 15000;
+    }
+    schedulePoll();
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === "hidden") schedulePoll();
+    else void poll();
+  }
+
+  onMounted(() => {
+    mounted = true;
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    schedulePoll();
+  });
+  onBeforeUnmount(() => {
+    disposed = true;
+    generation++;
+    if (pollTimer !== undefined) clearTimeout(pollTimer);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  });
 
   async function reconcileCreationTasks(target: ServerSummary, snapshot: InstanceListResponse) {
     const terminalStatuses = ["succeeded", "failed", "cancelled", "interrupted"];

@@ -43,6 +43,50 @@ class RestoreTaskStateTests(unittest.TestCase):
             self.assertEqual(state["status"], "queued")
             self.assertTrue((directory / "cancel.request").is_file())
 
+    def test_terminal_restore_releases_registry_pending_task(self):
+        with tempfile.TemporaryDirectory(prefix="restore-release-") as temporary:
+            root = Path(temporary) / "hub"
+            tasks = root / "restore-tasks"
+            task_id = "44444444-4444-4444-8444-444444444444"
+            directory = tasks / task_id
+            directory.mkdir(parents=True, mode=0o700)
+            root.mkdir(mode=0o700, exist_ok=True)
+            root.chmod(0o700)
+            (root / "locks").mkdir(mode=0o700, exist_ok=True)
+            tasks.chmod(0o700)
+            state = {"schemaVersion": 1, "taskId": task_id, "operationId": task_id,
+                     "target": {"hostId": HOST_ID, "instanceId": INSTANCE_ID},
+                     "operation": "backupRestore", "status": "queued", "stage": "queued",
+                     "sequence": 1, "createdAt": MODULE.now(), "cancelAllowed": True}
+            registry = {"schemaVersion": 1, "hostId": HOST_ID, "registryRevision": 1,
+                        "instances": [{"instanceId": INSTANCE_ID, "pendingTaskId": task_id}],
+                        "heavyQueue": [{"taskId": task_id, "operation": "backupRestore"}]}
+            with patch.object(MODULE, "ROOT", root), patch.object(MODULE, "TASKS", tasks):
+                MODULE.atomic_json(directory / "status.json", state)
+                MODULE.atomic_json(directory / "request.json", {"requestId": task_id})
+                (directory / "journal.jsonl").write_text("")
+                MODULE.atomic_json(root / "registry.json", registry)
+                MODULE.set_status(directory, "interrupted", "queued",
+                                  error={"code": "BACKUP_RESTORE_INTERRUPTED"})
+                updated = json.loads((root / "registry.json").read_text())
+            self.assertIsNone(updated["instances"][0]["pendingTaskId"])
+            self.assertEqual(updated["heavyQueue"], [])
+
+    def test_recently_queued_restore_waits_for_controller_start(self):
+        task_id = "44444444-4444-4444-8444-444444444444"
+        state = {"operationId": task_id, "target": {"hostId": HOST_ID, "instanceId": INSTANCE_ID},
+                 "status": "queued", "stage": "queued", "createdAt": MODULE.now(),
+                 "sequence": 1, "cancelAllowed": True}
+        request = {"schemaVersion": 1, "operationId": task_id, "hostId": HOST_ID, "instanceId": INSTANCE_ID}
+        inactive = SimpleNamespace(returncode=3)
+        with patch.object(MODULE, "load", return_value=state), \
+             patch.object(MODULE, "queue_position", return_value=None), \
+             patch.object(MODULE.subprocess, "run", return_value=inactive), \
+             patch.object(MODULE, "reconcile_interrupted") as reconcile:
+            result = MODULE.status(request)
+        self.assertEqual(result["status"], "queued")
+        reconcile.assert_not_called()
+
     def test_runtime_degradation_comparison_ignores_port_order_but_requires_same_failure(self):
         left = {"check": "udpListeners", "shard": "caves", "missingPorts": [11001, 27017]}
         right = {"check": "udpListeners", "shard": "caves", "missingPorts": [27017, 11001]}
@@ -182,6 +226,7 @@ class RestoreTaskStateTests(unittest.TestCase):
             with patch.object(MODULE, "ROOT", root), patch.object(MODULE, "TASKS", tasks), \
                  patch.object(MODULE.os, "geteuid", return_value=0), patch.object(MODULE, "safe_dir"), \
                  patch.object(MODULE, "verify_instance"), patch.object(MODULE, "load", return_value=queued),                  patch.object(MODULE, "admit_queue"), \
+                 patch.object(MODULE, "wait_controller_active", return_value=True), \
                  patch.object(MODULE.subprocess, "run", return_value=launch) as run, \
                  patch.object(MODULE, "RESTORE_SOURCE", "worker source", create=True), \
                  patch.object(MODULE, "ARCHIVE_SOURCE", "archive source", create=True), \
@@ -348,9 +393,30 @@ class RestoreTaskStateTests(unittest.TestCase):
                 MODULE.assign_runtime_ownership(staging / "data" / "Master")
                 MODULE.assign_runtime_ownership(staging / "config" / "Cluster_1")
             token = config / "cluster_token.txt"
-            self.assertEqual(token.read_bytes(), b"private-token\n")
+            self.assertEqual(token.read_bytes(), b"private-token")
             self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o600)
             self.assertTrue(any(call.args[1:] == (1000, 1000) for call in chown.call_args_list))
+
+    def test_rebuild_mods_repairs_extracted_shard_directory_permissions(self):
+        with tempfile.TemporaryDirectory(prefix="restore-mods-permissions-") as temporary:
+            root = Path(temporary)
+            staging = root / "staging"
+            shard = staging / "config" / "Cluster_1" / "Master"
+            shard.mkdir(parents=True, mode=0o700)
+            staging.chmod(0o700)
+            (staging / "config").chmod(0o700)
+            (staging / "config" / "Cluster_1").chmod(0o700)
+            shard.chmod(0o755)
+            desired = {"mods": []}
+            apply_ns = {"modoverrides": lambda mods: b"return {}\n"}
+            with patch.object(MODULE.os, "chown"):
+                MODULE.rebuild_restore_mods(
+                    staging, "22222222-2222-4222-8222-222222222222", desired, 2,
+                    "11111111-1111-4111-8111-111111111111", ["Master"], {}, apply_ns, {})
+            override = shard / "modoverrides.lua"
+            self.assertEqual(override.read_bytes(), b"return {}\n")
+            self.assertEqual(stat.S_IMODE(override.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(shard.stat().st_mode), 0o700)
 
     def test_restore_preserves_current_player_lists_outside_the_backup(self):
         with tempfile.TemporaryDirectory(prefix="restore-player-lists-") as temporary:
@@ -477,6 +543,15 @@ class RestoreTaskStateTests(unittest.TestCase):
 
 
 class RestoreBoundaryTests(unittest.TestCase):
+    def test_release_staging_allows_read_only_permissions(self):
+        with tempfile.TemporaryDirectory(prefix="restore-release-dir-") as temporary:
+            path = Path(temporary) / "release"
+            path.mkdir(mode=0o700)
+            path.chmod(0o755)
+            MODULE.safe_release_dir(path)
+            path.chmod(0o775)
+            with self.assertRaises(MODULE.Rejected):
+                MODULE.safe_release_dir(path)
     def test_preserves_current_access_policy_and_digest(self):
         current = {"settings": {"advanced": {"adminList": ["current-admin"], "whitelist": ["current-white"],
                                               "blocklist": ["current-block"], "whitelistSlots": 1}}}

@@ -154,7 +154,20 @@ locks/
 - 但旧归档文件本身仍可能含有敏感内容；
 - 建议重新创建备份，并在需要时轮换服务器密码和 cluster key，再删除旧归档。
 
-## 7. 验证
+## 7. 运行权限收口
+
+恢复提交完成后、创建容器前，`normalize_restored_runtime_permissions()` 会强制统一运行文件的属主和权限：
+
+```text
+config/Cluster_1/                          UID 1000, 0700/0600
+mods/releases/<modsReleaseId>/              UID 1000, 0700/0600
+mods/releases/<modsReleaseId>/manifest.json root, 0600
+mods/releases/<modsReleaseId>/              root, 0755（目录本身）
+```
+
+其中 `modoverrides.lua`、`dedicated_server_mods_setup.lua` 和 UGC 内容必须能被容器内 UID 1000 读取。恢复过程中由 root 创建的临时文件不能直接进入运行态。
+
+## 8. 验证
 
 ```text
 python3 scripts/test-backup-archive.py

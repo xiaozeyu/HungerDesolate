@@ -411,6 +411,7 @@ fn apply_runtime(
 
 fn runtime_warning(code: &str) -> &'static str {
     match code {
+        "PLAYERS_QUERY_UNAVAILABLE" => "无法核实在线玩家人数，请刷新重试",
         "MANIFEST_MISSING" => "实例创建尚未完成",
         "WORLD_CONFIG_UNAVAILABLE" => "世界配置尚未应用或无法读取",
         "DOCKER_UNAVAILABLE" => "无法读取 Docker 当前状态",

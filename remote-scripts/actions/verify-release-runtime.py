@@ -205,8 +205,6 @@ def prepare_bundle(encoded, destination):
                 "game": settings.getint("NETWORK", "server_port"),
                 "query": settings.getint("STEAM", "master_server_port"),
             }
-            if role == "master":
-                values["shard"] = cluster.getint("SHARD", "master_port")
         except (OSError, configparser.Error, UnicodeError, ValueError):
             reject("RELEASE_RUNTIME_CONFIG_INVALID")
         if any(value < 1 or value > 65535 for value in values.values()):

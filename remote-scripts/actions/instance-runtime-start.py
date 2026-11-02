@@ -2,6 +2,7 @@
 import configparser
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -197,7 +198,6 @@ def shard_ports(config_root, shard, caves_enabled=False):
             cluster.read(cluster_path, encoding="utf-8")
             if not cluster.getboolean("SHARD", "shard_enabled"):
                 reject("INSTANCE_START_CONFIG_INVALID")
-            ports["shard"] = cluster.getint("SHARD", "master_port")
     except (OSError, configparser.Error, UnicodeError, ValueError):
         reject("INSTANCE_START_CONFIG_INVALID")
     if any(port < 1 or port > 65535 for port in ports.values()) or len(set(ports.values())) != len(ports):
@@ -231,49 +231,96 @@ def inspect_running(container_id):
     return value.strip() == "true"
 
 
-def a2s_player_count(port):
-    """Return the connected-player count from a local Steam A2S endpoint, or None."""
+def a2s_player_count(port, address="127.0.0.1"):
+    """Query local shard counts; PLAYER failure must not skip the INFO fallback."""
     if type(port) is not int or not 1 <= port <= 65535:
         return None
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(0.8)
     try:
-        sock.sendto(b"\xff\xff\xff\xffU\xff\xff\xff\xff", ("127.0.0.1", port))
-        data, _ = sock.recvfrom(8192)
-        if len(data) >= 5 and data[:4] == b"\xff\xff\xff\xff":
-            if data[4:5] == b"A":
-                if len(data) >= 9:
-                    sock.sendto(b"\xff\xff\xff\xffU" + data[5:9], ("127.0.0.1", port))
-                    data, _ = sock.recvfrom(8192)
-            if (len(data) >= 6 and data[:4] == b"\xff\xff\xff\xff"
-                    and data[4:5] == b"D"):
-                count = data[5]
-                # Each player entry is at least 10 bytes; reject a truncated response.
-                if len(data) >= 6 + count * 10:
-                    return count
-        # Some DST builds reject A2S_PLAYER but still expose the player count in A2S_INFO.
-        sock.sendto(b"\xff\xff\xff\xffTSource Engine Query\x00", ("127.0.0.1", port))
-        data, _ = sock.recvfrom(8192)
-        if len(data) >= 5 and data[:4] == b"\xff\xff\xff\xff" and data[4:5] == b"A":
-            if len(data) >= 9:
-                sock.sendto(b"\xff\xff\xff\xffTSource Engine Query\x00" + data[5:9], ("127.0.0.1", port))
-                data, _ = sock.recvfrom(8192)
-        if len(data) < 7 or data[:4] != b"\xff\xff\xff\xff" or data[4:5] != b"I":
-            return None
-        offset = 6
-        # Protocol byte is at offset 5; then name, map, folder and game strings.
-        for _ in range(4):
-            end = data.find(b"\x00", offset)
-            if end < 0 or end + 1 > len(data):
-                return None
-            offset = end + 1
-        if offset + 4 > len(data):
-            return None
-        return data[offset + 2]
-    except (OSError, ValueError):
+        endpoint = ipaddress.IPv4Address(address)
+    except (ipaddress.AddressValueError, TypeError):
         return None
-    finally:
-        sock.close()
+    if not endpoint.is_private or endpoint.is_unspecified or endpoint.is_multicast or endpoint.is_link_local:
+        return None
+    header = b"\xff\xff\xff\xff"
+
+    def exchange(request):
+        sock = None
+        deadline = time.monotonic() + 0.8
+        if OBSERVATION_DEADLINE is not None:
+            deadline = min(deadline, OBSERVATION_DEADLINE)
+        try:
+            if deadline <= time.monotonic():
+                return None
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            for attempt in range(2):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                sock.settimeout(remaining)
+                sock.sendto(request, (address, port))
+                data, peer = sock.recvfrom(8192)
+                if peer != (address, port) or len(data) < 5 or data[:4] != header:
+                    return None
+                if data[4:5] != b"A":
+                    return data
+                if attempt or len(data) != 9:
+                    return None
+                request = request[:5] + data[5:9] if request[4:5] == b"U" else request + data[5:9]
+        except (OSError, ValueError):
+            return None
+        finally:
+            if sock is not None:
+                sock.close()
+        return None
+
+    data = exchange(header + b"U\xff\xff\xff\xff")
+    if data is not None and len(data) >= 6 and data[4:5] == b"D":
+        count, offset = data[5], 6
+        # Validate complete player entries, including variable-length names.
+        for _ in range(count):
+            end = data.find(b"\x00", offset + 1)
+            if end < 0 or end + 9 > len(data):
+                break
+            offset = end + 9
+        else:
+            return count
+    data = exchange(header + b"TSource Engine Query\x00")
+    if data is None or len(data) < 7 or data[4:5] != b"I":
+        return None
+    offset = 6
+    # Protocol byte, four terminated strings, app ID, then players/max/bots.
+    for _ in range(4):
+        end = data.find(b"\x00", offset)
+        if end < 0:
+            return None
+        offset = end + 1
+    if offset + 5 > len(data):
+        return None
+    count, maximum, bots = data[offset + 2:offset + 5]
+    if count > 128 or count > maximum or bots > count:
+        return None
+    return count
+
+
+def container_query_address(container, project):
+    """Use only this verified container's generated Compose bridge endpoint."""
+    networks = container.get("networks")
+    if not isinstance(networks, dict):
+        return None
+    network = networks.get(project + "_instance")
+    if not isinstance(network, dict):
+        return None
+    value = network.get("IPAddress")
+    if not isinstance(value, str):
+        return None
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError:
+        return None
+    if (not address.is_private or address.is_loopback or address.is_link_local
+            or address.is_unspecified or address.is_multicast):
+        return None
+    return str(address)
 
 
 def runtime_running(container_id, shard):
@@ -572,10 +619,6 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
         safe_directory(config_root, allow_runtime=True)
         for role in roles:
             required[role] = shard_ports(config_root, role, manifest["cavesEnabled"])
-        if "shard" in required.get("master", {}):
-            result["ports"].append({"shard": "master", "purpose": "shard", "protocol": "udp",
-                "containerPort": required["master"]["shard"], "hostPort": None, "bindAddress": None,
-                "published": False, "listening": None, "required": True})
     except (Rejected, OSError):
         result["warnings"].append("WORLD_CONFIG_UNAVAILABLE")
         required = {}
@@ -584,6 +627,7 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
     seen = set()
     builds = set()
     metadata_builds = set()
+    query_addresses = {}
     release = [item for item in releases or [] if isinstance(item, dict)
                and item.get("releaseId") == result["releaseId"] and item.get("verified") is True]
     release = release[0] if len(release) == 1 else None
@@ -599,6 +643,7 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
             result["warnings"].append("RESOURCE_IDENTITY_INVALID")
             continue
         seen.add(role)
+        query_addresses[role] = container_query_address(container, manifest["composeProject"])
         if release is not None:
             if container.get("imageId") != release.get("imageDigest"):
                 result["warnings"].append("BUILD_MISMATCH")
@@ -673,10 +718,21 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
     if result["verificationLevel"] != "localVerified" and any(shard["processRunning"] is True for shard in shards):
         result["verificationLevel"] = "processOnly"
     if result["status"] == "running":
-        counts = [a2s_player_count(required.get(role, {}).get("query")) for role in roles]
-        observed = [count for count in counts if count is not None]
-        if observed:
-            result["players"] = sum(observed)
+        counts = []
+        for role in roles:
+            port = required.get(role, {}).get("query")
+            address = query_addresses.get(role)
+            # Direct bridge traffic avoids relying on localhost UDP port forwarding.
+            count = a2s_player_count(port, address) if address else None
+            if count is None:
+                count = a2s_player_count(port)
+            counts.append(count)
+        if all(count is not None for count in counts):
+            total = sum(counts)
+            if total <= (result["maxPlayers"] or 128):
+                result["players"] = total
+        if result["players"] is None:
+            result["warnings"].append("PLAYERS_QUERY_UNAVAILABLE")
     result["warnings"] = sorted(set(result["warnings"]))
     return result
 
@@ -720,7 +776,8 @@ def inspect_instances(request):
                 containers = []
                 if container_ids:
                     projection = ('{"id":{{json .Id}},"labels":{{json .Config.Labels}},"imageId":{{json .Image}},'
-                        '"status":{{json .State.Status}},"bindings":{{json .HostConfig.PortBindings}}}')
+                        '"status":{{json .State.Status}},"bindings":{{json .HostConfig.PortBindings}},'
+                        '"networks":{{json .NetworkSettings.Networks}}}')
                     inspected = docker(["inspect", "--format", projection, *container_ids])
                     containers = [json.loads(line) for line in inspected.splitlines()] if inspected is not None else None
                     if containers is not None and len(containers) != len(container_ids):

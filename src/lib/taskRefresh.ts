@@ -116,3 +116,25 @@ export async function refreshActiveTasks(
       }
     }));
 }
+
+export async function reconcileTasks(
+  tasks: TaskSnapshot[],
+  servers: ServerSummary[],
+  receive: (task: TaskSnapshot) => void,
+  discard: (taskId: string) => void,
+): Promise<void> {
+  await Promise.all(tasks
+    .filter(task => ["queued", "running"].includes(task.status) && !inFlight.has(task.taskId))
+    .map(async task => {
+      inFlight.add(task.taskId);
+      try {
+        const next = await refreshTask(task, servers);
+        if (next) receive(next);
+        else discard(task.taskId);
+      } catch {
+        discard(task.taskId);
+      } finally {
+        inFlight.delete(task.taskId);
+      }
+    }));
+}

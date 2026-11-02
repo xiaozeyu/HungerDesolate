@@ -125,7 +125,17 @@ async function refresh() {
     previews.value = { cold: null, quasiHot: null };
     const restoreTasks = await queueSsh(() => listInstanceRestoreTasks({schemaVersion:1,requestId:crypto.randomUUID(),target:instanceTarget,expectedRecordVersion:connection.recordVersion}));
     if (!isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) return;
-    const latest = [...tasks, ...restoreTasks].find(task => taskBelongsHere(task.task, targetKey));
+    const serverTasks = [...tasks, ...restoreTasks];
+    const serverTaskIds = new Set(serverTasks.map(entry => entry.task.taskId));
+    for (const local of taskStore.tasks.value) {
+      if (taskBelongsHere(local, targetKey)
+          && ["backupCreate", "backupRestore"].includes(local.operation)
+          && ["queued", "running"].includes(local.status)
+          && !serverTaskIds.has(local.taskId)) {
+        taskStore.discard(local.taskId);
+      }
+    }
+    const latest = serverTasks.find(task => taskBelongsHere(task.task, targetKey));
     if (latest) {
       taskStore.receive(latest.task);
       if (["queued", "running"].includes(latest.task.status)) {

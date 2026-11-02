@@ -600,14 +600,7 @@ pub fn start(database: &Path, request: StartRequest) -> CommandResult<StartRespo
             remote.running_shards.iter().all(|shard| {
                 (shard == "master" || shard == "caves")
                     && remote.listeners.get(shard).is_some_and(|ports| {
-                        let expected = if shard == "master"
-                            && remote.running_shards.iter().any(|shard| shard == "caves")
-                        {
-                            3
-                        } else {
-                            2
-                        };
-                        ports.len() == expected
+                        ports.len() == 2
                             && ports.iter().all(|port| *port > 0)
                             && ports
                                 .iter()
@@ -664,7 +657,7 @@ mod tests {
             "verificationLevel": "localVerified",
             "startedShards": ["master", "caves"],
             "runningShards": ["master", "caves"],
-            "listeners": {"master": [10888, 11000, 27016], "caves": [11001, 27017]},
+            "listeners": {"master": [11000, 27016], "caves": [11001, 27017]},
             "publicConnectivityVerified": false
         }))
         .expect("well-shaped runtime result should deserialize");

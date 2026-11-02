@@ -18,7 +18,7 @@ import type { UserError } from "../lib/commandError";
 import { hasReadyShardListeners } from "../lib/instanceRuntime";
 import { activeContext } from "../context/activeContext";
 import { operationTargetKey, stageLabel, taskOperationLabel } from "../lib/operationView";
-const { data, error, loading, stale, refresh, pausePolling, resumePolling } = useInstanceOverview();
+const { data, error, loading, stale, refresh, pausePolling, resumePolling } = useInstanceOverview({ poll: false });
 const { server, target } = usePageTarget();
 const workspace = useWorkspace();
 const operations = useOperations();

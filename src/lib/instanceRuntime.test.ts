@@ -7,15 +7,15 @@ import type { InstanceRuntimeControlResponse } from "../api/instances.ts";
 describe("DST shard readiness", () => {
   it("accepts real server evidence without requiring unused fixed authentication ports", () => {
     assert.equal(hasReadyShardListeners({runningShards:["master","caves"],
-      listeners:{master:[10888,11000,27016],caves:[11001,27017]}}, true), true);
+      listeners:{master:[11000,27016],caves:[11001,27017]}}, true), true);
     assert.equal(hasReadyShardListeners({runningShards:["master"],
       listeners:{master:[11000,27016]}}, false), true);
   });
   it("rejects missing shards, duplicate ports and invalid port evidence", () => {
     const cases: Pick<InstanceRuntimeControlResponse,"runningShards"|"listeners">[] = [
       {runningShards:["master"],listeners:{master:[10888,11000,27016]}},
-      {runningShards:["master","master"],listeners:{master:[10888,11000,27016],caves:[11001,27017]}},
-      {runningShards:["master","caves"],listeners:{master:[11000,27016],caves:[11001,27017]}},
+      {runningShards:["master","master"],listeners:{master:[11000,27016],caves:[11001,27017]}},
+      {runningShards:["master","caves"],listeners:{master:[11000],caves:[11001,27017]}},
       {runningShards:["master","caves"],listeners:{master:[10888,11000,27016],caves:[11001,11001]}},
       {runningShards:["master","caves"],listeners:{master:[10888,11000,27016],caves:[0,27017]}},
       {runningShards:["master","caves"],listeners:{master:[10888,11000,27016],caves:[11001,70000]}},

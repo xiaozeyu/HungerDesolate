@@ -11,9 +11,8 @@ export function hasReadyShardListeners(
     && Object.keys(result.listeners).length === expected.length
     && expected.every(shard => {
       const ports = result.listeners[shard];
-      const count = shard === "master" && cavesEnabled ? 3 : 2;
       return result.runningShards.includes(shard) && Array.isArray(ports)
-        && ports.length === count && new Set(ports).size === count
+        && ports.length === 2 && new Set(ports).size === 2
         && ports.every(port => Number.isInteger(port) && port >= 1 && port <= 65535);
     });
 }

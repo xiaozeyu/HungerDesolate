@@ -25,5 +25,12 @@ export function useTasks() {
         saveTasks([...next.values()]);
         if (terminalStatuses.has(merged.status)) invalidateForTask(merged);
     }
-    return { tasks: computed(() => [...tasks.value.values()]), receive };
+    function discard(taskId: string) {
+        if (!tasks.value.has(taskId)) return;
+        const next = new Map(tasks.value);
+        next.delete(taskId);
+        tasks.value = next;
+        saveTasks([...next.values()]);
+    }
+    return { tasks: computed(() => [...tasks.value.values()]), receive, discard };
 }

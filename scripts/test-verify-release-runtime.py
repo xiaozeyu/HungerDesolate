@@ -130,7 +130,7 @@ class RuntimeVerificationTests(unittest.TestCase):
                                     "settingsBundleBase64": settings_bundle()})
 
         self.assertTrue(result["runtimeVerified"])
-        self.assertEqual(result["listeners"], {"master": [10889, 11000, 27016], "caves": [11001, 27017]})
+        self.assertEqual(result["listeners"], {"master": [11000, 27016], "caves": [11001, 27017]})
         evidence_path = self.root / "staging" / RELEASE_ID / "runtime.json"
         evidence = json.loads(evidence_path.read_text())
         self.assertEqual(evidence["imageDigest"], DIGEST)
@@ -149,7 +149,7 @@ class RuntimeVerificationTests(unittest.TestCase):
                                "operationId": OPERATION_ID,
                                "settingsBundleBase64": settings_bundle()})
         self.assertEqual(str(failure.exception), "RELEASE_RUNTIME_LISTENERS_NOT_READY")
-        self.assertEqual(failure.exception.details["masterMissingPorts"], [10889, 11000, 27016])
+        self.assertEqual(failure.exception.details["masterMissingPorts"], [11000, 27016])
         self.assertEqual(failure.exception.details["cavesMissingPorts"], [11001, 27017])
         self.assertFalse(any((Path(self.temp.name) / "run" / "release-verify").iterdir()))
 

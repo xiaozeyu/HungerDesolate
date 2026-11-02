@@ -7,7 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 PROJECT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -24,6 +24,105 @@ RELEASE = "33333333-3333-4333-8333-333333333333"
 REQUEST = {"schemaVersion": 1, "requestId": "44444444-4444-4444-8444-444444444444",
            "operationId": "55555555-5555-4555-8555-555555555555", "hostId": HOST,
            "instanceId": INSTANCE, "expectedRevision": 4}
+
+
+class PlayerCountQueryTests(unittest.TestCase):
+    HEADER = b"\xff\xff\xff\xff"
+    PLAYER = HEADER + b"U\xff\xff\xff\xff"
+    INFO = HEADER + b"TSource Engine Query\x00"
+
+    def info(self, count):
+        return self.HEADER + b"I\x11test\x00forest\x00dst\x00DST\x00" + (322330 & 65535).to_bytes(2, "little") + bytes([count, 6, 0])
+
+    def players(self, count):
+        return self.HEADER + b"D" + bytes([count]) + b"".join(
+            bytes([index]) + b"player\x00" + b"\x00" * 8 for index in range(count))
+
+    def query(self, responses, address="127.0.0.1"):
+        sockets = []
+        packets = []
+        pending = iter(responses)
+
+        def receive(_limit):
+            reply = next(pending)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply, (address, 27016)
+
+        def create(*_args):
+            sock = MagicMock()
+            sock.recvfrom.side_effect = receive
+            sock.sendto.side_effect = lambda packet, address: packets.append((packet, address))
+            sockets.append(sock)
+            return sock
+
+        with patch.object(MODULE.socket, "socket", side_effect=create):
+            result = MODULE.a2s_player_count(27016, address)
+        for sock in sockets:
+            sock.close.assert_called_once()
+        return result, packets
+
+    def test_player_query_timeout_still_queries_info(self):
+        result, packets = self.query([TimeoutError(), self.info(3)])
+        self.assertEqual(result, 3)
+        self.assertEqual([packet for packet, _address in packets], [self.PLAYER, self.INFO])
+
+    def test_challenged_player_query_timeout_still_queries_info(self):
+        result, packets = self.query([self.HEADER + b"A1234", TimeoutError(), self.info(2)])
+        self.assertEqual(result, 2)
+        self.assertEqual([packet for packet, _address in packets],
+                         [self.PLAYER, self.HEADER + b"U1234", self.INFO])
+
+    def test_info_fallback_handles_its_own_challenge(self):
+        result, packets = self.query([TimeoutError(), self.HEADER + b"A5678", self.info(4)])
+        self.assertEqual(result, 4)
+        self.assertEqual(packets[-1][0], self.INFO + b"5678")
+
+    def test_player_reply_including_zero_is_not_replaced(self):
+        for count in (0, 3):
+            with self.subTest(count=count):
+                result, packets = self.query([self.HEADER + b"A1234", self.players(count)])
+                self.assertEqual(result, count)
+                self.assertEqual(len(packets), 2)
+
+    def test_unavailable_queries_remain_unknown(self):
+        result, packets = self.query([TimeoutError(), TimeoutError()])
+        self.assertIsNone(result)
+        self.assertEqual(len(packets), 2)
+
+    def test_invalid_info_never_becomes_zero_players(self):
+        for data in (b"", self.HEADER + b"I\x11missing-terminators", self.info(2)[:-2], self.HEADER + b"D\x03"):
+            with self.subTest(data=data):
+                result, _packets = self.query([TimeoutError(), data])
+                self.assertIsNone(result)
+
+    def test_truncated_player_entries_use_info_fallback(self):
+        result, _packets = self.query([self.HEADER + b"D\x01" + b"x" * 12, self.info(1)])
+        self.assertEqual(result, 1)
+
+    def test_expired_observation_budget_does_not_open_a_socket(self):
+        with patch.object(MODULE, "OBSERVATION_DEADLINE", 1), \
+             patch.object(MODULE.time, "monotonic", return_value=2), \
+             patch.object(MODULE.socket, "socket") as create:
+            self.assertIsNone(MODULE.a2s_player_count(27016))
+        create.assert_not_called()
+
+    def test_queries_verified_bridge_address(self):
+        result, packets = self.query([self.players(2)], "172.23.0.2")
+        self.assertEqual(result, 2)
+        self.assertEqual(packets[0][1], ("172.23.0.2", 27016))
+
+    def test_public_or_invalid_query_addresses_never_create_a_socket(self):
+        with patch.object(MODULE.socket, "socket") as create:
+            for address in ("8.8.8.8", "0.0.0.0", "224.0.0.1", "169.254.1.1", "host", "::1", None):
+                self.assertIsNone(MODULE.a2s_player_count(27016, address))
+        create.assert_not_called()
+
+    def test_invalid_ports_never_create_a_socket(self):
+        with patch.object(MODULE.socket, "socket") as create:
+            for port in (None, True, 0, -1, 65536, "27016"):
+                self.assertIsNone(MODULE.a2s_player_count(port))
+        create.assert_not_called()
 
 
 class InstanceRuntimeStartTests(unittest.TestCase):
@@ -139,7 +238,7 @@ class InstanceRuntimeStartTests(unittest.TestCase):
         self.assertEqual(result["runningShards"], ["caves", "master"])
         self.assertEqual(result["verificationLevel"], "localVerified")
         self.assertFalse(result["publicConnectivityVerified"])
-        self.assertEqual(result["listeners"], {"master": [10888, 11000, 27016], "caves": [11001, 27017]})
+        self.assertEqual(result["listeners"], {"master": [11000, 27016], "caves": [11001, 27017]})
         self.assertNotIn(8766, result["listeners"]["master"])
         self.assertNotIn(8767, result["listeners"]["caves"])
         self.assertIn("start", compose_mock.call_args.args[2])
@@ -226,10 +325,10 @@ class InstanceRuntimeStartTests(unittest.TestCase):
         self.assertEqual(failure.exception.details["masterObservedPorts"], [10888, 27016])
         self.assertEqual(failure.exception.details["cavesMissingPorts"], [])
 
-    def test_required_shard_listener_is_bound_to_the_cluster_configuration(self):
+    def test_shard_configuration_does_not_add_a_udp_listener(self):
         path = self.instance / "config" / "Cluster_1"
         (path / "cluster.ini").write_text("[SHARD]\nshard_enabled=true\nmaster_port=10889\n")
-        self.assertEqual(MODULE.shard_ports(path, "master", True), {"game": 11000, "query": 27016, "shard": 10889})
+        self.assertEqual(MODULE.shard_ports(path, "master", True), {"game": 11000, "query": 27016})
         self.assertEqual(MODULE.shard_ports(path, "caves", True), {"game": 11001, "query": 27017})
 
     def test_missing_or_unknown_process_and_unknown_sockets_never_report_success(self):
@@ -361,16 +460,72 @@ class InstanceRuntimeStartTests(unittest.TestCase):
         self.assertEqual(snapshot["maxPlayers"], 6)
         self.assertEqual(snapshot["players"], 5)
         self.assertEqual(snapshot["desiredVsDeployed"], "inSync")
-        self.assertEqual(len(snapshot["ports"]), 7)
+        self.assertEqual(len(snapshot["ports"]), 6)
         public = [port["hostPort"] for port in snapshot["ports"] if port["required"] and port["published"]]
         self.assertEqual(sorted(public), [11000, 11001, 27016, 27017])
-        internal = next(port for port in snapshot["ports"] if port["purpose"] == "shard")
-        self.assertIsNone(internal["hostPort"])
-        self.assertFalse(internal["published"])
-        self.assertTrue(internal["listening"])
         chown.assert_not_called()
         self.assertNotIn("test-token", json.dumps(response))
         self.assertEqual(before, {path.relative_to(self.root): path.read_bytes() for path in self.root.rglob("*") if path.is_file()})
+
+    def test_bridge_queries_work_when_localhost_forwarding_is_unavailable(self):
+        containers = self.containers()
+        project = self.manifest["composeProject"]
+        addresses = {"172.23.0.2": 2, "172.23.0.3": 3}
+        for index, container in enumerate(containers):
+            container["networks"] = {project + "_instance": {"IPAddress": list(addresses)[index]}}
+        destinations = []
+
+        def socket_for_shard(*_args):
+            sock = MagicMock()
+            def send(_packet, destination):
+                destinations.append(destination)
+            def receive(_limit):
+                address, port = destinations[-1]
+                if address == "127.0.0.1":
+                    raise TimeoutError()
+                count = addresses[address]
+                return (PlayerCountQueryTests.HEADER + b"D" + bytes([count])
+                        + (b"\x00name\x00" + b"\x00" * 8) * count, (address, port))
+            sock.sendto.side_effect = send
+            sock.recvfrom.side_effect = receive
+            return sock
+
+        with patch.object(MODULE, "docker", side_effect=self.inspection_docker(containers)), \
+             patch.object(MODULE.socket, "socket", side_effect=socket_for_shard):
+            snapshot = MODULE.inspect_instances(self.inspection_request())["instances"][0]
+        self.assertEqual(snapshot["players"], 5)
+        self.assertEqual(destinations, [("172.23.0.2", 27016), ("172.23.0.3", 27017)])
+        self.assertNotIn("PLAYERS_QUERY_UNAVAILABLE", snapshot["warnings"])
+
+    def test_failed_bridge_query_falls_back_to_published_port(self):
+        containers = self.containers()
+        for container in containers:
+            container["networks"] = {self.manifest["composeProject"] + "_instance": {"IPAddress": "172.23.0.2"}}
+        with patch.object(MODULE, "docker", side_effect=self.inspection_docker(containers)), \
+             patch.object(MODULE, "a2s_player_count", side_effect=[None, 2, None, 3]) as query:
+            snapshot = MODULE.inspect_instances(self.inspection_request())["instances"][0]
+        self.assertEqual(snapshot["players"], 5)
+        self.assertEqual([call.args for call in query.call_args_list],
+                         [(27016, "172.23.0.2"), (27016,), (27017, "172.23.0.2"), (27017,)])
+
+    def test_bridge_address_must_belong_to_the_expected_compose_network(self):
+        project = self.manifest["composeProject"]
+        self.assertIsNone(MODULE.container_query_address({"networks": {"foreign_instance": {"IPAddress": "172.23.0.2"}}}, project))
+        for address in ("8.8.8.8", "127.0.0.1", "0.0.0.0", "169.254.1.1", "224.0.0.1", "::1", "bad", None):
+            with self.subTest(address=address):
+                container = {"networks": {project + "_instance": {"IPAddress": address}}}
+                self.assertIsNone(MODULE.container_query_address(container, project))
+
+    def test_player_total_requires_every_enabled_shard(self):
+        for counts, total in (([2, None], None), ([None, 3], None), ([None, None], None), ([4, 4], None), ([0, 0], 0)):
+            with self.subTest(counts=counts):
+                with patch.object(MODULE, "docker", side_effect=self.inspection_docker(self.containers())), \
+                     patch.object(MODULE, "a2s_player_count", side_effect=counts) as query:
+                    snapshot = MODULE.inspect_instances(self.inspection_request())["instances"][0]
+                self.assertEqual(snapshot["players"], total)
+                self.assertEqual([call.args[0] for call in query.call_args_list], [27016, 27017])
+                self.assertEqual(snapshot["status"], "running")
+                self.assertEqual("PLAYERS_QUERY_UNAVAILABLE" in snapshot["warnings"], total is None)
 
     def test_reentering_queries_current_container_state_instead_of_start_result_cache(self):
         (self.instance / "runtime.json").write_text(json.dumps({"status": "running", "installedBuild": "stale"}))

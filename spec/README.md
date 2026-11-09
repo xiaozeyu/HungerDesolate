@@ -17,6 +17,19 @@
 | [世界配置设计](world-config-plan.md) | 世界选项、渲染、应用和验证 |
 | [后续功能](next-features.md) | 尚未完成的真实功能与完成条件 |
 
+## 规划中的功能
+
+以下文档只定义产品边界、流程、接口草案、难度和验收，不代表已经实现；未注册的 command 不会在界面提供可点击入口。
+
+| 文档 | 内容 |
+| --- | --- |
+| [运维增强规划](ops-enhancements-plan.md) | 三个功能的优先级、依赖、难度、里程碑和共同约束 |
+| [DST 更新设计](dst-update-plan.md) | 更新检查、Release 固定、保护点、发布切换、验证和回滚 |
+| [定时备份设计](scheduled-backup-plan.md) | 远端 scheduler、准热备份策略、幂等、保留和空间管理 |
+| [玩家列表设计](player-list-plan.md) | 服务端桥接 MOD、Master/Caves 合并、玩家列表和踢出 |
+| [Release 管理列表 UI 规划](release-management-ui-plan.md) | Release 列表字段、摘要、空状态、响应式与操作层级 |
+| [Element Plus 迁移影响评估](element-plus-migration-assessment.md) | 全站/局部/单组件迁移的体积、主题、测试和工期评估 |
+
 ## 冻结约束
 
 1. Windows/macOS 桌面端；Vue 3 + TypeScript + Vite + Tauri 2 + Rust。

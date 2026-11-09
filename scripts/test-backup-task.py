@@ -134,10 +134,12 @@ class BackupTaskTests(unittest.TestCase):
     def test_backup_restorability_is_verified_from_world_snapshot_and_release_artifacts(self):
         release_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         image_digest = "sha256:" + "a" * 64
-        release = {"releaseId": release_id, "imageDigest": image_digest, "verified": True}
+        release = {"releaseId": release_id, "imageDigest": image_digest, "verified": True,
+                   "createdAt": "2026-11-09T10:00:00Z"}
         release_dir = self.root / "staging" / release_id
         release_dir.mkdir(parents=True, mode=0o700)
-        (release_dir / "release-metadata.json").write_text(json.dumps({"schemaVersion": 1, **release}))
+        staged = {key: value for key, value in release.items() if key != "createdAt"}
+        (release_dir / "release-metadata.json").write_text(json.dumps({"schemaVersion": 1, **staged}))
         (release_dir / "release-metadata.json").chmod(0o600)
         release_dir.chmod(0o700)
         catalog_dir = self.root / "releases"

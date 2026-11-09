@@ -50,6 +50,12 @@ const runningTask = computed(() => taskStore.tasks.value
     .filter(task => ["queued", "running"].includes(task.status))
     .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0))[0] ?? null);
 const runningBuild = computed(() => buildTasks.all.value.find(entry => entry.status.status === "building") ?? null);
+const runningBuildStage = computed(() => {
+    const progress = runningBuild.value?.status.progress;
+    if (!progress) return "构建中";
+    const stage = progress.percent != null ? `${progress.currentStep} ${progress.percent}%` : progress.currentStep;
+    return progress.stepPercent != null ? `${stage} · 下载 ${progress.stepPercent}%` : stage;
+});
 const activityCount = computed(() => operations.running.value.length
     + taskStore.tasks.value.filter(task => ["queued", "running"].includes(task.status)).length
     + (runningBuild.value ? 1 : 0));
@@ -60,7 +66,7 @@ const activityTitle = computed(() => runningOperation.value
 const activityStage = computed(() => runningOperation.value
     ? stageLabel(runningOperation.value.stage)
     : runningTask.value ? stageLabel(runningTask.value.stage)
-    : runningBuild.value ? runningBuild.value.status.progress?.currentStep ?? "构建中" : "");
+    : runningBuild.value ? runningBuildStage.value : "");
 const activityTarget = computed(() => runningOperation.value
     ? operationTargetLabel(runningOperation.value.target, workspace.servers.value)
     : runningTask.value ? taskTargetLabel(runningTask.value, workspace.servers.value)

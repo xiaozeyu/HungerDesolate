@@ -361,7 +361,8 @@ def backup_restorability(instance, request, release_id):
         safe_dir(release_dir)
         release_metadata = read_json(release_dir / "release-metadata.json", 262144)
         release_metadata.pop("schemaVersion", None)
-        if release_metadata != release:
+        comparable = {key: value for key, value in release.items() if key != "createdAt"}
+        if release_metadata != comparable:
             return "missingArtifacts", None
         image = subprocess.run(["docker", "image", "inspect", release["imageDigest"], "--format", "{{.Id}}"],
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

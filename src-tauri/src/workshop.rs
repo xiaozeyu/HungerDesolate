@@ -5,7 +5,13 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{io::Read, path::Path, thread, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    path::Path,
+    thread,
+    time::Duration,
+};
 
 const OP: &str = "getWorkshopMetadata";
 const API: &str = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
@@ -162,6 +168,8 @@ fn fetch_author(client: &reqwest::blocking::Client, steam_id: &str) -> Option<St
         .get(format!(
             "https://steamcommunity.com/profiles/{steam_id}/?xml=1"
         ))
+        .header(reqwest::header::USER_AGENT, "hunger-desolate/0.1")
+        .timeout(Duration::from_secs(5))
         .send()
         .ok()?;
     let text = response.text().ok()?;
@@ -176,6 +184,31 @@ fn fetch_author(client: &reqwest::blocking::Client, steam_id: &str) -> Option<St
         return None;
     }
     Some(value.to_string())
+}
+
+fn fetch_authors(
+    client: &reqwest::blocking::Client,
+    creators: &HashSet<String>,
+) -> HashMap<String, Option<String>> {
+    let ids: Vec<String> = creators.iter().cloned().collect();
+    let mut authors = HashMap::new();
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in ids.chunks(8) {
+            handles.push(scope.spawn(move || {
+                chunk
+                    .iter()
+                    .map(|id| (id.clone(), fetch_author(client, id)))
+                    .collect::<Vec<_>>()
+            }));
+        }
+        for handle in handles {
+            for (id, author) in handle.join().unwrap_or_default() {
+                authors.insert(id, author);
+            }
+        }
+    });
+    authors
 }
 
 fn invoke(request: &Request) -> CommandResult<Vec<RemoteItem>> {
@@ -264,15 +297,18 @@ fn invoke(request: &Request) -> CommandResult<Vec<RemoteItem>> {
             .cloned()
             .map(RemoteItem::parse)
             .collect::<CommandResult<Vec<_>>>()?;
-        if items.len() <= 12 {
-            for item in &mut items {
-                if let Some(steam_id) = item.creator_steam_id.as_deref() {
-                    item.author = fetch_author(&client, steam_id);
-                }
-            }
+        let creators: HashSet<String> = items
+            .iter()
+            .filter_map(|item| item.creator_steam_id.clone())
+            .collect();
+        let authors = fetch_authors(&client, &creators);
+        for item in &mut items {
+            item.author = item
+                .creator_steam_id
+                .as_ref()
+                .and_then(|id| authors.get(id).cloned().flatten());
         }
-        let requested: std::collections::HashSet<&str> =
-            request.workshop_ids.iter().map(String::as_str).collect();
+        let requested: HashSet<&str> = request.workshop_ids.iter().map(String::as_str).collect();
         let mut returned = std::collections::HashSet::new();
         if items.iter().any(|item| {
             !requested.contains(item.workshop_id.as_str())

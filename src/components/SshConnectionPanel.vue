@@ -4,6 +4,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { Fingerprint, KeyRound, PlugZap } from "@lucide/vue";
 import AppDialog from "./AppDialog.vue";
 import CredentialFields from "./CredentialFields.vue";
+import FingerprintTrustDialog from "./FingerprintTrustDialog.vue";
 import { emptyCredentials, credentialError, credentialInput } from "../lib/credentialFields";
 import CredentialCleanupNotice from "./CredentialCleanupNotice.vue";
 import { useWorkspace } from "../composables/useWorkspace";
@@ -21,7 +22,6 @@ const trustOpen = ref(false), credentialOpen = ref(false);
 watch(busy, value => emit("busy", value), {flush: "sync"});
 const credentials = ref(emptyCredentials());
 const credentialFailure = ref<string | null>(null);
-const acknowledged = ref(false);
 let epoch = 0, sequence = 0, credentialEditVersion = 0;
 let latestRequestId = "";
 let attempt: {editVersion: number; operationId: string} | null = null;
@@ -44,12 +44,12 @@ watch(credentialOpen, open => {if (!open) clearSecrets();});
 async function scan() {
   if (!canUseSsh.value) return;
   const captured = ticket();busy.value = true;failure.value = "";message.value = "";
-  try { const result = await api.scanFingerprint(request(captured)); if (current(captured) && matchesConnection(captured,result)) { challenge.value = result; acknowledged.value = false; trustOpen.value = true; } }
+  try { const result = await api.scanFingerprint(request(captured)); if (current(captured) && matchesConnection(captured,result)) { challenge.value = result; trustOpen.value = true; } }
   catch (cause) { if (current(captured)) failure.value = describeError(cause).message; }
   finally { if (current(captured)) busy.value = false; }
 }
 async function confirm() {
-  if (!canUseSsh.value || !challenge.value || !acknowledged.value) return;
+  if (!canUseSsh.value || !challenge.value) return;
   const captured = ticket();busy.value = true;failure.value = "";
   try { const result = await api.confirmFingerprint({...request(captured),challengeId:challenge.value.challengeId,fingerprint:challenge.value.fingerprint});
     if (current(captured) && matchesConnection(captured,result,true)) {trustOpen.value = false; await workspace.refresh();} }
@@ -85,11 +85,7 @@ async function connect() {
     <div class="ssh-step"><PlugZap :size="18"/><div><strong>登录验证</strong></div><button class="button primary" :disabled="!canUseSsh || !state?.fingerprint || !state?.credentialConfigured" @click="connect">验证登录</button></div>
     <div v-if="verification" class="ssh-verification" role="status"><p>{{message}}</p><p v-if="verification.hostId" class="mono">hostId：{{verification.hostId}}</p><small>核验时间：{{new Date(verification.verifiedAtUnixSeconds * 1000).toLocaleString()}}</small></div>
     <CredentialCleanupNotice/>
-    <AppDialog :open="trustOpen" title="确认 SSH 主机指纹" description="请通过可信渠道核对以下主机指纹。" @update:open="trustOpen = $event">
-      <template v-if="challenge"><p>{{server.displayName}} · {{server.host}}:{{server.sshPort}}</p><p v-if="challenge.previousFingerprint && challenge.previousFingerprint !== challenge.fingerprint" class="field-error">指纹已变化：请先核实是否更换主机或重新安装 SSH 服务。</p><dl class="fingerprint-details"><dt>原指纹</dt><dd class="mono">{{challenge.previousFingerprint ?? '尚未信任'}}</dd><dt>新指纹 · {{challenge.algorithm}}</dt><dd class="mono">{{challenge.fingerprint}}</dd></dl><label class="trust-acknowledgement"><input v-model="acknowledged" type="checkbox" :disabled="busy"/>我已通过可信渠道核对上述主机指纹</label><p class="form-hint">有效至 {{new Date(challenge.expiresAtUnixSeconds * 1000).toLocaleTimeString()}}</p></template>
-      <p v-if="failure" class="error-strip" role="alert">{{failure}}</p>
-      <template #footer><button class="button" @click="trustOpen = false">关闭</button><button class="button primary" :disabled="!acknowledged || !canUseSsh" @click="confirm">确认指纹</button></template>
-    </AppDialog>
+    <FingerprintTrustDialog :open="trustOpen" :display-name="server.displayName" :host="server.host" :ssh-port="server.sshPort" :challenge="challenge" :busy="busy" :error="failure" @update:open="trustOpen = $event" @confirm="confirm"/>
     <AppDialog :open="credentialOpen" title="保存 SSH 凭据" :description="`${server.displayName} · ${server.username}@${server.host} · 仅支持密码认证`" @update:open="credentialOpen = $event">
       <p v-if="preview" class="form-hint">演示数据</p>
       <form id="ssh-credential-form" @submit.prevent="saveCredential"><CredentialFields v-model="credentials" auth-kind="password" id-prefix="ssh-credential" :disabled="busy || preview" :error="credentialFailure" @update:model-value="edited"/></form><p v-if="failure" class="error-strip" role="alert">{{failure}}</p>

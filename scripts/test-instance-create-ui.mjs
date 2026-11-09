@@ -28,7 +28,6 @@ test('creation form submits check-and-create in one step', async()=>{
   assert.doesNotMatch(api,/previewInstanceCreate|preview_instance_create/);
   assert.match(api,/create_instance/);
   assert.match(releases,/verifyInstanceReleaseBase/);
-  assert.match(releases,/verifyInstanceReleaseRuntime/);
   assert.match(releases,/已通过/);
   assert.match(releases,/previewInstanceReleaseDelete/);
   assert.match(releases,/deleteInstanceRelease/);
@@ -47,7 +46,7 @@ test('creation form submits check-and-create in one step', async()=>{
 before(async()=>{
   vite=await createServer({configFile:false,logLevel:'error',optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,watch:null},plugins:[{
     name:'creation-ipc',enforce:'pre',resolveId(id,importer){if(id==='virtual:creation-api'||/\/api\/instances(?:\.ts)?$/.test(id)&&importer?.endsWith('useInstanceCreation.ts'))return virtual;},
-    configureServer(server){server.ws.listen=()=>{};},load(id){if(id===virtual)return 'export const handlers={}; export const listInstanceReleases=request=>handlers.listReleases(request); export const createInstance=request=>handlers.create(request); export const verifyInstanceReleaseBase=request=>handlers.verifyBase(request); export const verifyInstanceReleaseRuntime=request=>handlers.verifyRuntime(request); export const previewInstanceRelease=request=>handlers.previewRelease(request); export const importInstanceRelease=request=>handlers.importRelease(request);';},
+    configureServer(server){server.ws.listen=()=>{};},load(id){if(id===virtual)return 'export const handlers={}; export const listInstanceReleases=request=>handlers.listReleases(request); export const createInstance=request=>handlers.create(request); export const verifyInstanceReleaseBase=request=>handlers.verifyBase(request);  export const previewInstanceRelease=request=>handlers.previewRelease(request); export const importInstanceRelease=request=>handlers.importRelease(request);';},
   }]});
   handlers=(await vite.ssrLoadModule('virtual:creation-api')).handlers;
   ({useInstanceCreation}=await vite.ssrLoadModule('/src/composables/useInstanceCreation.ts'));

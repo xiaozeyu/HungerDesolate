@@ -73,6 +73,7 @@ export interface InstanceSummary {
     lastSyncedAt: string | null;
     activeTaskId: TaskId | null;
     manifestAvailable: boolean;
+    configRevision: number | null;
 }
 export interface InstanceOverview {
     identity: InstanceSummary;

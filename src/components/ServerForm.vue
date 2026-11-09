@@ -12,7 +12,7 @@ import { serverInput, validateServerForm, type ServerFields, type ServerFormErro
 import { useWorkspace } from "../composables/useWorkspace";
 import type { SaveServerRequest, ServerSummary } from "../types/contracts";
 const props = defineProps<{server: ServerSummary | null; readonly?: boolean; formId: string}>();
-const emit = defineEmits<{saved: [server: ServerSummary]; busy: [value: boolean]}>();
+const emit = defineEmits<{saved: [server: ServerSummary]; tested: [server: ServerSummary]; busy: [value: boolean]}>();
 const workspace = useWorkspace();
 const fields = reactive<ServerFields>({displayName: "", host: "", sshPort: "22", username: "root", authKind: "key"});
 const errors = ref<ServerFormErrors>({});
@@ -42,7 +42,7 @@ watch(() => props.server?.serverId, () => { contextEpoch++; busy.value = false; 
 watch(() => props.server?.recordVersion, () => { if (!dirty.value) reset(); });
 function edited() { dirty.value = true; }
 function authChanged(value: string) { if (value === "password" || value === "key") { fields.authKind = value; edited(); } }
-async function save() {
+async function save(test = false) {
   errors.value = validateServerForm(fields); failure.value = null;
   credentialFailure.value = props.server ? null : credentialError(fields.authKind,credentials.value);
   if (Object.keys(errors.value).length || credentialFailure.value || busy.value || props.readonly) return;
@@ -58,7 +58,8 @@ async function save() {
       await workspace.refresh();
       if (epoch === contextEpoch && result) {
         credentials.value = emptyCredentials(); progress.value = null; attempt = null;
-        dirty.value = false; emit("saved",result);
+        dirty.value = false;
+        if (test) emit("tested", result); else emit("saved", result);
       }
       return;
     }
@@ -69,7 +70,8 @@ async function save() {
         failure.value = {code: "REVISION_CONFLICT", message: "原保存操作已完成，但记录随后再次被修改", recoverySteps: ["保留输入，与最新记录比较后再保存"], field: null};
         return;
       }
-      baseVersion.value = result.recordVersion; dirty.value = false; attempt = null; emit("saved", result);
+      baseVersion.value = result.recordVersion; dirty.value = false; attempt = null;
+      if (test) emit("tested", result); else emit("saved", result);
     }
   } catch (cause) {
     if (epoch === contextEpoch) {
@@ -88,9 +90,13 @@ async function save() {
     }
   } finally { if (epoch === contextEpoch) {busy.value = false; emit("busy", false);} }
 }
+function testConnection() {
+  if (!busy.value && !props.readonly) void save(true);
+}
+defineExpose({testConnection});
 </script>
 <template>
-  <form :id="formId" novalidate @submit.prevent="save" @input="edited">
+  <form :id="formId" novalidate @submit.prevent="save(false)" @input="edited">
     <p v-if="progress?.server && failure" class="form-hint" role="status">主机“{{progress.server.displayName}}”已创建，凭据保存未完成。可重试或到连接设置补充。</p>
     <div v-if="changedElsewhere" class="error-strip" role="alert">此记录已在其他位置修改。当前输入已保留，请先比较最新记录。<p class="muted-text">当前记录：{{server?.displayName}} · {{server?.username}}@{{server?.host}}:{{server?.sshPort}} · 版本 {{server?.recordVersion}}</p></div>
     <div v-if="failure" class="error-strip" role="alert"><strong>{{failure.message}}</strong><p v-for="step in failure.recoverySteps" :key="step">{{step}}</p></div>

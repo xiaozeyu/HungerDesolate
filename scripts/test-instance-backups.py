@@ -149,10 +149,12 @@ class InstanceBackupsTests(unittest.TestCase):
 
     def test_release_artifact_lookup_uses_registered_staging_root(self):
         release_id = "55555555-5555-4555-8555-555555555555"
-        entry = {"releaseId": release_id, "verified": True, "dstBuild": "build"}
+        entry = {"releaseId": release_id, "verified": True, "dstBuild": "build",
+                 "createdAt": "2026-11-09T10:00:00Z"}
         release_dir = self.root / "staging" / release_id
         release_dir.mkdir(parents=True)
-        (release_dir / "release-metadata.json").write_text(json.dumps({"schemaVersion": 1, **entry}))
+        staged = {key: value for key, value in entry.items() if key != "createdAt"}
+        (release_dir / "release-metadata.json").write_text(json.dumps({"schemaVersion": 1, **staged}))
         (release_dir / "release-metadata.json").chmod(0o600)
         release_dir.chmod(0o700)
         self.assertIsNone(MODULE.release_artifact_blocker(release_id, entry))

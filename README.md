@@ -115,3 +115,7 @@ npm run tauri -- build --debug --no-bundle
 - [专服诊断](docs/diagnostics.md)
 - [备份与恢复文件边界](docs/backup-restore-boundaries.md)
 - [DST Release 准备](docs/dst-release-setup.md)
+- [运维增强规划](spec/ops-enhancements-plan.md)
+- [DST 更新设计](spec/dst-update-plan.md)
+- [定时备份设计](spec/scheduled-backup-plan.md)
+- [玩家列表设计](spec/player-list-plan.md)

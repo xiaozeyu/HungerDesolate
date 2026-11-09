@@ -448,7 +448,7 @@ pub(crate) fn from_output(
             CheckLevel::Warning,
             "管理目录",
             "未创建",
-            &["后续通过环境准备创建管理目录"],
+            &["管理目录需要通过初始化"],
         ),
         "invalid" => check(
             &mut checks,

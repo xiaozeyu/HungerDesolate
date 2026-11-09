@@ -26,6 +26,8 @@ pub struct ReleaseSummary {
     pub dst_build: String,
     pub artifact_digest: String,
     pub script_version: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub verified: bool,
     pub runtime_verified: bool,
     pub commands: Value,
@@ -58,7 +60,7 @@ fn error(code: &'static str, message: &'static str) -> Box<CommandError> {
         "release",
         OP,
         message,
-        "准备或验证 DST release 后重试",
+        "刷新版本列表后重试；仍失败时重新准备或验证 DST 版本",
     )
 }
 
@@ -127,7 +129,7 @@ fn execute(session: &Session, host_id: &str) -> CommandResult<Probe> {
     if envelope.get("ok") != Some(&Value::Bool(true)) {
         return Err(error(
             "CREATE_RELEASE_CATALOG_INVALID",
-            "远端 release catalog 无效",
+            "无法读取主机上的版本清单",
         ));
     }
     serde_json::from_value(

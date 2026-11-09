@@ -9,53 +9,68 @@ import IconButton from "../components/IconButton.vue";
 import AppDialog from "../components/AppDialog.vue";
 import ServerForm from "../components/ServerForm.vue";
 import CredentialCleanupNotice from "../components/CredentialCleanupNotice.vue";
+import FingerprintTrustDialog from "../components/FingerprintTrustDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useConnectionDialog } from "../composables/useConnectionDialog";
-import type { ServerSummary } from "../types/contracts";
+import { useHostConnection } from "../composables/useHostConnection";
+import type { HostConnection, ServerSummary } from "../types/contracts";
 
 const router = useRouter();
 const workspace = useWorkspace();
 const { openConnection } = useConnectionDialog();
+const connection = useHostConnection();
 const editorOpen = ref(false);
 const saving = ref(false);
-const savedMessage = ref("");
-const savedServerId = ref("");
 const addButton = ref<HTMLButtonElement | null>(null);
+const serverForm = ref<{testConnection: () => void} | null>(null);
 const servers = computed(() => workspace.servers.value);
-const connectedCount = computed(() => servers.value.filter(host => host.connectionState === "connected").length);
+function isVerified(host: ServerSummary) {
+  return connection.verifiedServerVersions.value[host.serverId] === host.recordVersion;
+}
+const verifiedCount = computed(() => servers.value.filter(isVerified).length);
 const pendingCount = computed(() => servers.value.filter(host => !host.hostId).length);
 const summaryItems = computed(() => [
   { label: "主机", value: servers.value.length },
-  { label: "已连接", value: connectedCount.value, tone: "success" as const },
+  { label: "已验证", value: verifiedCount.value, tone: "success" as const },
   { label: "待初始化", value: pendingCount.value, tone: "warning" as const },
 ]);
 
-function hostState(host: ServerSummary): { label: string; tone: "success" | "warning" | "danger" | "muted" } {
+function hostState(host: ServerSummary): { label: string; tone: "success" | "warning" | "muted" } {
+  if (isVerified(host)) return { label: "已验证", tone: "success" };
   if (!host.hostId) return { label: "待初始化", tone: "warning" };
-  if (host.connectionState === "connected") return { label: "已连接", tone: "success" };
-  if (host.connectionState === "connecting") return { label: "连接中", tone: "warning" };
-  if (host.connectionState === "unreachable") return { label: "不可达", tone: "danger" };
-  if (host.connectionState === "trustRequired") return { label: "待确认指纹", tone: "warning" };
   return { label: "未连接", tone: "muted" };
 }
 function authLabel(host: ServerSummary) {
   return host.authKind === "key" ? "SSH 密钥" : "密码";
 }
-function openHost(host: ServerSummary) {
-  if (workspace.preview.value || host.hostId) {
+function enterConnectedHost(connectionResult: HostConnection, host: ServerSummary) {
+  if (connectionResult.managementState === "ready" && connectionResult.hostId) {
     void router.push(`/hosts/${host.serverId}/instances`);
   } else {
-    openConnection(host.serverId);
+    void router.push(`/hosts/${host.serverId}/environment`);
   }
+}
+function connectHost(host: ServerSummary) {
+  if (workspace.preview.value) {
+    void router.push(`/hosts/${host.serverId}/instances`);
+    return;
+  }
+  void connection.connect(host, enterConnectedHost);
 }
 async function setEditorOpen(open: boolean) {
   editorOpen.value = open;
   if (!open) { await nextTick(); addButton.value?.focus(); }
 }
-function saved(server: ServerSummary) {
-  savedMessage.value = `已添加“${server.displayName}”`;
-  savedServerId.value = server.serverId;
+function saved() {
   void setEditorOpen(false);
+}
+async function tested(server: ServerSummary) {
+  await setEditorOpen(false);
+  const latest = workspace.servers.value.find(item => item.serverId === server.serverId) ?? server;
+  connectHost(latest);
+}
+function testConnection() {
+  serverForm.value?.testConnection();
 }
 </script>
 
@@ -67,8 +82,12 @@ function saved(server: ServerSummary) {
       </template>
     </PageHeader>
     <CredentialCleanupNotice/>
-    <p v-if="savedMessage" role="status" class="success-message">{{savedMessage}}<button v-if="savedServerId" class="text-button" type="button" @click="openConnection(savedServerId)">配置连接</button></p>
     <div v-if="workspace.error.value" class="error-strip" role="alert">{{workspace.error.value}}</div>
+    <div v-if="connection.error.value" class="error-strip" role="alert">
+      <strong>{{ connection.error.value.message }}</strong>
+      <span v-if="connection.error.value.recoverySteps.length"> {{ connection.error.value.recoverySteps.join("；") }}</span>
+      <button v-if="connection.errorServerId.value" class="text-button" type="button" @click="openConnection(connection.errorServerId.value)">连接设置</button>
+    </div>
     <div v-if="workspace.loading.value && !servers.length" class="empty-state" role="status"><p>读取连接记录…</p></div>
     <div v-else-if="!servers.length" class="empty-state"><Server :size="28"/><h2>还没有主机</h2><button class="button" @click="setEditorOpen(true)">添加第一台主机</button></div>
     <template v-else>
@@ -84,8 +103,8 @@ function saved(server: ServerSummary) {
               <td><StatusLabel :tone="hostState(host).tone" :label="hostState(host).label"/></td>
               <td class="table-action">
                 <div class="host-actions">
-                  <button class="text-button" type="button" @click="openHost(host)">
-                    {{workspace.preview.value || host.hostId ? "进入" : "配置连接"}} <ArrowRight :size="15"/>
+                  <button class="text-button" type="button" :disabled="connection.busyServerId.value === host.serverId" @click="connectHost(host)">
+                    {{ connection.busyServerId.value === host.serverId ? "连接中…" : workspace.preview.value || host.hostId || isVerified(host) ? "进入" : "连接" }} <ArrowRight :size="15"/>
                   </button>
                   <IconButton v-if="!workspace.preview.value" :label="`编辑${host.displayName}连接`" @click="openConnection(host.serverId)"><Pencil :size="16"/></IconButton>
                 </div>
@@ -96,9 +115,10 @@ function saved(server: ServerSummary) {
       </div>
     </template>
     <AppDialog :open="editorOpen" title="添加 Linux 主机" @update:open="setEditorOpen">
-      <ServerForm v-if="editorOpen" form-id="new-server" :server="null" @saved="saved" @busy="saving = $event"/>
-      <template #footer><button class="button" @click="setEditorOpen(false)">关闭</button><button class="button primary" form="new-server" type="submit" :disabled="saving">{{saving ? '保存中…' : '保存主机'}}</button></template>
+      <ServerForm v-if="editorOpen" ref="serverForm" form-id="new-server" :server="null" @saved="saved" @tested="tested" @busy="saving = $event"/>
+      <template #footer><button class="button" @click="setEditorOpen(false)">关闭</button><button class="button" type="button" :disabled="saving" @click="testConnection">测试连接</button><button class="button primary" form="new-server" type="submit" :disabled="saving">{{saving ? '保存中…' : '保存主机'}}</button></template>
     </AppDialog>
+    <FingerprintTrustDialog :open="connection.trustOpen.value" :display-name="connection.challengeServer.value?.displayName ?? ''" :host="connection.challengeServer.value?.host ?? ''" :ssh-port="connection.challengeServer.value?.sshPort ?? 22" :challenge="connection.challenge.value" :busy="connection.busyServerId.value === connection.challengeServer.value?.serverId" :error="connection.trustError.value" @update:open="value => { if (!value) connection.closeTrust() }" @confirm="connection.confirmTrust"/>
   </div>
 </template>
 

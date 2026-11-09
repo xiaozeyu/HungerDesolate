@@ -8,12 +8,14 @@ import ServerForm from "./ServerForm.vue";
 import SshConnectionPanel from "./SshConnectionPanel.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useConnectionDialog } from "../composables/useConnectionDialog";
+import { useHostConnection } from "../composables/useHostConnection";
 import { describeError } from "../lib/commandError";
 import type { DeleteServerRequest, ServerSummary } from "../types/contracts";
 
 const router = useRouter();
 const workspace = useWorkspace();
 const dialog = useConnectionDialog();
+const hostConnection = useHostConnection();
 const server = computed(() => workspace.servers.value.find(item => item.serverId === dialog.serverId.value) ?? null);
 const saving = ref(false);
 const savedMessage = ref("");
@@ -61,7 +63,9 @@ function saved(value: ServerSummary) {
 }
 
 function connected() {
-  if (server.value) connectedServerId.value = server.value.serverId;
+  if (!server.value) return;
+  connectedServerId.value = server.value.serverId;
+  hostConnection.markVerified(server.value);
 }
 
 function goToEnvironment() {

@@ -301,7 +301,8 @@ def release_artifact_blocker(release_id, release):
     except FileNotFoundError:
         return "DST_RELEASE_UNAVAILABLE"
     metadata.pop("schemaVersion", None)
-    return None if metadata == release else "DST_RELEASE_ARTIFACTS_MISMATCH"
+    comparable = {key: value for key, value in release.items() if key != "createdAt"}
+    return None if metadata == comparable else "DST_RELEASE_ARTIFACTS_MISMATCH"
 
 
 def world_config_snapshot_blocker(archive_path, archive_manifest, instance, expected_instance_id):

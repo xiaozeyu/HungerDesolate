@@ -83,6 +83,7 @@ pub enum BuildStatus {
 pub struct BuildProgress {
     pub current_step: String,
     pub percent: Option<u8>,
+    pub step_percent: Option<u8>,
 }
 
 fn make_error(
@@ -287,6 +288,26 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
     Ok(())
 }
 
+fn percent(value: f32) -> Option<u8> {
+    (value.is_finite() && (0.0..=100.0).contains(&value)).then(|| value.round() as u8)
+}
+
+fn download_progress(log_content: &str) -> Option<u8> {
+    log_content.lines().rev().find_map(|line| {
+        if !line.to_ascii_lowercase().contains("download") {
+            return None;
+        }
+        if let Some((_, after)) = line.split_once("progress:") {
+            let raw = after.split_whitespace().next()?;
+            return percent(raw.trim_end_matches(['%', ',']).parse::<f32>().ok()?);
+        }
+        // SteamCMD 自更新/下载阶段使用形如 `[ 29%] Downloading update (...)` 的进度。
+        let start = line.find('[')?;
+        let rest = &line[start + 1..];
+        let end = rest.find('%')?;
+        percent(rest[..end].trim().parse::<f32>().ok()?)
+    })
+}
 fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress>, Vec<String>) {
     let lines: Vec<String> = log_content.lines().map(|s| s.to_string()).collect();
     // Keep enough context for SteamCMD assertions preceding minidump and disk diagnostics.
@@ -313,6 +334,7 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
             Some(BuildProgress {
                 current_step: "构建完成".to_string(),
                 percent: Some(100),
+                step_percent: None,
             }),
             tail,
         );
@@ -327,20 +349,24 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
             Some(BuildProgress {
                 current_step: "构建失败".to_string(),
                 percent: None,
+                step_percent: None,
             }),
             tail,
         );
     }
 
-    // 解析当前步骤
-    let current_step = if log_content.contains("==> 生成 release 元数据") {
+    // 解析当前步骤。Docker 构建开始后，SteamCMD 的 bootstrap/download 是其内部阶段，
+    // 百分比必须在 50% 之后继续前进，不能从 50% 回退到 30%。
+    let current_step = if log_content.contains("==> 登记 Release 到主机 catalog") {
+        Some(("登记 Release".to_string(), 95))
+    } else if log_content.contains("==> 生成 release 元数据") {
         Some(("生成元数据".to_string(), 90))
     } else if log_content.contains("==> 提取 DST build 版本") {
         Some(("提取版本信息".to_string(), 80))
     } else if log_content.contains("SteamCMD phase=download") {
-        Some(("下载并校验 DST 服务端".to_string(), 60))
+        Some(("下载并校验 DST 服务端".to_string(), 65))
     } else if log_content.contains("SteamCMD phase=bootstrap") {
-        Some(("初始化 SteamCMD".to_string(), 30))
+        Some(("初始化 SteamCMD".to_string(), 55))
     } else if log_content.contains("==> 开始构建 Docker 镜像") {
         Some(("正在构建镜像".to_string(), 50))
     } else if log_content.contains("==> 准备 Debian 基础镜像") {
@@ -352,11 +378,17 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
     };
 
     if let Some((step, percent)) = current_step {
+        let step_percent = if matches!(percent, 55 | 65) {
+            download_progress(log_content)
+        } else {
+            None
+        };
         (
             BuildStatus::Building,
             Some(BuildProgress {
                 current_step: step,
                 percent: Some(percent),
+                step_percent,
             }),
             tail,
         )
@@ -366,6 +398,7 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
             Some(BuildProgress {
                 current_step: "正在构建...".to_string(),
                 percent: None,
+                step_percent: None,
             }),
             tail,
         )
@@ -632,6 +665,43 @@ mod tests {
             progress.map(|item| item.current_step),
             Some("下载并校验 DST 服务端".into())
         );
+    }
+
+    #[test]
+    fn download_progress_is_separate_from_stage_progress() {
+        let start = "FAMINE_BUILD_STARTED\n==> 开始构建 Docker 镜像\n";
+        let (_, progress, _) = parse_build_progress(start);
+        let progress = progress.expect("start progress");
+        assert_eq!(progress.percent, Some(50));
+        assert_eq!(progress.step_percent, None);
+
+        let bootstrap = format!(
+            "{start}==> SteamCMD phase=bootstrap\n#15 110.0 [ 29%] Downloading update (12221 of 41370 KB)...\n"
+        );
+        let (_, progress, _) = parse_build_progress(&bootstrap);
+        let progress = progress.expect("bootstrap progress");
+        assert_eq!(progress.percent, Some(55));
+        assert_eq!(progress.step_percent, Some(29));
+
+        let download = format!(
+            "{bootstrap}==> SteamCMD phase=download attempt=1/3\nUpdate state (0x61) downloading, progress: 42.60 (4260 / 10000)\n"
+        );
+        let (_, progress, _) = parse_build_progress(&download);
+        let progress = progress.expect("download progress");
+        assert_eq!(progress.percent, Some(65));
+        assert_eq!(progress.step_percent, Some(43));
+
+        let verify = format!(
+            "{download}Update state (0x5) verifying install, progress: 90.00 (9000 / 10000)\n"
+        );
+        let (_, progress, _) = parse_build_progress(&verify);
+        assert_eq!(progress.expect("verify progress").step_percent, Some(43));
+
+        let extracted = format!("{verify}==> 提取 DST build 版本\n");
+        let (_, progress, _) = parse_build_progress(&extracted);
+        let progress = progress.expect("extract progress");
+        assert_eq!(progress.percent, Some(80));
+        assert_eq!(progress.step_percent, None);
     }
 
     #[test]

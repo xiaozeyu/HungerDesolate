@@ -593,7 +593,7 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
     <div v-if="loading && !items.length" class="empty-state" role="status"><h2>正在读取主机 MOD 库</h2></div>
     <div v-else-if="!items.length" class="empty-state">
       <h2>主机 MOD 库为空</h2>
-      <p class="muted-text">添加 Workshop MOD 后，新建专服可直接选择，不需要再次下载。</p>
+      <p class="muted-text">统一管理MOD，通过Workshop ID或合集链接添加</p>
     </div>
     <div v-else class="table-wrap">
       <table>

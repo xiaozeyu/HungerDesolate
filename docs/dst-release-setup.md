@@ -8,83 +8,22 @@
 - **Runtime 镜像**: 包含 DST Dedicated Server 的 Docker 镜像
 - **Release Catalog**: 主机级别的 release 注册表
 
-## 方式一：本地构建（推荐用于开发测试）
+## 通过应用构建
 
-### 1. 构建 runtime 镜像
-
-```bash
-cd docker/runtime
-./build.sh
-```
-
-脚本会：
-- 通过 SteamCMD 下载 DST Dedicated Server
-- 构建 Docker 镜像
-- 生成 `release-metadata.json` 和 `dst-runtime-*.tar` 文件
-
-### 2. 传输到远端主机
-
-将构建产物传输到远端主机的 staging 目录：
-
-```bash
-# 假设 release ID 为 a1b2c3d4-e5f6-4789-a123-456789abcdef
-RELEASE_ID="<从 release-metadata.json 中获取>"
-SSH_HOST="user@your-server"
-REMOTE_STAGING="/var/lib/famine-hub/staging/${RELEASE_ID}"
-
-# 在远端创建 staging 目录
-ssh ${SSH_HOST} "sudo mkdir -p ${REMOTE_STAGING} && sudo chown $(whoami) ${REMOTE_STAGING}"
-
-# 传输文件
-scp release-metadata.json ${SSH_HOST}:${REMOTE_STAGING}/
-scp dst-runtime-*.tar ${SSH_HOST}:${REMOTE_STAGING}/artifact.tar
-```
-
-### 3. 在应用中导入
-
-1. 打开荒野中枢应用
-2. 进入主机管理页面
-3. 点击"导入 Release"或在创建实例时选择"导入新 Release"
-4. 应用会检测到 staging 中的 release 并执行导入
-
-## 方式二：使用预构建镜像（未来支持）
-
-未来版本将支持：
-- 从容器仓库拉取预构建镜像
-- 自动检测和导入官方 release
+在 Release 管理页点击“构建镜像”，由目标主机的 Docker 构建 DST runtime 镜像；构建完成后自动登记基础验证通过的 Release。
 
 ## Release 验证
 
-通过软件内构建成功后，构建脚本会核对 Docker image ID 与 Release digest、检查 `version.txt`，并用 `ldd` 检查 DST 二进制可执行权限和动态库依赖，再将基础验证通过的 Release 登记到主机 catalog。这些检查不代表 DST 服务进程及网络端口已通过运行时验证。
+通过软件内构建成功后，构建脚本会核对 Docker image ID 与 Release digest、检查 `version.txt`，并用 `ldd` 检查 DST 二进制可执行权限和动态库依赖，再将基础验证通过的 Release 登记到主机 catalog。这些检查不代表 DST 服务进程已启动、端口已监听或玩家可以连接。
 
 Release 登记会自动执行基础验证，通过后即可用于创建实例：
 
 1. **基础验证** (`verified: true`)
    - 镜像 digest 与本地主机 Docker image ID 匹配
    - `version.txt` 与 Release 元数据一致
-   - DST 二进制可执行，动态库依赖齐全
+   - DST 二进制可执行，动态库依赖齐全，SteamCMD Workshop 获取能力存在
 
-2. **隔离运行验证** (`runtimeVerified: true`，可选)
-   - 容器可以成功启动
-   - DST 进程可以正常运行
-   - 网络端口正确监听
-
-创建只要求基础验证通过。运行时验证提供额外的双分片启动证据，不会把未运行验证的 Release 标成运行时验证通过。实例创建只生成并验证容器资源，不代表游戏已经启动或玩家可以连接。
-
-若要进行隔离运行验证，在 DST 游戏主菜单打开“账户”并生成服务器令牌。这个令牌文件通常不会预先存在；生成后将令牌内容保存为 `cluster_token.txt`，再与下面的配置文件一起放入 ZIP。令牌是凭据，不要提交到代码仓库或发给他人。
-
-ZIP 根目录必须直接包含以下文件和目录（不要再套一层 `Cluster_1/` 文件夹）：
-
-```text
-cluster.ini
-cluster_token.txt
-Master/server.ini
-Caves/server.ini
-```
-
-`cluster.ini`、`Master/server.ini` 和 `Caves/server.ini` 可从本机已生成的 DST 世界配置目录取得；如果还没有这些配置，可在游戏内创建一个本地世界后复制对应文件。当前验证器要求 Master 和 Caves 两个分片配置都存在。完成后在 Release 管理页选择 ZIP 并运行验证。
-
-验证会在主机 `/run` 临时目录中创建 LAN-only 集群，启动两个分片并检查配置端口；不发布宿主端口、不挂载实例存档。配置包只在验证期间传输和使用，容器、网络与临时文件随后清理，catalog 只保存脱敏验证结果。
+基础验证不代表 DST 服务进程已启动、端口已监听或玩家可以连接；实例启动时会单独采集进程、端口和运行状态。当前版本不提供 Release 隔离运行验证，也不接收配置 ZIP。catalog 中的 `runtimeVerified` 仅作为历史兼容字段保留，当前恒为 `false`，不参与实例创建或世界配置。
 
 ## 故障排查
 

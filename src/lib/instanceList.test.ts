@@ -5,7 +5,7 @@ import type { InstanceListResponse } from "../api/instances.ts";
 import type { InstanceSummary } from "../types/contracts.ts";
 const hostId="11111111-1111-4111-8111-111111111111";
 const ticket={serverId:"server",recordVersion:2,epoch:1,sequence:1,requestId:"request"};
-const item:InstanceSummary={hostId,instanceId:"22222222-2222-4222-8222-222222222222",displayName:"同名专服",lifecycle:"ready",runtimeStatus:"unknown",players:null,maxPlayers:null,gameMode:"survival",cavesEnabled:true,installedBuild:null,lastSyncedAt:null,activeTaskId:null,manifestAvailable:true};
+const item:InstanceSummary={hostId,instanceId:"22222222-2222-4222-8222-222222222222",displayName:"同名专服",lifecycle:"ready",runtimeStatus:"unknown",players:null,maxPlayers:null,gameMode:"survival",cavesEnabled:true,installedBuild:null,lastSyncedAt:null,activeTaskId:null,manifestAvailable:true,configRevision:1};
 const report:InstanceListResponse={schemaVersion:1,requestId:"request",serverId:"server",recordVersion:2,hostId,registryRevision:3,capturedAtUnixSeconds:1700000000,instances:[item]};
 describe("instance list boundary",()=>{
   it("checks server, host, connection version, request and unique instance identities",()=>{

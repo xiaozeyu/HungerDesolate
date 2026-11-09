@@ -2,6 +2,8 @@
 import {before,after,test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'vite';
+import {readFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
 let vite,useBuildTasks;
 before(async()=>{
   vite=await createServer({configFile:false,logLevel:'error',optimizeDeps:{noDiscovery:true,include:[]},server:{middlewareMode:true,hmr:false,watch:null}});
@@ -16,8 +18,9 @@ test('build store keeps start message, progress and observation errors per host'
   tasks.start('server-a',hostId,3,releaseId,'开始构建');
   assert.equal(tasks.forHost(hostId)?.status.status,'building');
   assert.equal(tasks.forHost(hostId)?.message,'开始构建');
-  tasks.receive('server-a',hostId,3,{schemaVersion:1,requestId:'r',releaseId,status:'building',progress:{currentStep:'构建镜像层',percent:42},logTail:['step']});
-  assert.equal(tasks.forHost(hostId)?.status.progress?.percent,42);
+  tasks.receive('server-a',hostId,3,{schemaVersion:1,requestId:'r',releaseId,status:'building',progress:{currentStep:'下载并校验 DST 服务端',percent:65,stepPercent:63},logTail:['step']});
+  assert.equal(tasks.forHost(hostId)?.status.progress?.percent,65);
+  assert.equal(tasks.forHost(hostId)?.status.progress?.stepPercent,63);
   assert.equal(tasks.forHost(hostId)?.message,'开始构建');
   tasks.error(hostId,'查询超时');
   assert.equal(tasks.forHost(hostId)?.observationError,'查询超时');
@@ -26,6 +29,34 @@ test('build store keeps start message, progress and observation errors per host'
   assert.equal(tasks.forHost(hostId)?.observationError,'');
   tasks.clear(hostId);
   assert.equal(tasks.forHost(hostId),null);
+});
+test('build progress separates stage and download bars',async()=>{
+  const page=await readFile(resolve(process.cwd(),'src/pages/ReleaseManagementPage.vue'),'utf8');
+  const app=await readFile(resolve(process.cwd(),'src/App.vue'),'utf8');
+  const api=await readFile(resolve(process.cwd(),'src/api/instances.ts'),'utf8');
+  assert.match(page,/build-progress-fill stage/);
+  assert.match(page,/build-progress-fill download/);
+  assert.match(page,/当前步骤下载/);
+  assert.match(page,/build-stripes/);
+  assert.match(page,/buildStepPercent/);
+  assert.match(app,/runningBuildStage/);
+  assert.match(api,/stepPercent/);
+  assert.match(page,/useHostConnection/);
+  assert.match(page,/hostConnection\.connect/);
+  assert.match(page,/主机尚未初始化/);
+  assert.match(page,/useHostEnvironment/);
+  assert.match(page,/dockerNotice/);
+  assert.match(page,/Docker 未安装/);
+  assert.doesNotMatch(page,/构建镜像后，Release 会显示在此处/);
+  assert.match(page,/暂无 DST Release/);
+  assert.match(page,/release\.releaseId\.slice\(0, 8\)/);
+  assert.doesNotMatch(page,/release\.imageDigest/);
+  assert.doesNotMatch(page,/固定镜像|verification-steps|SummaryBar/);
+  assert.match(page,/@media \(max-width: 1099px\)/);
+  assert.doesNotMatch(page,/release-delete \{[^}]*border-left/);
+  assert.doesNotMatch(page,/release-delete \{[^}]*margin-left: auto/);
+  assert.doesNotMatch(page,/选择 ZIP 文件|运行验证|verifyRuntime/);
+  assert.doesNotMatch(api,/verifyInstanceReleaseRuntime|importInstanceRelease|previewInstanceRelease\(/);
 });
 test('a response for another release cannot replace the tracked build',()=>{
   const tasks=useBuildTasks();

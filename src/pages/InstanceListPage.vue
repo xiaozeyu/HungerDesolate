@@ -11,14 +11,12 @@ import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useOperations } from "../composables/useOperations";
 import { useInstanceList } from "../composables/useInstanceList";
-import { useConnectionDialog } from "../composables/useConnectionDialog";
 import { instanceState, canInspectInstance, gameModeLabel, formatBeijingDateTime } from "../lib/instanceList";
 import { deleteInstance, previewInstanceDelete, type InstanceDeletePreview } from "../api/instances";
 import { describeError } from "../lib/commandError";
 import type { UserError } from "../lib/commandError";
 import type { InstanceSummary } from "../types/contracts";
 const route=useRoute(), router=useRouter(), workspace=useWorkspace(), operations=useOperations();
-const { openConnection } = useConnectionDialog();
 const server=computed(()=>workspace.servers.value.find(item=>item.serverId===route.params.serverId) ?? null);
 const {data,error,loading,stale,refresh}=useInstanceList(server,workspace.preview);
 const createOpen=ref(false);
@@ -100,7 +98,7 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
     <PreviewNotice/>
     <p v-if="createdTarget" class="success-message" role="status">专服已创建<button class="text-button" @click="router.push(`/hosts/${createdTarget.serverId}/instances/${createdTarget.instanceId}/world`)">进入世界配置</button></p>
     <InstanceCreateDialog v-model:open="createOpen" :server="server" :registry-revision="data?.registryRevision ?? 0" @creation-succeeded="creationSucceeded"/>
-    <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul><button v-if="server" class="text-button" type="button" @click="openConnection(server.serverId)">连接设置</button><button v-if="server" class="text-button" @click="router.push(`/hosts/${server.serverId}/environment`)">主机环境</button></div>
+    <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul></div>
     <div v-if="loading && !data" class="empty-state" role="status">读取专服列表…</div>
     <template v-else-if="data">
       <SummaryBar :items="summaryItems" label="专服摘要"/>

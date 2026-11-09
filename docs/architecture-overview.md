@@ -105,7 +105,6 @@ Release = 一个经过验证的 DST 版本组合
   "artifactDigest": "sha256:...",
   "scriptVersion": "V2-20261019",
   "verified": true,
-  "runtimeVerified": true,
   "commands": {
     "master": ["/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64", ...],
     "caves": ["/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64", ...]
@@ -119,10 +118,7 @@ Release = 一个经过验证的 DST 版本组合
    - 元数据完整性
    - 命令格式正确
 
-2. **运行时验证** (`runtimeVerified: true`)
-   - 容器可以启动
-   - DST 进程运行正常
-   - 端口正确监听
+Release 不再提供隔离运行验证；实例启动时另行采集容器、DST 进程和端口状态。
 
 **当前限制：**
 - 需要手动构建镜像（`docker/runtime/build.sh`）

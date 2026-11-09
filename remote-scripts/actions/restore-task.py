@@ -1168,7 +1168,8 @@ def _worker_impl(task_id):
         safe_release_dir(release_dir)
         release_metadata = read_json(release_dir / "release-metadata.json", 262144)
         release_metadata.pop("schemaVersion", None)
-        if release_metadata != release:
+        comparable = {key: value for key, value in release.items() if key != "createdAt"}
+        if release_metadata != comparable:
             reject("DST_RELEASE_UNAVAILABLE")
         failure_step = "writeRestoreTransaction"
         rollback_paths = ["data/Master", "data/Caves", "config/Cluster_1", "desired/world.json",

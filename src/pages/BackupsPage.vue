@@ -9,10 +9,9 @@ import StatusLabel from "../components/StatusLabel.vue";
 import SummaryBar from "../components/SummaryBar.vue";
 import TaskPanel from "../components/TaskPanel.vue";
 import { listHostMods } from "../api/hostMods";
-import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
+import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, listInstances, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
-import { useInstanceOverview } from "../composables/useInstanceOverview";
 import { describeError } from "../lib/commandError";
 import { useTasks } from "../composables/useTasks";
 import type { TaskSnapshot } from "../types/contracts";
@@ -20,7 +19,6 @@ import { createSerialQueue } from "../lib/serialQueue";
 
 const workspace = useWorkspace();
 const { server, target, instanceName } = usePageTarget();
-const overview = useInstanceOverview({ poll: false });
 const taskStore = useTasks();
 const mode = ref<BackupCaptureMode | null>(null);
 const createOpen = ref(false);
@@ -39,6 +37,7 @@ const backupSummary = computed(() => [
 ]);
 const preview = computed(() => mode.value ? previews.value[mode.value] : null);
 const loading = ref(false);
+const contextLoading = ref(false);
 const previewLoading = ref(false);
 const error = ref("");
 const restoreError = ref("");
@@ -68,7 +67,12 @@ let previewSequence = 0;
 let currentListRequest = "";
 let currentPreviewRequest = "";
 const queueSsh = createSerialQueue();
-const revision = computed(() => overview.data.value?.runtime?.configRevision ?? null);
+const instanceSummary = computed(() => {
+  const current = target.value;
+  return current ? workspace.instances(current.hostId).find(item => item.instanceId === current.instanceId) ?? null : null;
+});
+const revision = computed(() => instanceSummary.value?.configRevision ?? null);
+const pageLoading = computed(() => loading.value || contextLoading.value);
 const targetKey = computed(() => {
   const currentTarget = target.value;
   return currentTarget
@@ -83,6 +87,31 @@ function isCurrent(kind: "list" | "preview", ticket: number, requestEpoch: numbe
   return ticket === latestSequence && requestEpoch === epoch && latestRequest === requestId
     && server.value?.serverId === serverId && server.value.recordVersion === recordVersion
     && currentTarget !== null && `${currentTarget.serverId}:${currentTarget.hostId}:${currentTarget.instanceId}` === targetKey;
+}
+
+let summarySequence = 0;
+async function refreshInstanceSummaries() {
+  const connection = server.value;
+  const current = target.value;
+  if (!connection || !current) return;
+  const ticket = ++summarySequence;
+  const requestEpoch = epoch;
+  const requestId = crypto.randomUUID();
+  contextLoading.value = true;
+  try {
+    const response = await listInstances({ schemaVersion: 1, requestId,
+      serverId: connection.serverId, expectedRecordVersion: connection.recordVersion });
+    if (ticket !== summarySequence || requestEpoch !== epoch) return;
+    if (response.schemaVersion !== 1 || response.requestId !== requestId
+      || response.serverId !== connection.serverId || response.hostId !== current.hostId) {
+      throw new Error("实例列表响应身份不匹配");
+    }
+    workspace.commitInstances(response);
+  } catch (cause) {
+    if (ticket === summarySequence && requestEpoch === epoch) error.value = describeError(cause).message;
+  } finally {
+    if (ticket === summarySequence && requestEpoch === epoch) contextLoading.value = false;
+  }
 }
 
 async function refresh() {
@@ -311,11 +340,12 @@ watch(activeTask, async (next, previous) => {
   if (loading.value || previewLoading.value) return;
   if (next.operation === "backupRestore" && next.status === "succeeded") {
     const revisionBeforeRestore = revision.value;
-    await overview.refresh();
+    await refreshInstanceSummaries();
     if (revisionBeforeRestore !== null && (revision.value === null || revision.value <= revisionBeforeRestore)) {
-      error.value = overview.error.value ?? "恢复已完成，但专服新配置版本尚未确认；备份列表未刷新。";
+      if (!error.value) error.value = "恢复已完成，但专服新配置版本尚未确认；备份列表未刷新。";
       return;
     }
+    return;
   }
   await refreshPage();
 }, { flush: "sync" });
@@ -352,7 +382,6 @@ function openCreateDialog() {
 
 function chooseMode(captureMode: BackupCaptureMode) {
   mode.value = captureMode;
-  void inspectMode(captureMode);
 }
 
 function modeStatus(captureMode: BackupCaptureMode) {
@@ -542,8 +571,11 @@ watch([targetKey, () => server.value?.recordVersion, revision, () => workspace.p
   createBusy.value = false;
   pendingOperationId = "";
   pendingCreate = null;
+  contextLoading.value = revision.value === null;
   if (revision.value !== null) {
     void refreshPage();
+  } else {
+    void refreshInstanceSummaries();
   }
 }, { immediate: true });
 function closeCreateDialog(open: boolean) {
@@ -563,20 +595,20 @@ onBeforeUnmount(() => {
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="备份">
       <template #actions>
-        <button class="button primary" :disabled="createBusy || loading || revision === null || workspace.preview.value" @click="openCreateDialog">
+        <button class="button primary" :disabled="createBusy || pageLoading || revision === null || workspace.preview.value" @click="openCreateDialog">
           <Plus :size="16"/>
           {{ createBusy ? "备份中…" : pendingCreate ? "重试原请求" : "创建备份" }}
         </button>
-        <button class="button" :disabled="loading || previewLoading || revision === null || workspace.preview.value" @click="refreshPage">
+        <button class="button" :disabled="pageLoading || previewLoading || revision === null || workspace.preview.value" @click="refreshPage">
           <RefreshCw :size="16"/>
-          {{ loading || previewLoading ? "读取中…" : "刷新" }}
+          {{ pageLoading || previewLoading ? "读取中…" : "刷新" }}
         </button>
       </template>
     </PageHeader>
     <PreviewNotice/>
     <SummaryBar v-if="items.length" :items="backupSummary" label="备份摘要"/>
     <div v-if="error" class="error-strip" role="alert">{{ error }}</div>
-    <div v-if="loading" class="empty-state" role="status"><h2>正在读取备份</h2></div>
+    <div v-if="pageLoading" class="empty-state" role="status"><h2>正在读取备份</h2></div>
     <div v-else-if="!items.length" class="empty-state"><h2>暂无备份</h2></div>
     <div v-else class="table-wrap">
       <table>
@@ -621,7 +653,7 @@ onBeforeUnmount(() => {
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
 </FloatingTask>
-<AppDialog :open="createOpen" title="创建备份" description="选择备份模式，选定后校验当前是否具备备份条件。" @update:open="closeCreateDialog">
+<AppDialog :open="createOpen" title="创建备份" description="冷备份:需重启世界；准热备份:无需重启世界,有延迟" @update:open="closeCreateDialog">
       <div class="backup-mode-options">
         <button v-for="option in [{ value: 'cold', label: '冷备份' }, { value: 'quasiHot', label: '准热备份' }]" :key="option.value"
           type="button" class="backup-mode-option" :class="{ selected: mode === option.value }" :aria-pressed="mode === option.value"
@@ -639,15 +671,15 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </AppDialog>
-<AppDialog :open="!!restoreTarget" title="恢复备份" description="确认后会先检查归属、校验和、版本产物及空间；检查通过后开始恢复。" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; restoreModWarnings = []; } }">
-      <p v-if="restoreTarget">将恢复 <span class="mono">{{ restoreTarget.backupId }}</span>（{{ formatDate(restoreTarget.createdAt) }}）。</p>
-      <p class="muted-text">MOD 使用主机库当前最新版本；主机库缺少 MOD 时会提示，但不会阻止恢复。</p>
+<AppDialog :open="!!restoreTarget" title="恢复备份" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; restoreModWarnings = []; } }">
+      <p v-if="restoreTarget">将恢复 <span class="mono">{{ restoreTarget.backupId }}</span></p>
+      <p class="muted-text">MOD 使用主机库当前最新版本；主机库缺少 MOD 时会提示，但不会阻止恢复</p>
       <p v-if="restoreModWarnings.length" class="backup-warning">{{ restoreModWarnings.join("；") }}。缺少 MOD 时继续恢复可能导致世界崩溃。</p>
       <label class="backup-restore-option">
         <input v-model="restoreProtection" type="checkbox" :disabled="restoreBusy" />
-        <span>恢复前创建保护备份</span>
+        <span>恢复前创建备份</span>
       </label>
-      <p class="form-hint">保护备份用于失败回滚；不勾选会直接替换当前世界。</p>
+      <p class="form-hint">保护备份用于失败回滚；不勾选会直接替换当前世界</p>
       <p v-if="restoreError" class="error-strip" role="alert">{{ restoreError }}</p>
       <template #footer><button class="button" :disabled="restoreBusy" @click="restoreTarget = null; restoreError = ''; restoreModWarnings = []">取消</button><button class="button primary" :disabled="restoreBusy || workspace.preview.value" @click="restoreBackup">{{ restoreBusy ? "检测并开始恢复…" : "确认恢复" }}</button></template>
     </AppDialog>

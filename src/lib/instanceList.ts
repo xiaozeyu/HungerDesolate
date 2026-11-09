@@ -16,6 +16,8 @@ export function validateInstanceList(ticket: ConnectionTicket, expectedHostId: s
       || typeof item.displayName !== "string" || item.displayName.trim().length === 0
       || !lifecycles.includes(item.lifecycle) || !runtimes.includes(item.runtimeStatus)
       || typeof item.manifestAvailable !== "boolean"
+      || (item.configRevision !== null && (!Number.isSafeInteger(item.configRevision) || item.configRevision < 0))
+      || (item.manifestAvailable !== (item.configRevision !== null))
       || (item.gameMode !== null && (typeof item.gameMode !== "string" || item.gameMode.length > 64))
       || (item.cavesEnabled !== null && typeof item.cavesEnabled !== "boolean")
       || (item.maxPlayers !== null && (!Number.isInteger(item.maxPlayers) || item.maxPlayers < 1 || item.maxPlayers > 128))

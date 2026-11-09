@@ -47,7 +47,7 @@ def digest(value):
     return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
 
 
-def safe_directory(path, create=False):
+def safe_directory(path, create=False, allow_runtime=False):
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -55,8 +55,9 @@ def safe_directory(path, create=False):
             raise
         path.mkdir(mode=0o700)
         info = path.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
-            or info.st_mode & 0o077):
+    owners = (0, os.geteuid(), DST_RUNTIME_UID) if allow_runtime else (0, os.geteuid())
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
+            or info.st_mode & 0o022):
         reject("WORLD_CONFIG_PATH_UNSAFE")
     return info
 
@@ -87,8 +88,8 @@ def read_json(path, limit=MAX_BYTES):
         reject("WORLD_CONFIG_FILE_INVALID")
 
 
-def atomic_bytes(path, data, mode=0o600):
-    safe_directory(path.parent, create=True)
+def atomic_bytes(path, data, mode=0o600, allow_runtime=False):
+    safe_directory(path.parent, create=True, allow_runtime=allow_runtime)
     temporary = path.parent / ("." + path.name + "." + str(uuid.uuid4()) + ".tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
@@ -535,21 +536,12 @@ def preview_apply(request):
         if manifest["configRevision"] != expected_revision:
             reject("REVISION_CONFLICT")
         desired, token_present, password_present = load_desired(instance_id, manifest, schema)
-        runtime_verified = False
         active_release_id = None
         active_release_path = ROOT / "instances" / instance_id / "active-release.json"
         if active_release_path.exists():
             active_release = read_json(active_release_path, 65536)
             release_id = active_release.get("dstReleaseId") if isinstance(active_release, dict) else None
             active_release_id = release_id if valid_uuid(release_id) else None
-            catalog_path = ROOT / "releases" / "catalog.json"
-            if catalog_path.exists():
-                catalog = read_json(catalog_path, MAX_BYTES)
-                entries = catalog.get("releases") if isinstance(catalog, dict) else None
-                if isinstance(entries, list):
-                    matched = [item for item in entries if isinstance(item, dict)
-                               and item.get("releaseId") == release_id]
-                    runtime_verified = len(matched) == 1 and matched[0].get("runtimeVerified") is True
         renderer = globals().get("render_config")
         if not callable(renderer):
             reject("WORLD_CONFIG_RENDERER_UNAVAILABLE")
@@ -598,8 +590,6 @@ def preview_apply(request):
                     new_world_options.append({"shard": shard_name, "key": option_key, "label": option["label"]})
         blockers = []
         warnings = []
-        if not runtime_verified:
-            warnings.append("当前 DST Release 未通过隔离运行验证；基础验证不代表游戏已成功启动。")
         if rendered is None:
             blockers.append("WORLD_CONFIG_RENDER_UNSUPPORTED")
         if world_files and new_world_options:
@@ -813,12 +803,8 @@ def apply_config(request):
                 reject("WORLD_CONFIG_RENDER_UNSUPPORTED")
 
         config_dir = instance / "config"
-        if config_dir.is_symlink():
-            reject("WORLD_CONFIG_PATH_UNSAFE")
         if config_dir.exists():
-            info = config_dir.lstat()
-            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid()):
-                reject("WORLD_CONFIG_PATH_UNSAFE")
+            safe_directory(config_dir, allow_runtime=True)
         else:
             safe_directory(config_dir.parent)
             config_dir.mkdir(mode=0o700)
@@ -854,8 +840,8 @@ def apply_config(request):
             try:
                 for relative, content in changed:
                     target = config_dir.joinpath(*PurePosixPath(relative).parts)
-                    safe_directory(target.parent, create=True)
-                    atomic_bytes(target, content)
+                    safe_directory(target.parent, create=True, allow_runtime=True)
+                    atomic_bytes(target, content, allow_runtime=True)
                     os.chown(target, DST_RUNTIME_UID, DST_RUNTIME_UID)
                     os.chmod(target, 0o600)
                     current = target.parent
@@ -871,8 +857,8 @@ def apply_config(request):
                     if old is None:
                         target.unlink(missing_ok=True)
                     else:
-                        safe_directory(target.parent, create=True)
-                        atomic_bytes(target, old)
+                        safe_directory(target.parent, create=True, allow_runtime=True)
+                        atomic_bytes(target, old, allow_runtime=True)
                         os.chown(target, DST_RUNTIME_UID, DST_RUNTIME_UID)
                         os.chmod(target, 0o600)
                 if affected:

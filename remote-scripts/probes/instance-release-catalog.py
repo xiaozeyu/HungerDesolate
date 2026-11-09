@@ -65,7 +65,10 @@ def read_json(path, limit):
 def validate_release(value):
     required = {"releaseId", "platform", "image", "imageDigest", "dstBuild", "artifactDigest",
                 "scriptVersion", "verified", "runtimeVerified", "commands"}
-    if not isinstance(value, dict) or set(value) != required:
+    fields = set(value) if isinstance(value, dict) else set()
+    if fields not in (required, required | {"createdAt"}):
+        reject("CREATE_RELEASE_CATALOG_INVALID")
+    if "createdAt" in value and not text(value["createdAt"], 64):
         reject("CREATE_RELEASE_CATALOG_INVALID")
     if (not valid_uuid(value["releaseId"]) or value["platform"] != "linux/amd64"
             or not text(value["image"]) or re.fullmatch(r"[a-z0-9][a-z0-9./_-]*", value["image"]) is None

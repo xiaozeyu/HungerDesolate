@@ -29,7 +29,7 @@ const renderer=createRenderer({createComment:()=>({}),insert(){},remove(){},pare
 const flush=async()=>{await nextTick();await new Promise(resolve=>setImmediate(resolve));await nextTick();};
 const serverA={serverId:'11111111-1111-4111-8111-111111111111',hostId:'22222222-2222-4222-8222-222222222222',recordVersion:1};
 function response(request,players=null){return {schemaVersion:1,requestId:request.requestId,serverId:request.serverId,recordVersion:request.expectedRecordVersion,hostId:serverA.hostId,registryRevision:1,capturedAtUnixSeconds:1,instances:[{
-  hostId:serverA.hostId,instanceId:'33333333-3333-4333-8333-333333333333',displayName:'测试专服',lifecycle:'ready',runtimeStatus:'running',players,maxPlayers:6,gameMode:'survival',cavesEnabled:true,manifestAvailable:true,
+  hostId:serverA.hostId,instanceId:'33333333-3333-4333-8333-333333333333',displayName:'测试专服',lifecycle:'ready',runtimeStatus:'running',players,maxPlayers:6,gameMode:'survival',cavesEnabled:true,manifestAvailable:true,configRevision:1,
 }]};}
 function deferred(){let resolve;const promise=new Promise(yes=>{resolve=yes;});return {promise,resolve};}
 function mount(previewValue=false){

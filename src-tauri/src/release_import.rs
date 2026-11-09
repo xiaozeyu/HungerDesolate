@@ -14,47 +14,10 @@ use std::{
 };
 
 const OP: &str = "prepareInstanceRelease";
-const PREPARE: &str = include_str!("../../remote-scripts/probes/instance-release-prepare.py");
-const IMPORT: &str = include_str!("../../remote-scripts/actions/instance-release-import.py");
-const RUNTIME_VERIFY: &str = include_str!("../../remote-scripts/actions/verify-release-runtime.py");
 const BASE_VERIFY: &str = include_str!("../../remote-scripts/actions/register-built-release.py");
 const DELETE_RELEASE: &str =
     include_str!("../../remote-scripts/actions/delete-instance-release.py");
-const MAX_SETTINGS_BUNDLE_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PrepareRequest {
-    pub schema_version: u32,
-    pub request_id: String,
-    pub target: crate::instance_creation::HostTarget,
-    pub expected_record_version: u64,
-    pub release_id: String,
-    pub catalog_digest: String,
-}
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ImportRequest {
-    pub schema_version: u32,
-    pub request_id: String,
-    pub target: crate::instance_creation::HostTarget,
-    pub expected_record_version: u64,
-    pub release_id: String,
-    pub catalog_digest: String,
-    pub operation_id: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeVerifyRequest {
-    pub schema_version: u32,
-    pub request_id: String,
-    pub target: crate::instance_creation::HostTarget,
-    pub expected_record_version: u64,
-    pub release_id: String,
-    pub catalog_digest: String,
-    pub operation_id: String,
-    pub settings_bundle_base64: String,
-}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BaseVerifyRequest {
@@ -110,39 +73,6 @@ pub struct ReleaseDeleteResponse {
     pub image_removed: bool,
     pub image_shared: bool,
     pub staging_removed: bool,
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrepareResponse {
-    pub schema_version: u32,
-    pub request_id: String,
-    pub target: crate::instance_creation::HostTarget,
-    pub record_version: u64,
-    pub release_id: String,
-    pub catalog_digest: Option<String>,
-    pub status: String,
-    pub blockers: Vec<String>,
-    pub artifact_path: Option<String>,
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportResponse {
-    pub schema_version: u32,
-    pub request_id: String,
-    pub server_id: String,
-    pub record_version: u64,
-    pub task: Option<Value>,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeVerifyResponse {
-    pub schema_version: u32,
-    pub request_id: String,
-    pub target: crate::instance_creation::HostTarget,
-    pub record_version: u64,
-    pub release_id: String,
-    pub runtime_verified: bool,
-    pub listeners: Value,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,52 +134,6 @@ fn remote_error(code: &str) -> Box<CommandError> {
             "CREATE_DOCKER_UNAVAILABLE",
             "远端主机未安装 Docker CLI，请检查 Docker 安装",
         ),
-        "RELEASE_RUNTIME_CONFIG_INCOMPLETE" => (
-            "RELEASE_RUNTIME_CONFIG_INCOMPLETE",
-            "Klei 配置包缺少 cluster token 或 Master/Caves 配置",
-        ),
-        "RELEASE_RUNTIME_CONFIG_INVALID"
-        | "RELEASE_RUNTIME_BUNDLE_INVALID"
-        | "RELEASE_RUNTIME_BUNDLE_TOO_LARGE" => (
-            "RELEASE_RUNTIME_BUNDLE_INVALID",
-            "Klei 配置包无效或超出大小限制",
-        ),
-        "RELEASE_RUNTIME_PROCESS_NOT_READY" => (
-            "RELEASE_RUNTIME_PROCESS_NOT_READY",
-            "DST 服务进程未能保持运行",
-        ),
-        "RELEASE_RUNTIME_LISTENERS_NOT_READY" => (
-            "RELEASE_RUNTIME_LISTENERS_NOT_READY",
-            "DST 分片未监听配置中的 UDP 端口",
-        ),
-        "RELEASE_RUNTIME_CONTAINER_START_FAILED" => (
-            "RELEASE_RUNTIME_CONTAINER_START_FAILED",
-            "隔离验证容器启动失败",
-        ),
-        "RELEASE_RUNTIME_NETWORK_FAILED" => {
-            ("RELEASE_RUNTIME_NETWORK_FAILED", "无法创建隔离验证网络")
-        }
-        "RELEASE_RUNTIME_BUSY" => ("RELEASE_RUNTIME_BUSY", "主机上已有 Release 运行验证任务"),
-        "RELEASE_RUNTIME_PATH_UNSAFE" => (
-            "RELEASE_RUNTIME_PATH_UNSAFE",
-            "Release 运行验证目录权限或类型不安全，请检查主机管理目录权限",
-        ),
-        "RELEASE_RUNTIME_DOCKER_TIMEOUT" => (
-            "RELEASE_RUNTIME_DOCKER_TIMEOUT",
-            "主机 Docker 命令超时，请检查 Docker daemon 状态与主机负载",
-        ),
-        "RELEASE_RUNTIME_DOCKER_RESPONSE_INVALID" => (
-            "RELEASE_RUNTIME_DOCKER_RESPONSE_INVALID",
-            "Docker 返回了无效结果，请检查主机 Docker 状态",
-        ),
-        "RELEASE_RUNTIME_CHECK_FAILED" | "RELEASE_RUNTIME_VERIFY_FAILED" => (
-            "RELEASE_RUNTIME_VERIFY_FAILED",
-            "Release 运行时检查未完成，请查看主机 Docker 状态和 Release 验证条件",
-        ),
-        "RELEASE_RUNTIME_CLEANUP_FAILED" => (
-            "RELEASE_RUNTIME_CLEANUP_FAILED",
-            "验证结束后未能清理全部临时 Docker 资源",
-        ),
         "CREATE_RELEASE_IMAGE_DIGEST_MISMATCH" => (
             "CREATE_RELEASE_IMAGE_DIGEST_MISMATCH",
             "主机上的镜像与 Release digest 不匹配",
@@ -304,21 +188,11 @@ fn remote_error(code: &str) -> Box<CommandError> {
             "远端 Release 删除响应格式不匹配，请重新连接并重试",
         ),
         _ => (
-            "RELEASE_RUNTIME_VERIFY_FAILED",
-            "Release 运行时验证失败，请检查主机 Docker 和配置包",
+            "CREATE_RELEASE_PROTOCOL_INVALID",
+            "Release 操作返回未知错误，请刷新后重试",
         ),
     };
-    let mut result = error(stable_code, message);
-    if stable_code == "RELEASE_RUNTIME_VERIFY_FAILED"
-        && !code.is_empty()
-        && code.len() <= 96
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    {
-        result.details = json!({"remoteCode": code});
-    }
-    result
+    error(stable_code, message)
 }
 
 fn execute(
@@ -402,276 +276,12 @@ fn execute(
             .get("code")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let mut failure = remote_error(code);
-        if code == "RELEASE_RUNTIME_LISTENERS_NOT_READY" {
-            let mut diagnostics = serde_json::Map::new();
-            if let Some(remote_details) = envelope.get("details").and_then(Value::as_object) {
-                for key in [
-                    "masterMissingPorts",
-                    "cavesMissingPorts",
-                    "masterObservedPorts",
-                    "cavesObservedPorts",
-                ] {
-                    let Some(values) = remote_details.get(key).and_then(Value::as_array) else {
-                        continue;
-                    };
-                    if values.len() > 64
-                        || values.iter().any(|value| {
-                            !value
-                                .as_u64()
-                                .is_some_and(|port| (1..=65535).contains(&port))
-                        })
-                    {
-                        continue;
-                    }
-                    diagnostics.insert(key.to_string(), Value::Array(values.clone()));
-                }
-                for key in ["masterProcessRunning", "cavesProcessRunning"] {
-                    if let Some(value) = remote_details.get(key).and_then(Value::as_bool) {
-                        diagnostics.insert(key.to_string(), Value::Bool(value));
-                    }
-                }
-            }
-            failure.details = Value::Object(diagnostics);
-        } else if code == "RELEASE_RUNTIME_VERIFY_FAILED" {
-            if let Some(remote_details) = envelope.get("details").and_then(Value::as_object) {
-                let mut diagnostics = failure.details.as_object().cloned().unwrap_or_default();
-                if let Some(failure_type) = remote_details
-                    .get("failureType")
-                    .and_then(Value::as_str)
-                    .filter(|value| {
-                        [
-                            "OSError",
-                            "PermissionError",
-                            "FileNotFoundError",
-                            "NotADirectoryError",
-                            "ValueError",
-                            "TypeError",
-                            "KeyError",
-                            "AttributeError",
-                            "RuntimeError",
-                            "UnicodeError",
-                            "BadZipFile",
-                            "Error",
-                            "Exception",
-                        ]
-                        .contains(value)
-                    })
-                {
-                    diagnostics.insert("failureType".into(), Value::String(failure_type.into()));
-                }
-                if let Some(failure_stage) = remote_details
-                    .get("failureStage")
-                    .and_then(Value::as_str)
-                    .filter(|value| {
-                        [
-                            "initialize",
-                            "validateRequest",
-                            "readHostState",
-                            "readReleaseCatalog",
-                            "readReleaseMetadata",
-                            "prepareConfiguration",
-                            "verifyImage",
-                            "createNetwork",
-                            "startMaster",
-                            "startCaves",
-                            "waitForListeners",
-                            "cleanup",
-                            "publishEvidence",
-                        ]
-                        .contains(value)
-                    })
-                {
-                    diagnostics.insert("failureStage".into(), Value::String(failure_stage.into()));
-                }
-                if let Some(function_name) = remote_details
-                    .get("failureFunction")
-                    .and_then(Value::as_str)
-                    .filter(|value| {
-                        [
-                            "main",
-                            "verify",
-                            "docker",
-                            "process_running",
-                            "udp_ports",
-                            "read_json",
-                            "prepare_bundle",
-                            "atomic_evidence",
-                            "catalog_digest",
-                            "valid_uuid",
-                            "reject",
-                        ]
-                        .contains(value)
-                    })
-                {
-                    if let Some(line_number) = remote_details
-                        .get("failureLine")
-                        .and_then(Value::as_u64)
-                        .filter(|line| (1..=1000).contains(line))
-                    {
-                        diagnostics.insert(
-                            "failureFunction".into(),
-                            Value::String(function_name.into()),
-                        );
-                        diagnostics.insert("failureLine".into(), json!(line_number));
-                    }
-                }
-                failure.details = Value::Object(diagnostics);
-            }
-        }
-        return Err(failure);
+        return Err(remote_error(code));
     }
     envelope
         .get("data")
         .cloned()
         .ok_or_else(|| error("CREATE_RELEASE_PROTOCOL_INVALID", "release 响应缺少数据"))
-}
-
-pub fn preview(database: &Path, request: PrepareRequest) -> CommandResult<PrepareResponse> {
-    validate_target(&request.target)?;
-    if request.schema_version != 1 || !valid_id(&request.release_id) {
-        return Err(error(
-            "CREATE_RELEASE_INPUT_INVALID",
-            "release 预览请求无效",
-        ));
-    }
-    let connection = ConnectionRequest {
-        schema_version: request.schema_version,
-        request_id: request.request_id.clone(),
-        server_id: request.target.server_id.clone(),
-        expected_record_version: request.expected_record_version,
-    };
-    with_verified_session(database, &connection, |session, host_id| {
-        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
-            return Err(error("HOST_IDENTITY_MISMATCH", "release 目标主机不一致"));
-        }
-        let data = execute(
-            session,
-            PREPARE,
-            &json!({"hostId":request.target.host_id,"releaseId":request.release_id,"catalogDigest":request.catalog_digest}),
-            20,
-        )?;
-        Ok(PrepareResponse {
-            schema_version: 1,
-            request_id: request.request_id,
-            target: request.target,
-            record_version: request.expected_record_version,
-            release_id: data
-                .get("releaseId")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            catalog_digest: data
-                .get("catalogDigest")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            status: data
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("blocked")
-                .to_string(),
-            blockers: data
-                .get("blockers")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            artifact_path: data
-                .get("artifactPath")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        })
-    })
-}
-pub fn import(database: &Path, request: ImportRequest) -> CommandResult<ImportResponse> {
-    validate_target(&request.target)?;
-    crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
-    let connection = ConnectionRequest {
-        schema_version: request.schema_version,
-        request_id: request.request_id.clone(),
-        server_id: request.target.server_id.clone(),
-        expected_record_version: request.expected_record_version,
-    };
-    with_verified_session(database, &connection, |session, host_id| {
-        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
-            return Err(error("HOST_IDENTITY_MISMATCH", "release 导入目标不一致"));
-        }
-        let data = execute(
-            session,
-            IMPORT,
-            &json!({"action":"start","hostId":request.target.host_id,"releaseId":request.release_id,"catalogDigest":request.catalog_digest,"operationId":request.operation_id}),
-            20,
-        )?;
-        Ok(ImportResponse {
-            schema_version: 1,
-            request_id: request.request_id,
-            server_id: request.target.server_id,
-            record_version: request.expected_record_version,
-            task: Some(data),
-        })
-    })
-}
-
-pub fn verify_runtime(
-    database: &Path,
-    request: RuntimeVerifyRequest,
-) -> CommandResult<RuntimeVerifyResponse> {
-    validate_target(&request.target)?;
-    crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
-    if request.schema_version != 1
-        || !valid_id(&request.release_id)
-        || !request.catalog_digest.starts_with("sha256:")
-        || request.settings_bundle_base64.len() > (MAX_SETTINGS_BUNDLE_BYTES * 4 / 3 + 8)
-        || base64::engine::general_purpose::STANDARD
-            .decode(request.settings_bundle_base64.as_bytes())
-            .map(|bundle| bundle.len() > MAX_SETTINGS_BUNDLE_BYTES)
-            .unwrap_or(true)
-    {
-        return Err(error(
-            "RELEASE_RUNTIME_INPUT_INVALID",
-            "运行时验证请求无效或配置包过大",
-        ));
-    }
-    let connection = ConnectionRequest {
-        schema_version: request.schema_version,
-        request_id: request.request_id.clone(),
-        server_id: request.target.server_id.clone(),
-        expected_record_version: request.expected_record_version,
-    };
-    with_verified_session(database, &connection, |session, host_id| {
-        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
-            return Err(error("HOST_IDENTITY_MISMATCH", "Release 目标主机不一致"));
-        }
-        let data = execute(
-            session,
-            RUNTIME_VERIFY,
-            &json!({"hostId":request.target.host_id,"releaseId":request.release_id,
-                   "catalogDigest":request.catalog_digest,"operationId":request.operation_id,
-                   "settingsBundleBase64":request.settings_bundle_base64}),
-            180,
-        )?;
-        if data.get("runtimeVerified") != Some(&Value::Bool(true))
-            || data.get("releaseId").and_then(Value::as_str) != Some(request.release_id.as_str())
-        {
-            return Err(error(
-                "RELEASE_RUNTIME_PROTOCOL_INVALID",
-                "运行时验证结果无效",
-            ));
-        }
-        Ok(RuntimeVerifyResponse {
-            schema_version: 1,
-            request_id: request.request_id,
-            target: request.target,
-            record_version: request.expected_record_version,
-            release_id: request.release_id,
-            runtime_verified: true,
-            listeners: data.get("listeners").cloned().unwrap_or(Value::Null),
-        })
-    })
 }
 
 pub fn verify_base(
@@ -894,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_rejection_codes_have_actionable_errors() {
+    fn release_rejection_codes_have_actionable_errors() {
         let cases = [
             (
                 "CREATE_RELEASE_NOT_VERIFIED",
@@ -915,16 +525,6 @@ mod tests {
                 "CREATE_DOCKER_UNAVAILABLE",
                 "CREATE_DOCKER_UNAVAILABLE",
                 "Docker CLI",
-            ),
-            (
-                "RELEASE_RUNTIME_DOCKER_TIMEOUT",
-                "RELEASE_RUNTIME_DOCKER_TIMEOUT",
-                "超时",
-            ),
-            (
-                "RELEASE_RUNTIME_CHECK_FAILED",
-                "RELEASE_RUNTIME_VERIFY_FAILED",
-                "未完成",
             ),
         ];
 

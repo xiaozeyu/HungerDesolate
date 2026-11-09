@@ -57,6 +57,15 @@
 - macOS 安装包签名和 Windows 实机发布尚未配置。
 - Docker、DST 和 Steam 网络行为仍受目标主机与本机网络环境影响。
 
+## 规划中
+
+以下能力尚未实现，仅有设计文档：
+
+- 饥荒服务器更新：[DST 更新设计](../spec/dst-update-plan.md)。
+- 定时准热备份与保留策略：[定时备份设计](../spec/scheduled-backup-plan.md)。
+- 玩家信息列表与踢出：[玩家列表设计](../spec/player-list-plan.md)。
+- 总体优先级与难度：[运维增强规划](../spec/ops-enhancements-plan.md)。
+
 ## 相关文档
 
 - [架构概览](architecture-overview.md)
@@ -65,3 +74,4 @@
 - [主机 MOD 库](host-mod-library.md)
 - [DST Release 准备](dst-release-setup.md)
 - [接口契约](../spec/api-contract.md)
+- [错误文案审计](error-copy-audit.md)

@@ -119,7 +119,7 @@ interface MutationResult<T> {
 
 | DTO | 必备字段与规则 |
 | --- | --- |
-| InstanceSummary | hostId、instanceId、displayName、gameMode/null、cavesEnabled/null、lifecycle、runtimeStatus、players/null、maxPlayers、installedBuild/null、lastSyncedAt/null、activeTaskId/null |
+| InstanceSummary | hostId、instanceId、displayName、gameMode/null、cavesEnabled/null、lifecycle、runtimeStatus、players/null、maxPlayers、installedBuild/null、lastSyncedAt/null、activeTaskId/null、manifestAvailable、configRevision/null |
 | InstanceOverview | identity、manifestSummary、runtime、blockers、desiredVsDeployed；不返回整个 MOD 或备份数组 |
 | InstanceRuntime | snapshotId、capturedAt、status、shards[]、players/null、build/null、verificationLevel、evidence[] |
 | ShardRuntime | shardKind、enabled、status、containerId/null、actualBuild/null、observedPorts、logAvailable、players/null |
@@ -289,7 +289,7 @@ CreateInput：displayName、autostart、startAfterCreate（当前 UI 固定为 f
 
 2026-10-21 启动修复：运行工作目录为 `/srv/dst/bin64`，存档/MOD 挂载目录根由 UID/GID 1000 持有；不递归改动已有存档文件。首次启动旧版受管 Compose 时，仅允许与确定性旧模板完全相符的工作目录修复，原文件保留为 `compose.before-runtime-fix.yaml`；自定义差异返回 `INSTANCE_START_COMPOSE_DRIFT`。容器退出或反复重启立即返回 `INSTANCE_START_CONTAINER_EXITED`，仅暴露分片、退出码、重启次数和 OOM 布尔值，不回传容器日志或 `.State.Error`。运行镜像新增 `ca-certificates`，旧镜像不会由启动操作隐式升级。
 
-运行就绪核验以容器内 `/proc/*/exe` 匹配真实 DST 可执行文件，不依赖宿主 `docker top`。Master/Caves 各要求配置中的游戏和 Steam 查询 UDP 端口；启用洞穴时 Master 还要求 `cluster.ini` 的 `SHARD.master_port`，所以 listeners 为 Master 3 项、Caves 2 项，单 Master 为 2 项。历史认证端口预留及发布保持不变，不把未监听固定认证端口单独视为本机启动失败。Release 隔离运行验证采用相同的进程/必需端口判定。超时只回传每分片进程状态、已观察端口和缺少端口；探测不可用时保持未知，不能当作“没有进程/没有端口”。该证据不代表公网可连接、Klei 认证或洞穴迁移已经验证。
+运行就绪核验以容器内 `/proc/*/exe` 匹配真实 DST 可执行文件，不依赖宿主 `docker top`。Master/Caves 各要求配置中的游戏和 Steam 查询 UDP 端口；启用洞穴时 Master 还要求 `cluster.ini` 的 `SHARD.master_port`，所以 listeners 为 Master 3 项、Caves 2 项，单 Master 为 2 项。历史认证端口预留及发布保持不变，不把未监听固定认证端口单独视为本机启动失败。超时只回传每分片进程状态、已观察端口和缺少端口；探测不可用时保持未知，不能当作“没有进程/没有端口”。该证据不代表公网可连接、Klei 认证或洞穴迁移已经验证。
 
 Docker 控制器经 SSH 返回单层包络：成功为 `{ok:true,data:...}`，失败为 `{ok:false,code:...}`。Rust 的执行入口只解包一次并直接反序列化为对应 DTO；启动和状态查询不得再次查找 `ok/data`。仅状态查询允许 `data:null`，表示当前无安装任务，转换为前端 `task:null`。缺少 `data` 与显式 `null` 必须区分；预检、启动任务的 `data` 必须是有效对象。预检 `aptRunning`、`dpkgClean` 为必需布尔字段，Python 输出、Rust DTO 和前端校验保持一致。
 
@@ -429,7 +429,7 @@ registry v1 必填 schemaVersion、hostId、registryRevision、instances[]。ent
 
 manifest v1 必填 schemaVersion、hostId、instanceId、displayName、configRevision、composeProject、cavesEnabled、autostart；容器创建阶段只写入实例/拓扑/端口摘要，不写 worldSettings 或 Token。容器环境验证完成后，世界配置通过独立领域配置流程写入 desired/deployed 摘要，其中 maxPlayers 为 1–128 的字段接收范围（不代表已经验证 DST 支持所有人数）。composeProject 必须为 `fh_<去连字符的instanceId>`。列表只解析身份与非敏感摘要字段，其余配置不原样返回。
 
-InstanceSummary 新增 manifestAvailable。maxPlayers 允许 null，未知不能用 0 代替。retired 不进当前列表；creating/createFailed 且无 manifest 时保留登记名称（无名称则显示 ID），manifestAvailable=false。ready 等记录缺 manifest 明确拒绝，不能悄悄漏掉。runtimeStatus=unknown、players=null、installedBuild=null、lastSyncedAt=null；不提升 registry/runtime.json 内的旧声明为真实运行证据。pendingTaskId 仅作为登记引用，不等价任务仍在执行。
+InstanceSummary 新增 manifestAvailable 与 configRevision。configRevision 为 manifest 当前配置版本；无 manifest 时为 null，且与 manifestAvailable=false 一致。maxPlayers 允许 null，未知不能用 0 代替。retired 不进当前列表；creating/createFailed 且无 manifest 时保留登记名称（无名称则显示 ID），manifestAvailable=false。ready 等记录缺 manifest 明确拒绝，不能悄悄漏掉。runtimeStatus=unknown、players=null、installedBuild=null、lastSyncedAt=null；不提升 registry/runtime.json 内的旧声明为真实运行证据。pendingTaskId 仅作为登记引用，不等价任务仍在执行。
 
 读取后复查 registry 字节与 host.json，变化则 REGISTRY_CHANGED/HOST_IDENTITY_MISMATCH。拒绝管理根或子路径为符号链接、路径穿越、非普通文件、超大文件、格式损坏；不存在与权限/读取错误分别处理。文件目录仍需受控权限，此快照校验不构成远端文件系统事务。
 

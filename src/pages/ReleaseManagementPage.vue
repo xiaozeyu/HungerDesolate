@@ -6,19 +6,19 @@ import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import AppDialog from "../components/AppDialog.vue";
+import FingerprintTrustDialog from "../components/FingerprintTrustDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useReleaseList } from "../composables/useReleaseList";
 import { useBuildTasks } from "../composables/useBuildTasks";
+import { useHostConnection } from "../composables/useHostConnection";
+import { useHostEnvironment } from "../composables/useHostEnvironment";
 import { queryClient } from "../lib/queryClient";
 import { useOperations } from "../composables/useOperations";
 import {
   buildDstImage,
   deleteInstanceRelease,
-  importInstanceRelease,
-  previewInstanceRelease,
   previewInstanceReleaseDelete,
   verifyInstanceReleaseBase,
-  verifyInstanceReleaseRuntime,
   type BuildStatusResponse,
   type InstanceReleaseSummary,
   type InstanceReleaseDeletePreview,
@@ -35,25 +35,33 @@ const { data, error, loading, stale, refresh } = useReleaseList(server);
 
 const releases = computed(() => data.value?.releases ?? []);
 const buildTasks = useBuildTasks();
+const hostConnection = useHostConnection();
+const hostEnvironment = useHostEnvironment(server, workspace.preview, (hostId, recordVersion) => workspace.bindHost(server.value?.serverId ?? "", recordVersion, hostId));
 const buildStarting = ref(false);
 const buildStartError = ref("");
 const buildEntry = computed(() => buildTasks.forHost(server.value?.hostId));
 const building = computed(() => buildStarting.value || buildEntry.value?.status.status === "building");
 const buildStatus = computed<BuildStatusResponse | null>(() => buildEntry.value?.status ?? null);
+const buildPercent = computed(() => buildStatus.value?.progress?.percent ?? null);
+const buildStepPercent = computed(() => buildStatus.value?.progress?.stepPercent ?? null);
 const buildMessage = computed(() => buildEntry.value?.message ?? "");
 const buildObservationError = computed(() => buildEntry.value?.observationError ?? "");
 const buildError = computed(() => buildEntry.value?.status.status === "failed"
   ? buildEntry.value.status.logTail.at(-1) ?? "构建失败，请查看主机构建日志"
   : buildEntry.value?.status.status === "notFound" ? "构建任务不存在，请重新构建"
   : buildStartError.value);
+const dockerNotice = computed(() => {
+  const docker = hostEnvironment.data.value?.docker;
+  if (!docker) return null;
+  if (docker.engineState === "notInstalled") return { title: "Docker 未安装", steps: ["前往主机环境安装 Docker 后再构建镜像"] };
+  if (docker.engineState === "permissionDenied") return { title: "Docker 权限不足", steps: ["检查管理账户的 Docker 访问权限后重新检查主机环境"] };
+  if (docker.engineState === "unavailable") return { title: "Docker 不可用", steps: ["检查 Docker 服务状态后重新检查主机环境"] };
+  return null;
+});
 const pendingReleaseId = ref("");
-const pendingStage = ref<"base" | "runtime" | "import" | "delete" | "" >("");
+const pendingStage = ref<"base" | "delete" | "" >("");
 const actionError = ref<{ releaseId: string; message: string } | null>(null);
 const actionMessage = ref<{ releaseId: string; message: string } | null>(null);
-const bundleReleaseId = ref("");
-const bundleBase64 = ref("");
-const bundleName = ref("");
-const bundleError = ref<{ releaseId: string; message: string } | null>(null);
 const deletePreview = ref<InstanceReleaseDeletePreview|null>(null);
 const deleteTypedName = ref("");
 const deleteBusy = ref(false);
@@ -61,7 +69,6 @@ const deleteError = ref("");
 const cachePreview = ref<BuildCachePreview | null>(null);
 const cacheBusy = ref(false);
 const cacheError = ref("");
-const bundleInputs = new Map<string, HTMLInputElement>();
 let actionSequence = 0;
 
 function targetSnapshot() {
@@ -91,18 +98,6 @@ function formatReleaseDate(value: string | null | undefined) {
 
 function shortDigest(value: string) {
   return value.length > 24 ? `${value.slice(0, 19)}…` : value;
-}
-
-function clearBundle() {
-  bundleReleaseId.value = "";
-  bundleBase64.value = "";
-  bundleName.value = "";
-  for (const input of bundleInputs.values()) input.value = "";
-}
-
-function rememberInput(releaseId: string, element: unknown) {
-  if (element instanceof HTMLInputElement) bundleInputs.set(releaseId, element);
-  else bundleInputs.delete(releaseId);
 }
 
 function closeDeleteDialog(open: boolean) {
@@ -181,39 +176,6 @@ async function confirmDeleteRelease() {
   }
 }
 
-function encodeBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
-
-async function readBundle(release: InstanceReleaseSummary, event: Event) {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  const target = targetSnapshot();
-  const sequence = actionSequence;
-  clearBundle();
-  bundleError.value = null;
-  if (!file) return;
-  if (file.size > 1024 * 1024) {
-    bundleError.value = { releaseId: release.releaseId, message: "配置 ZIP 不能超过 1 MiB" };
-    input.value = "";
-    return;
-  }
-  try {
-    const encoded = encodeBase64(new Uint8Array(await file.arrayBuffer()));
-    if (!target || !isCurrent(target, sequence) || !releases.value.some(item => item.releaseId === release.releaseId)) return;
-    bundleBase64.value = encoded;
-    bundleName.value = file.name;
-    bundleReleaseId.value = release.releaseId;
-  } catch {
-    bundleError.value = { releaseId: release.releaseId, message: "无法读取配置 ZIP" };
-    input.value = "";
-  }
-}
-
 async function verifyBase(release: InstanceReleaseSummary) {
   const target = targetSnapshot();
   const sequence = ++actionSequence;
@@ -243,75 +205,7 @@ async function verifyBase(release: InstanceReleaseSummary) {
   }
 }
 
-async function verifyRuntime(release: InstanceReleaseSummary) {
-  const target = targetSnapshot();
-  const catalogDigest = data.value?.catalogDigest;
-  const sequence = ++actionSequence;
-  if (!target || !catalogDigest || !bundleBase64.value || bundleReleaseId.value !== release.releaseId || pendingReleaseId.value) return;
-  const encodedBundle = bundleBase64.value;
-  pendingReleaseId.value = release.releaseId;
-  pendingStage.value = "runtime";
-  actionError.value = null;
-  actionMessage.value = null;
-  clearBundle();
-  try {
-    await verifyInstanceReleaseRuntime({
-      schemaVersion: 1,
-      requestId: crypto.randomUUID(),
-      target: { serverId: target.serverId, hostId: target.hostId },
-      expectedRecordVersion: target.recordVersion,
-      releaseId: release.releaseId,
-      catalogDigest,
-      operationId: crypto.randomUUID(),
-      settingsBundleBase64: encodedBundle,
-    });
-    if (!isCurrent(target, sequence)) return;
-    pendingStage.value = "import";
-    const preview = await previewInstanceRelease({
-      schemaVersion: 1,
-      requestId: crypto.randomUUID(),
-      target: { serverId: target.serverId, hostId: target.hostId },
-      expectedRecordVersion: target.recordVersion,
-      releaseId: release.releaseId,
-      catalogDigest,
-    });
-    if (!isCurrent(target, sequence)) return;
-    if (preview.status !== "ready") {
-      const message = preview.blockers.join("、") || "运行验证证据尚未准备好";
-      throw new Error(message);
-    }
-    const imported = await importInstanceRelease({
-      schemaVersion: 1,
-      requestId: crypto.randomUUID(),
-      target: { serverId: target.serverId, hostId: target.hostId },
-      expectedRecordVersion: target.recordVersion,
-      releaseId: release.releaseId,
-      catalogDigest,
-      operationId: crypto.randomUUID(),
-    });
-    if (!isCurrent(target, sequence)) return;
-    const task = imported.task as { status?: string; error?: { code?: string } } | null;
-    if (task?.status !== "succeeded") {
-      throw new Error(task?.error?.code ?? "Release 运行验证未能登记");
-    }
-    actionMessage.value = { releaseId: release.releaseId, message: "隔离运行验证通过" };
-    await refresh();
-  } catch (cause) {
-    if (isCurrent(target, sequence)) {
-      actionError.value = { releaseId: release.releaseId, message: describeError(cause).message };
-    }
-  } finally {
-    if (isCurrent(target, sequence)) {
-      clearBundle();
-      pendingReleaseId.value = "";
-      pendingStage.value = "";
-    }
-  }
-}
-
-async function startBuild() {
-  const target = targetSnapshot();
-  if (!target || building.value) return;
+async function requestBuild(target: {serverId: string; hostId: string; recordVersion: number}) {
   buildStarting.value = true;
   buildStartError.value = "";
   try {
@@ -329,6 +223,23 @@ async function startBuild() {
     buildStarting.value = false;
   }
 }
+async function startBuild() {
+  const value = server.value;
+  if (!value || building.value) return;
+  const target = targetSnapshot();
+  if (target) {
+    await requestBuild(target);
+    return;
+  }
+  await hostConnection.connect(value, async (_result, connected) => {
+    if (server.value?.serverId !== value.serverId) return;
+    if (!connected.hostId) {
+      buildStartError.value = "主机尚未初始化，请先在主机环境完成初始化";
+      return;
+    }
+    await requestBuild({ serverId: connected.serverId, hostId: connected.hostId, recordVersion: connected.recordVersion });
+  });
+}
 
 watch(() => buildEntry.value?.status.status, (next, previous) => {
   if (next === "completed" && previous !== "completed") {
@@ -343,7 +254,6 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   pendingStage.value = "";
   actionError.value = null;
   actionMessage.value = null;
-  bundleError.value = null;
   deletePreview.value = null;
   deleteTypedName.value = "";
   deleteBusy.value = false;
@@ -351,14 +261,12 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   cachePreview.value = null;
   cacheError.value = "";
   cacheBusy.value = false;
-  clearBundle();
   buildStarting.value = false;
   buildStartError.value = "";
 });
 
 onUnmounted(() => {
   actionSequence++;
-  clearBundle();
 });
 
 async function openCacheCleanup() {
@@ -418,8 +326,8 @@ async function confirmCacheCleanup() {
         <button class="button" :disabled="loading || !server || cacheBusy" @click="openCacheCleanup">
           <Trash2 :size="16" />清理构建缓存
         </button>
-        <button class="button" :disabled="building || loading || !server" @click="startBuild">
-          <Hammer :size="16" />{{ building ? "构建中…" : "构建镜像" }}
+        <button class="button" :disabled="building || !server || !!dockerNotice || hostConnection.busyServerId.value === server?.serverId" @click="startBuild">
+          <Hammer :size="16" />{{ hostConnection.busyServerId.value === server?.serverId ? "连接中…" : building ? "构建中…" : "构建镜像" }}
         </button>
         <button class="icon-button" type="button" aria-label="刷新 Release" title="刷新 Release" :disabled="loading || !server" @click="refresh">
           <RefreshCw :size="16" />
@@ -431,6 +339,14 @@ async function confirmCacheCleanup() {
       <strong>{{ error.message }}</strong>
       <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
     </div>
+    <div v-if="hostConnection.error.value && hostConnection.errorServerId.value === server?.serverId" class="environment-error release-feedback" role="alert">
+      <strong>{{ hostConnection.error.value.message }}</strong>
+      <ul v-if="hostConnection.error.value.recoverySteps.length"><li v-for="step in hostConnection.error.value.recoverySteps" :key="step">{{ step }}</li></ul>
+    </div>
+    <div v-if="dockerNotice" class="environment-error release-feedback" role="alert">
+      <strong>{{ dockerNotice.title }}</strong>
+      <ul><li v-for="step in dockerNotice.steps" :key="step">{{ step }}</li></ul>
+    </div>
 
     <div v-if="loading && !data" class="empty-state" role="status">读取 Release…</div>
     <template v-else-if="data">
@@ -438,46 +354,33 @@ async function confirmCacheCleanup() {
 
       <div v-if="!releases.length" class="release-empty">
         <Package :size="20" />
-        <div><strong>暂无 DST Release</strong><span>构建镜像后，Release 会显示在此处。</span></div>
-        <button class="button" :disabled="building || !server" @click="startBuild"><Hammer :size="16" />构建镜像</button>
+        <div><strong>暂无 DST Release</strong></div>
       </div>
 
       <div v-else class="release-table-wrap">
         <div class="release-table release-table-head" aria-hidden="true">
-          <span>版本</span><span>固定镜像</span><span>验证状态</span><span>创建时间</span><span>操作</span>
+          <span>版本</span><span>状态</span><span>镜像</span><span>创建时间</span><span>操作</span>
         </div>
         <article v-for="release in releases" :key="release.releaseId" class="release-table release-row">
           <div class="release-version-cell">
             <strong>{{ release.dstBuild }}</strong>
-          </div>
-          <div class="release-digest-cell">
-            <span class="mono" :title="release.image">{{ release.image }}</span>
+            <span class="release-id" :title="release.releaseId">Release {{ release.releaseId.slice(0, 8) }}</span>
           </div>
           <div class="release-status-cell">
             <StatusLabel :tone="statusTone(release)" :label="statusLabel(release)" />
-            <div class="verification-steps">
-              <span :class="{ passed: release.verified }"><CheckCircle :size="14" />镜像</span>
-              <span :class="{ passed: release.runtimeVerified }"><CheckCircle :size="14" />可选运行验证</span>
-            </div>
+          </div>
+          <div class="release-digest-cell">
+            <span class="mono" :title="release.image">{{ release.image }}</span>
           </div>
           <div class="release-created-cell">{{ formatReleaseDate(release.createdAt) }}</div>
           <div class="release-actions">
             <div class="release-actions-main">
             <template v-if="pendingReleaseId === release.releaseId">
-              <span class="release-action-progress" role="status"><span class="state-indicator busy" aria-hidden="true" />{{ pendingStage === "base" ? "检查镜像…" : pendingStage === "runtime" ? "启动隔离分片…" : pendingStage === "delete" ? "核对/删除 Release…" : "登记验证结果…" }}</span>
+              <span class="release-action-progress" role="status"><span class="state-indicator busy" aria-hidden="true" />{{ pendingStage === "base" ? "检查镜像…" : "核对/删除 Release…" }}</span>
             </template>
             <template v-else-if="!release.verified">
               <button class="button button-compact" :disabled="!!pendingReleaseId || building" @click="verifyBase(release)"><CheckCircle :size="15" />验证镜像</button>
             </template>
-            <template v-else-if="!release.runtimeVerified">
-              <label class="runtime-bundle-picker">
-                <span>{{ bundleReleaseId === release.releaseId ? bundleName : "选择 ZIP 文件" }}</span>
-                <input :ref="element => rememberInput(release.releaseId, element)" type="file" accept=".zip,application/zip" :aria-label="`为 ${release.dstBuild} 选择 Klei 配置 ZIP`" :disabled="!!pendingReleaseId || building" @change="readBundle(release, $event)" />
-              </label>
-              <button class="button button-compact" :disabled="!!pendingReleaseId || building || bundleReleaseId !== release.releaseId || !bundleBase64" @click="verifyRuntime(release)"><CheckCircle :size="15" />运行验证</button>
-              <small v-if="bundleError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ bundleError.message }}</small>
-            </template>
-            <span v-else class="release-ready"><CheckCircle :size="15" />运行验证通过</span>
             <small v-if="actionError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ actionError.message }}</small>
             <small v-if="actionMessage?.releaseId === release.releaseId" class="release-action-success" role="status">{{ actionMessage.message }}</small>
             </div>
@@ -497,11 +400,17 @@ async function confirmCacheCleanup() {
           <strong v-if="building">{{ buildStatus?.progress?.currentStep || "正在构建 DST 镜像…" }}</strong>
           <strong v-else-if="buildMessage && !buildError">{{ buildMessage }}</strong>
           <strong v-else>构建失败</strong>
-          <span v-if="building && buildStatus?.progress?.percent != null">{{ buildStatus.progress.percent }}%</span>
           <span v-if="building && buildObservationError">{{ buildObservationError }}</span>
           <span v-else-if="buildError">{{ buildError }}</span>
         </div>
-        <progress v-if="building && buildStatus?.progress?.percent != null" :value="buildStatus.progress.percent" max="100" />
+      </div>
+      <div v-if="building && buildPercent != null" class="build-progress">
+        <div class="build-progress-head"><span>构建阶段</span><span>{{ buildPercent }}%</span></div>
+        <div class="build-progress-track" role="progressbar" aria-label="构建阶段" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="buildPercent"><div class="build-progress-fill stage" :style="{ width: `${buildPercent}%` }"></div></div>
+        <div v-if="buildStepPercent != null" class="build-progress-detail">
+          <div class="build-progress-head"><span>当前步骤下载</span><span>{{ buildStepPercent }}%</span></div>
+          <div class="build-progress-track thin" role="progressbar" aria-label="当前步骤下载" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="buildStepPercent"><div class="build-progress-fill download" :style="{ width: `${buildStepPercent}%` }"></div></div>
+        </div>
       </div>
       <details v-if="buildStatus?.logTail.length" class="build-log">
         <summary>构建日志</summary>
@@ -555,6 +464,7 @@ async function confirmCacheCleanup() {
         <button class="button danger" :disabled="cacheBusy || !cachePreview?.allowed" @click="confirmCacheCleanup">{{ cacheBusy ? "清理中…" : "清理缓存" }}</button>
       </template>
     </AppDialog>
+    <FingerprintTrustDialog :open="hostConnection.trustOpen.value" :display-name="hostConnection.challengeServer.value?.displayName ?? ''" :host="hostConnection.challengeServer.value?.host ?? ''" :ssh-port="hostConnection.challengeServer.value?.sshPort ?? 22" :challenge="hostConnection.challenge.value" :busy="hostConnection.busyServerId.value === hostConnection.challengeServer.value?.serverId" :error="hostConnection.trustError.value" @update:open="value => { if (!value) hostConnection.closeTrust() }" @confirm="hostConnection.confirmTrust"/>
   </div>
 </template>
 
@@ -565,7 +475,14 @@ async function confirmCacheCleanup() {
 .build-state-copy { display: flex; flex: 1; min-width: 0; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; }
 .build-state-copy strong { font-size: 13px; font-weight: 600; }
 .build-state-copy span { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
-.build-state-main progress { width: 96px; height: 6px; accent-color: var(--success); }
+.build-progress { display: grid; gap: 8px; margin: 8px 0 0 24px; }
+.build-progress-detail { display: grid; gap: 6px; margin-top: 2px; }
+.build-progress-head { display: flex; justify-content: space-between; gap: 12px; color: var(--text-secondary); font-size: 11px; }
+.build-progress-track { height: 8px; overflow: hidden; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-muted); }
+.build-progress-track.thin { height: 5px; }
+.build-progress-fill { height: 100%; border-radius: inherit; background-color: var(--success); background-image: linear-gradient(45deg, rgba(255, 255, 255, .22) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, .22) 50%, rgba(255, 255, 255, .22) 75%, transparent 75%, transparent); background-size: 12px 12px; animation: build-stripes 1s linear infinite; transition: width 240ms ease; }
+.build-progress-fill.download { background-color: var(--accent); }
+@keyframes build-stripes { from { background-position: 0 0; } to { background-position: 12px 0; } }
 .state-success-icon { color: var(--success); }
 .state-error-icon { color: var(--danger); }
 .state-indicator { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
@@ -574,54 +491,47 @@ async function confirmCacheCleanup() {
 .build-log summary { width: fit-content; cursor: pointer; }
 .build-log pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--space-3); border: 1px solid var(--border); background: var(--surface-muted); }
 .release-feedback { margin-bottom: var(--space-3); }
-.release-feedback-success { display: flex; align-items: center; gap: var(--space-2); color: var(--success); font-size: 13px; }
-.release-summary { display: flex; align-items: center; gap: var(--space-5); flex-wrap: wrap; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
-.release-summary > div { display: flex; align-items: baseline; gap: var(--space-2); }
-.release-summary > div strong { font-size: 18px; font-variant-numeric: tabular-nums; }
-.release-summary > div span { color: var(--text-secondary); font-size: 12px; }
 .release-table-wrap { min-width: 0; }
-.release-table { display: grid; grid-template-columns: minmax(120px, .75fr) minmax(170px, 1.1fr) minmax(120px, .75fr) minmax(120px, .8fr) minmax(260px, 1.5fr); gap: var(--space-4); align-items: center; }
+.release-table { display: grid; grid-template-columns: minmax(140px, .85fr) minmax(84px, .5fr) minmax(220px, 1.5fr) minmax(110px, .65fr) minmax(150px, .8fr); gap: var(--space-4); align-items: center; }
 .release-table-head { min-height: 36px; color: var(--text-secondary); font-size: 11px; border-bottom: 1px solid var(--border); }
 .release-row { min-height: 92px; padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
 .release-version-cell, .release-digest-cell, .release-status-cell, .release-actions { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .release-version-cell strong { font-size: 14px; font-variant-numeric: tabular-nums; }
-.release-id, .release-platform, .release-digest-cell { color: var(--text-secondary); font-size: 11px; }
-.release-id, .digest-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.release-digest-cell > span:first-child { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
-.verification-steps { display: flex; flex-wrap: wrap; gap: var(--space-3); color: var(--text-secondary); font-size: 11px; }
-.verification-steps span { display: inline-flex; align-items: center; gap: 4px; }
-.verification-steps svg { opacity: .55; }
-.verification-steps .passed { color: var(--success); }
-.verification-steps .passed svg { opacity: 1; }
+.release-id, .release-digest-cell { color: var(--text-secondary); font-size: 11px; }
+.release-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.release-digest-cell > span:first-child { display: block; overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .release-actions { flex-direction: row; align-items: center; gap: 10px; }
 .release-actions-main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
-.release-delete { margin-left: auto; flex: 0 0 auto; border-left: 1px solid var(--border); padding-left: 12px; width: 30px; }
+.release-delete { flex: 0 0 auto; width: 30px; }
 .release-created-cell { color: var(--text-secondary); font-size: 11px; }
 .button-compact { min-height: 30px; padding: 0 var(--space-2); font-size: 12px; }
-.runtime-bundle-picker { display: inline-flex; position: relative; align-items: center; max-width: 100%; min-height: 30px; padding: 0 var(--space-2); border: 1px solid var(--border-strong); border-radius: var(--radius-control); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
-.runtime-bundle-picker span { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.runtime-bundle-picker:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
-.runtime-bundle-picker input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
-.release-action-progress, .release-ready { display: inline-flex; align-items: center; gap: var(--space-2); font-size: 12px; }
-.release-ready { color: var(--success); }
+.release-action-progress { display: inline-flex; align-items: center; gap: var(--space-2); font-size: 12px; }
 .release-action-error, .release-action-success { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .release-action-error { color: var(--danger); }
 .release-action-success { color: var(--success); }
 .release-empty { display: flex; min-height: 88px; align-items: center; gap: var(--space-3); border-bottom: 1px solid var(--border); }
 .release-empty > div { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
-.release-empty > div span { color: var(--text-secondary); font-size: 12px; }
-.release-empty .button { flex: 0 0 auto; }
 .release-feedback :deep(ul) { margin: var(--space-2) 0 0; }
 @keyframes release-pulse { 50% { opacity: .35; } }
-@media (max-width: 1100px) {
-  .release-table { grid-template-columns: minmax(90px, .8fr) minmax(130px, 1fr) minmax(90px, .8fr) minmax(90px, .8fr) minmax(210px, 1.4fr); gap: 8px; }
-  .release-actions-main { gap: 4px; }
-  .release-delete { padding-left: 8px; }
-}
-@media (max-width: 760px) {
+@media (max-width: 1099px) {
   .release-table-head { display: none; }
-  .release-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; row-gap: var(--space-3); }
-  .release-status-cell, .release-created-cell, .release-actions { border-top: 1px solid var(--border); padding-top: var(--space-2); }
+  .release-row {
+    grid-template-columns: minmax(0, 1fr) minmax(132px, 168px);
+    grid-template-areas:
+      "version status"
+      "image actions"
+      "created actions";
+    align-items: start;
+    gap: 6px var(--space-4);
+    padding: var(--space-4) 0;
+    min-height: 0;
+  }
+  .release-version-cell { grid-area: version; }
+  .release-status-cell { grid-area: status; align-items: flex-end; }
+  .release-digest-cell { grid-area: image; }
+  .release-created-cell { grid-area: created; }
+  .release-actions { grid-area: actions; align-self: start; justify-content: flex-end; }
+  .release-actions-main { gap: 4px; justify-content: flex-end; }
 }
 @media (prefers-reduced-motion: reduce) { .state-indicator.busy { animation: none; } }
 </style>

@@ -40,6 +40,7 @@ pub struct InstanceSummary {
     pub last_synced_at: Option<String>,
     pub active_task_id: Option<String>,
     pub manifest_available: bool,
+    pub config_revision: Option<u64>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

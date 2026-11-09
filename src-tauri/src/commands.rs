@@ -921,48 +921,6 @@ pub async fn list_instance_releases(
 }
 
 #[tauri::command]
-pub async fn preview_instance_release(
-    state: State<'_, AppState>,
-    request: crate::release_import::PrepareRequest,
-) -> CommandResult<crate::release_import::PrepareResponse> {
-    let path = state.database_path.clone();
-    ssh_blocking(
-        "previewInstanceRelease",
-        safe_request_id(&request.request_id),
-        move || crate::release_import::preview(&path, request),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn import_instance_release(
-    state: State<'_, AppState>,
-    request: crate::release_import::ImportRequest,
-) -> CommandResult<crate::release_import::ImportResponse> {
-    let path = state.database_path.clone();
-    ssh_blocking(
-        "importInstanceRelease",
-        safe_request_id(&request.request_id),
-        move || crate::release_import::import(&path, request),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn verify_instance_release_runtime(
-    state: State<'_, AppState>,
-    request: crate::release_import::RuntimeVerifyRequest,
-) -> CommandResult<crate::release_import::RuntimeVerifyResponse> {
-    let path = state.database_path.clone();
-    ssh_blocking(
-        "verifyInstanceReleaseRuntime",
-        safe_request_id(&request.request_id),
-        move || crate::release_import::verify_runtime(&path, request),
-    )
-    .await
-}
-
-#[tauri::command]
 pub async fn verify_instance_release_base(
     state: State<'_, AppState>,
     request: crate::release_import::BaseVerifyRequest,

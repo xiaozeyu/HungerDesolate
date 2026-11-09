@@ -58,6 +58,14 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result["blockers"], [])
         self.assertEqual(MODULE.CATALOG.read_bytes(), before)
 
+    def test_built_release_with_created_at_is_accepted(self):
+        release = dict(RELEASE, createdAt="2026-11-09T10:00:00Z")
+        MODULE.CATALOG.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "releases": [release]}))
+        MODULE.CATALOG.chmod(0o600)
+        result = MODULE.inspect({"hostId": HOST})
+        self.assertEqual(result["releases"][0]["createdAt"], release["createdAt"])
+        self.assertEqual(result["blockers"], [])
+
     def test_base_verified_release_clears_blocker_without_runtime_smoke_test(self):
         release = dict(RELEASE, runtimeVerified=False)
         MODULE.CATALOG.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "releases": [release]}))

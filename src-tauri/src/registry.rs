@@ -58,7 +58,7 @@ fn error(code: &'static str, message: &'static str) -> Box<CommandError> {
         "identity",
         "listInstances",
         message,
-        "检查注册表与实例 manifest，或重新读取；不要手动覆盖实例身份",
+        "检查注册表与实例清单或刷新",
     )
 }
 fn id(value: &str, field: &'static str) -> CommandResult<()> {
@@ -160,13 +160,14 @@ fn summarize(
     host_id: &str,
     manifest: Option<Manifest>,
 ) -> CommandResult<(InstanceSummary, Option<ManifestSummary>)> {
-    let (display_name, max_players, game_mode, caves_enabled, detail) =
+    let (display_name, max_players, game_mode, caves_enabled, config_revision, detail) =
         if let Some(manifest) = manifest {
             (
                 manifest.display_name,
                 manifest.max_players,
                 manifest.game_mode.clone(),
                 Some(manifest.caves_enabled),
+                Some(manifest.config_revision),
                 Some(ManifestSummary {
                     config_revision: manifest.config_revision,
                     compose_project: manifest.compose_project,
@@ -191,6 +192,7 @@ fn summarize(
                 None,
                 None,
                 None,
+                None,
             )
         };
     Ok((
@@ -208,6 +210,7 @@ fn summarize(
             last_synced_at: None,
             active_task_id: entry.pending_task_id,
             manifest_available: detail.is_some(),
+            config_revision,
         },
         detail,
     ))
@@ -462,6 +465,7 @@ pub(crate) mod tests {
         assert_eq!(summary.installed_build, None);
         assert_eq!(summary.max_players, Some(6));
         assert!(summary.manifest_available);
+        assert_eq!(summary.config_revision, Some(7));
         assert_eq!(detail.map(|detail| detail.config_revision), Some(7));
         Ok(())
     }

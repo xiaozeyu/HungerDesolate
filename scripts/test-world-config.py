@@ -81,6 +81,13 @@ class WorldConfigTests(unittest.TestCase):
             item.stop()
         self.temp.cleanup()
 
+    def use_verified_release(self, release_id):
+        (self.root / "releases").mkdir(mode=0o700, exist_ok=True)
+        path = self.root / "releases/catalog.json"
+        path.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST,
+            "releases": [{"releaseId": release_id, "verified": True, "runtimeVerified": False}]}))
+        path.chmod(0o600)
+
     def settings(self):
         return MODULE.default_settings(True, "生存一服")
 
@@ -91,6 +98,30 @@ class WorldConfigTests(unittest.TestCase):
                    "settings": self.settings(), "tokenChange": None, "serverPasswordChange": None}
         request.update(updates)
         return request
+
+    def test_runtime_config_directory_accepts_uid_1000(self):
+        config = self.instance / "config"
+        config.mkdir(mode=0o700)
+        current_lstat = Path.lstat
+
+        def runtime_owned(path):
+            info = current_lstat(path)
+            values = list(info)
+            values[4] = 1000 if path == config else 0
+            return os.stat_result(values)
+
+        with patch.object(Path, "lstat", runtime_owned):
+            MODULE.safe_directory(config, allow_runtime=True)
+            with self.assertRaises(MODULE.Rejected):
+                MODULE.safe_directory(config)
+
+    def test_directory_allows_group_read_but_rejects_group_write(self):
+        self.instance.chmod(0o755)
+        self.assertEqual(MODULE.get_config(self.request())["data"]["revision"], 0)
+        self.instance.chmod(0o775)
+        with self.assertRaises(MODULE.Rejected) as failure:
+            MODULE.get_config(self.request())
+        self.assertEqual(str(failure.exception), "WORLD_CONFIG_PATH_UNSAFE")
 
     def test_get_returns_defaults_without_secret_material(self):
         result = MODULE.get_config(self.request())
@@ -202,7 +233,6 @@ class WorldConfigTests(unittest.TestCase):
         self.assertNotIn("PROTECTION_BACKUP_REQUIRED", preview["blockers"])
         self.assertNotIn("WORLD_APPLY_NOT_IMPLEMENTED", preview["blockers"])
         self.assertNotIn("WORLD_RUNTIME_NOT_VERIFIED", preview["blockers"])
-        self.assertTrue(any("隔离运行验证" in warning for warning in preview["warnings"]))
         self.assertNotIn("WORLD_CONFIG_RENDER_UNSUPPORTED", preview["blockers"])
         self.assertEqual(preview["newWorldOptions"][0]["key"], "grass")
 
@@ -214,37 +244,9 @@ class WorldConfigTests(unittest.TestCase):
         self.assertIn("WORLD_CONFIG_RENDER_UNSUPPORTED", preview["blockers"])
         self.assertFalse(preview["allowed"])
 
-    def test_apply_preview_warns_but_does_not_block_unverified_active_release(self):
-        active_release = {"schemaVersion": 1, "deploymentId": "deployment-1",
-                          "dstReleaseId": "66666666-6666-4666-8666-666666666666"}
-        (self.instance / "active-release.json").write_text(json.dumps(active_release))
-        (self.root / "releases").mkdir(mode=0o700)
-        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
-            "hostId": HOST, "releases": [{"releaseId": active_release["dstReleaseId"],
-                                           "runtimeVerified": False}]}))
-        (self.instance / "active-release.json").chmod(0o600)
-        (self.root / "releases/catalog.json").chmod(0o600)
-        preview = MODULE.preview_apply({"schemaVersion": 1, "requestId": REQUEST,
-            "serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE,
-            "expectedRecordVersion": 1, "expectedRevision": 0})
-        self.assertNotIn("WORLD_RUNTIME_NOT_VERIFIED", preview["blockers"])
-        self.assertTrue(any("隔离运行验证" in warning for warning in preview["warnings"]))
-
-        catalog = json.loads((self.root / "releases/catalog.json").read_text())
-        catalog["releases"][0]["runtimeVerified"] = True
-        (self.root / "releases/catalog.json").write_text(json.dumps(catalog))
-        preview = MODULE.preview_apply({"schemaVersion": 1, "requestId": REQUEST,
-            "serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE,
-            "expectedRecordVersion": 1, "expectedRevision": 0})
-        self.assertFalse(any("隔离运行验证" in warning for warning in preview["warnings"]))
-
     def test_apply_publishes_first_world_config_and_keeps_runtime_unverified(self):
         release_id = "77777777-7777-4777-8777-777777777777"
-        (self.root / "releases").mkdir(mode=0o700)
-        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
-            "hostId": HOST, "releases": [{"releaseId": release_id, "verified": True,
-                                           "runtimeVerified": False}]}))
-        (self.root / "releases/catalog.json").chmod(0o600)
+        self.use_verified_release(release_id)
         (self.instance / "active-release.json").write_text(json.dumps({
             "schemaVersion": 1, "deploymentId": "deployment-1", "dstReleaseId": release_id}))
         (self.instance / "active-release.json").chmod(0o600)
@@ -257,7 +259,6 @@ class WorldConfigTests(unittest.TestCase):
             "serverId": SERVER, "hostId": HOST, "instanceId": INSTANCE,
             "expectedRecordVersion": 1, "expectedRevision": 1})
         self.assertTrue(preview["allowed"])
-        self.assertIn("隔离运行验证", preview["warnings"][0])
         actions = []
 
         def compose(_instance, _project, *arguments, capture=False, **_kwargs):
@@ -323,11 +324,7 @@ class WorldConfigTests(unittest.TestCase):
 
     def test_apply_rolls_back_config_when_service_restart_fails(self):
         release_id = "77777777-7777-4777-8777-777777777777"
-        (self.root / "releases").mkdir(mode=0o700)
-        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
-            "hostId": HOST, "releases": [{"releaseId": release_id, "verified": True,
-                                           "runtimeVerified": False}]}))
-        (self.root / "releases/catalog.json").chmod(0o600)
+        self.use_verified_release(release_id)
         (self.instance / "active-release.json").write_text(json.dumps({
             "schemaVersion": 1, "deploymentId": "deployment-1", "dstReleaseId": release_id}))
         (self.instance / "active-release.json").chmod(0o600)
@@ -364,11 +361,7 @@ class WorldConfigTests(unittest.TestCase):
 
     def test_apply_allows_existing_world_files_when_only_config_is_replaced(self):
         release_id = "77777777-7777-4777-8777-777777777777"
-        (self.root / "releases").mkdir(mode=0o700)
-        (self.root / "releases/catalog.json").write_text(json.dumps({"schemaVersion": 1,
-            "hostId": HOST, "releases": [{"releaseId": release_id, "verified": True,
-                                           "runtimeVerified": False}]}))
-        (self.root / "releases/catalog.json").chmod(0o600)
+        self.use_verified_release(release_id)
         (self.instance / "active-release.json").write_text(json.dumps({
             "schemaVersion": 1, "deploymentId": "deployment-1", "dstReleaseId": release_id}))
         (self.instance / "active-release.json").chmod(0o600)

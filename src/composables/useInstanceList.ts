@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, onMounted, watch, type Ref } from "vue";
+import { computed, onBeforeUnmount, watch, type Ref } from "vue";
 import { getInstanceCreateStatus, listInstances, type InstanceListResponse } from "../api/instances";
 import { demoInstances } from "../fixtures/workspace";
 import { validateInstanceList } from "../lib/instanceList";
@@ -17,11 +17,10 @@ export function useInstanceList(server: Ref<ServerSummary | null>, preview: Read
       : null;
   });
 
-  let disposed = false, mounted = false;
+  let disposed = false;
   let generation = 0, requestSequence = 0;
-  let pollDelay = 15000;
-  let pollTimer: ReturnType<typeof setTimeout> | undefined;
-  watch(key, () => { generation++; pollDelay = 15000; schedulePoll(); }, { flush: "sync" });
+  // The list call reads the remote registry and runtime evidence; keep it manual-refresh only.
+  watch(key, () => { generation++; }, { flush: "sync" });
 
   const query = useQuery(key, async queryKey => {
     const currentGeneration = generation, sequence = ++requestSequence;
@@ -60,40 +59,9 @@ export function useInstanceList(server: Ref<ServerSummary | null>, preview: Read
 
   const { data, error, loading, stale, refresh } = query;
 
-  function schedulePoll() {
-    if (pollTimer !== undefined) clearTimeout(pollTimer);
-    pollTimer = undefined;
-    if (!mounted || disposed || !key.value || preview.value || document.visibilityState === "hidden") return;
-    pollTimer = setTimeout(() => { void poll(); }, pollDelay);
-  }
-
-  async function poll() {
-    if (pollTimer !== undefined) clearTimeout(pollTimer);
-    pollTimer = undefined;
-    const queryKey = key.value, pollGeneration = generation;
-    if (!disposed && queryKey && !preview.value && document.visibilityState !== "hidden" && !loading.value) {
-      await refresh();
-      if (generation !== pollGeneration || disposed) return;
-      if (key.value === queryKey) pollDelay = error.value ? Math.min(pollDelay * 2, 60000) : 15000;
-    }
-    schedulePoll();
-  }
-
-  function onVisibilityChange() {
-    if (document.visibilityState === "hidden") schedulePoll();
-    else void poll();
-  }
-
-  onMounted(() => {
-    mounted = true;
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    schedulePoll();
-  });
   onBeforeUnmount(() => {
     disposed = true;
     generation++;
-    if (pollTimer !== undefined) clearTimeout(pollTimer);
-    document.removeEventListener("visibilitychange", onVisibilityChange);
   });
 
   async function reconcileCreationTasks(target: ServerSummary, snapshot: InstanceListResponse) {

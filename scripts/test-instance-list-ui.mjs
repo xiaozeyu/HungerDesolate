@@ -1,4 +1,4 @@
-/** Exercise the production list refresh loop with mocked IPC and a local clock. */
+/** Exercise the production instance-list read path with mocked IPC. */
 import {before,after,test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'vite';
@@ -34,58 +34,42 @@ function response(request,players=null){return {schemaVersion:1,requestId:reques
 function deferred(){let resolve;const promise=new Promise(yes=>{resolve=yes;});return {promise,resolve};}
 function mount(previewValue=false){
   queryClient.clear();api.commits.length=0;
-  const saved={setTimeout:globalThis.setTimeout,clearTimeout:globalThis.clearTimeout,document:globalThis.document};
-  const timers=new Map(),listeners=new Map();let id=0,state;
-  const doc={visibilityState:'visible',addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:(name,fn)=>{if(listeners.get(name)===fn)listeners.delete(name);}};
-  globalThis.document=doc;
+  const saved={setTimeout:globalThis.setTimeout,clearTimeout:globalThis.clearTimeout};
+  const timers=new Map();let id=0,state;
   globalThis.setTimeout=(callback,delay)=>{timers.set(++id,{callback,delay});return id;};
   globalThis.clearTimeout=timer=>timers.delete(timer);
   const server=ref({...serverA}),preview=ref(previewValue);
   const app=renderer.createApp(defineComponent({setup(){state=useInstanceList(server,preview);return()=>null;}}));
   app.mount({});
-  return {state,server,preview,timers,listeners,
-    async tick(){assert.equal(timers.size,1);const [timer,entry]=[...timers][0];timers.delete(timer);entry.callback();await flush();},
-    async visibility(value){doc.visibilityState=value;listeners.get('visibilitychange')?.();await flush();},
+  return {state,server,preview,timers,
     unmount(){app.unmount();Object.assign(globalThis,saved);},
   };
 }
 
-test('the list replaces unknown player counts on its next scheduled read',async()=>{
-  let calls=0;api.handler=async request=>response(request,++calls===1?null:3);
+test('the list reads once and does not schedule background polling',async()=>{
+  let calls=0;api.handler=async request=>{calls++;return response(request,3);};
   const view=mount();
   try{
-    await flush();assert.equal(view.state.data.value.instances[0].players,null);
-    assert.equal([...view.timers.values()][0].delay,15000);
-    await view.tick();assert.equal(view.state.data.value.instances[0].players,3);assert.equal(calls,2);
+    await flush();
+    assert.equal(calls,1);
+    assert.equal(view.state.data.value.instances[0].players,3);
+    assert.equal(view.timers.size,0);
   }finally{view.unmount();}
+  assert.equal(view.timers.size,0);
 });
 
-test('polling skips an in-flight read and stops when the page is hidden or unmounted',async()=>{
-  const pending=deferred();let calls=0,request;
-  api.handler=input=>{calls++;request=input;return pending.promise;};
+test('manual refresh reads the latest list without starting a loop',async()=>{
+  let calls=0;api.handler=async request=>response(request,++calls);
   const view=mount();
   try{
-    await flush();await view.tick();assert.equal(calls,1);
-    await view.visibility('hidden');assert.equal(view.timers.size,0);
-    pending.resolve(response(request,0));await flush();assert.equal(view.state.data.value.instances[0].players,0);
-    api.handler=async request=>{calls++;return response(request,2);};
-    await view.visibility('visible');assert.equal(calls,2);assert.equal(view.state.data.value.instances[0].players,2);
-  }finally{view.unmount();}
-  assert.equal(view.timers.size,0);assert.equal(view.listeners.size,0);
-});
-
-test('failed reads back off to 60 seconds and successful reads reset the interval',async()=>{
-  api.handler=async()=>{throw new Error('offline');};const view=mount();
-  try{
-    await flush();await view.tick();assert.equal([...view.timers.values()][0].delay,30000);
-    await view.tick();assert.equal([...view.timers.values()][0].delay,60000);
-    await view.tick();assert.equal([...view.timers.values()][0].delay,60000);
-    api.handler=async request=>response(request,1);
-    await view.tick();assert.equal([...view.timers.values()][0].delay,15000);assert.equal(view.state.error.value,null);
+    await flush();assert.equal(view.state.data.value.instances[0].players,1);
+    await view.state.refresh();await flush();
+    assert.equal(view.state.data.value.instances[0].players,2);
+    assert.equal(calls,2);assert.equal(view.timers.size,0);
   }finally{view.unmount();}
 });
 
-test('an older poll cannot commit to the workspace after a newer manual read',async()=>{
+test('an older read cannot commit after a newer manual read',async()=>{
   const pending=deferred();let oldRequest;
   api.handler=request=>{oldRequest=request;return pending.promise;};const view=mount();
   try{
@@ -110,7 +94,7 @@ test('A to B to A navigation rejects the original A response and its workspace c
   }finally{view.unmount();}
 });
 
-test('preview mode does not schedule remote polling',async()=>{
+test('preview mode does not call the remote list',async()=>{
   let calls=0;api.handler=async request=>{calls++;return response(request);};const view=mount(true);
-  try{await flush();assert.equal(view.timers.size,0);assert.equal(calls,0);}finally{view.unmount();}
+  try{await flush();assert.equal(calls,0);assert.equal(view.timers.size,0);}finally{view.unmount();}
 });

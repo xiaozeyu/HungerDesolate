@@ -360,9 +360,7 @@ def process_ready(container_id):
     return output.strip() == "DST_RUNNING"
 
 
-def udp_ports(container_id):
-    output = docker(["exec", container_id, "/bin/sh", "-c",
-                     "cat /proc/net/udp && { if [ -r /proc/net/udp6 ]; then cat /proc/net/udp6; fi; }"])
+def parse_udp_snapshot(output):
     if output is None:
         return None
     observed = set()
@@ -375,6 +373,43 @@ def udp_ports(container_id):
             reject("INSTANCE_START_DOCKER_RESPONSE_INVALID")
         observed.add(int(fields[1].rsplit(":", 1)[1], 16))
     return observed
+
+
+def udp_ports(container_id):
+    return parse_udp_snapshot(docker(["exec", container_id, "/bin/sh", "-c",
+                                      "cat /proc/net/udp && { if [ -r /proc/net/udp6 ]; then cat /proc/net/udp6; fi; }"]))
+
+
+def inspect_runtime_probe(container_id):
+    """Read process, UDP listeners and build in one container exec."""
+    probe = "\n".join([
+        "found=0",
+        "for p in /proc/[0-9]*/exe; do",
+        "  x=$(readlink \"$p\" 2>/dev/null) || continue",
+        "  if [ \"$x\" = " + SERVER_BINARY + " ]; then found=1; break; fi",
+        "done",
+        "if [ \"$found\" = 1 ]; then printf \"DST_RUNNING\\n\"; else printf \"DST_NOT_FOUND\\n\"; fi",
+        "printf \"__UDP__\\n\"",
+        "cat /proc/net/udp 2>/dev/null",
+        "if [ -r /proc/net/udp6 ]; then cat /proc/net/udp6; fi",
+        "printf \"__BUILD__\\n\"",
+        "cat /srv/dst/version.txt 2>/dev/null",
+    ])
+    output = docker(["exec", container_id, "/bin/sh", "-c", probe])
+    if output is None:
+        return None
+    process, udp_separator, rest = output.partition("__UDP__")
+    udp, build_separator, build = rest.partition("__BUILD__")
+    if not udp_separator or not build_separator:
+        reject("INSTANCE_START_DOCKER_RESPONSE_INVALID")
+    state = process.strip()
+    if state not in ("DST_RUNNING", "DST_NOT_FOUND"):
+        reject("INSTANCE_START_DOCKER_RESPONSE_INVALID")
+    return {
+        "processRunning": state == "DST_RUNNING",
+        "udp": parse_udp_snapshot(udp),
+        "build": build.strip() or None,
+    }
 
 
 def start(request):
@@ -657,12 +692,16 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
         observed = None
         if state == "running":
             try:
-                evidence["processRunning"] = process_ready(container["id"])
-                observed = udp_ports(container["id"])
-                build = docker(["exec", container["id"], "cat", "/srv/dst/version.txt"])
-                if build is not None and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", build.strip()):
-                    evidence["installedBuild"] = build.strip()
-                    builds.add(build.strip())
+                probe = inspect_runtime_probe(container["id"])
+                if probe is None:
+                    result["warnings"].append("RUNTIME_PROBE_UNAVAILABLE")
+                else:
+                    evidence["processRunning"] = probe["processRunning"]
+                    observed = probe["udp"]
+                    build = probe["build"]
+                    if build is not None and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", build):
+                        evidence["installedBuild"] = build
+                        builds.add(build)
             except Rejected:
                 result["warnings"].append("RUNTIME_PROBE_UNAVAILABLE")
         bindings = container.get("bindings")
@@ -756,7 +795,9 @@ def inspect_instances(request):
     entries = registry.get("instances")
     if not isinstance(entries, list):
         reject("INSTANCE_START_STATE_INVALID")
-    OBSERVATION_DEADLINE = time.monotonic() + 20
+    # Inspect is read-only and may be called from the list page; fail fast instead of
+    # holding the SSH session for the full start-operation budget.
+    OBSERVATION_DEADLINE = time.monotonic() + 10
     try:
         releases = []
         catalog_path = ROOT / "releases" / "catalog.json"

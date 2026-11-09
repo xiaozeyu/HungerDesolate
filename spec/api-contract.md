@@ -431,6 +431,8 @@ manifest v1 必填 schemaVersion、hostId、instanceId、displayName、configRev
 
 InstanceSummary 新增 manifestAvailable 与 configRevision。configRevision 为 manifest 当前配置版本；无 manifest 时为 null，且与 manifestAvailable=false 一致。maxPlayers 允许 null，未知不能用 0 代替。retired 不进当前列表；creating/createFailed 且无 manifest 时保留登记名称（无名称则显示 ID），manifestAvailable=false。ready 等记录缺 manifest 明确拒绝，不能悄悄漏掉。runtimeStatus=unknown、players=null、installedBuild=null、lastSyncedAt=null；不提升 registry/runtime.json 内的旧声明为真实运行证据。pendingTaskId 仅作为登记引用，不等价任务仍在执行。
 
+列表在完成注册表与清单校验后，对 `manifestAvailable=true` 的实例执行一次运行采集；仅对 `running` 分片执行容器探测，并把进程、UDP 监听与版本读取合并为一次 `docker exec`，未运行分片不执行 exec。采集结果只用于本次 `InstanceListResponse`，不写入 registry 或 runtime.json。
+
 读取后复查 registry 字节与 host.json，变化则 REGISTRY_CHANGED/HOST_IDENTITY_MISMATCH。拒绝管理根或子路径为符号链接、路径穿越、非普通文件、超大文件、格式损坏；不存在与权限/读取错误分别处理。文件目录仍需受控权限，此快照校验不构成远端文件系统事务。
 
 `get_instance_overview` 请求为 `{schemaVersion,requestId,target:InstanceTarget,expectedRecordVersion}`，重新发现并验证实例归属，返回 schemaVersion/requestId/target/recordVersion、snapshotId、capturedAtUnixSeconds、configRevision、source/freshness 和 data。data 含 identity、manifestSummary（配置版本/项目名/洞穴/开机策略）、verificationLevel=unverified、desiredVsDeployed=unknown。尚未采集运行证据，不承诺分片运行。未完成创建的详情返回 MANIFEST_NOT_FOUND，归档/不存在返回 INSTANCE_NOT_FOUND。

@@ -307,6 +307,20 @@ class InstanceRuntimeStartTests(unittest.TestCase):
         with patch.object(MODULE, "docker", return_value=None):
             self.assertIsNone(MODULE.udp_ports("a" * 64))
 
+    def test_combined_inspection_probe_reads_process_ports_and_version_once(self):
+        output = "DST_RUNNING\n__UDP__\nsl local_address rem_address\n0: 00000000:2AF8 00000000:0000\n__BUILD__\n756039\n"
+        with patch.object(MODULE, "docker", return_value=output) as docker:
+            probe = MODULE.inspect_runtime_probe("a" * 64)
+        self.assertEqual(probe, {"processRunning": True, "udp": {11000}, "build": "756039"})
+        self.assertEqual(docker.call_count, 1)
+        self.assertEqual(docker.call_args.args[0][:3], ["exec", "a" * 64, "/bin/sh"])
+
+    def test_combined_inspection_probe_rejects_missing_markers(self):
+        with patch.object(MODULE, "docker", return_value="DST_RUNNING"):
+            with self.assertRaises(MODULE.Rejected) as failure:
+                MODULE.inspect_runtime_probe("a" * 64)
+        self.assertEqual(failure.exception.code, "INSTANCE_START_DOCKER_RESPONSE_INVALID")
+
     def test_missing_required_listener_reports_process_and_missing_ports_without_false_success(self):
         with patch.object(MODULE, "verify_container", side_effect=lambda _instance, _project, _host, _id, shard: shard), \
              patch.object(MODULE, "inspect_running", return_value=True), \
@@ -437,13 +451,11 @@ class InstanceRuntimeStartTests(unittest.TestCase):
             if arguments[0] == "inspect":
                 return "\n".join(json.dumps(item) for item in containers)
             if arguments[0] == "exec":
-                if arguments[2] == "cat":
-                    return "756039\n"
-                if "readlink" in arguments[-1]:
-                    return "DST_RUNNING"
+                if "readlink" not in arguments[-1]:
+                    raise AssertionError("Inspection must combine process, UDP and build in one exec")
                 ports = (10888, 11000, 27016) if arguments[1] == "a" * 64 else (11001, 27017)
-                return "sl local_address rem_address\n" + "\n".join(
-                    f"0: 00000000:{port:04X} 00000000:0000" for port in ports)
+                return "DST_RUNNING\n__UDP__\nsl local_address rem_address\n" + "\n".join(
+                    f"0: 00000000:{port:04X} 00000000:0000" for port in ports) + "\n__BUILD__\n756039\n"
             raise AssertionError("Read-only inspection must not mutate Docker: " + arguments[0])
         return run
 

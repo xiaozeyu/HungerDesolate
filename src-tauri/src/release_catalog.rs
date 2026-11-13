@@ -31,6 +31,12 @@ pub struct ReleaseSummary {
     pub verified: bool,
     pub runtime_verified: bool,
     pub commands: Value,
+    #[serde(default)]
+    pub image_size: Option<u64>,
+    #[serde(default)]
+    pub in_use: bool,
+    #[serde(default)]
+    pub reclaimable: bool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

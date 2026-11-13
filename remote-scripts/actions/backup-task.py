@@ -1,8 +1,5 @@
 """Persistent, identity-bound backup task admission and worker."""
-import configparser
 import fcntl
-import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -330,65 +327,21 @@ def docker_env():
     return environment
 
 
-def backup_restorability(instance, request, release_id):
-    desired_path = instance / "desired" / "world.json"
-    deployed_path = instance / "deployed-world.json"
-    if not desired_path.is_file() or not deployed_path.is_file():
-        return "unknown", None
-    try:
-        desired = read_json(desired_path, 262144)
-        deployed = read_json(deployed_path, 262144)
-    except (OSError, Rejected):
-        return "incompatible", None
-    settings = desired.get("settings") if isinstance(desired, dict) else None
-    digest = "sha256:" + __import__("hashlib").sha256(canonical(settings)).hexdigest()
-    if (desired.get("schemaVersion") != 1 or desired.get("instanceId") != request["instanceId"]
-            or type(desired.get("revision")) is not int or desired.get("revision") > request["expectedRevision"]
-            or not isinstance(settings, dict)
-            or not isinstance(desired.get("secrets"), dict)
-            or deployed.get("schemaVersion") != 1 or deployed.get("instanceId") != request["instanceId"]
-            or deployed.get("revision") != desired.get("revision")
-            or deployed.get("digest") != digest or deployed.get("settings") != settings):
-        return "incompatible", None
+def backup_dst_build(instance):
+    active_path = instance / "active-release.json"
+    if not active_path.exists():
+        return None
+    active = read_json(active_path, 65536)
+    release_id = active.get("dstReleaseId") if isinstance(active, dict) else None
+    if not isinstance(release_id, str):
+        return None
     try:
         catalog = read_json(ROOT / "releases" / "catalog.json", 1024 * 1024)
-        release = next((item for item in catalog.get("releases", [])
-                        if isinstance(item, dict) and item.get("releaseId") == release_id
-                        and item.get("verified") is True), None)
-        if not release:
-            return "missingArtifacts", None
-        release_dir = ROOT / "staging" / release_id
-        safe_dir(release_dir)
-        release_metadata = read_json(release_dir / "release-metadata.json", 262144)
-        release_metadata.pop("schemaVersion", None)
-        comparable = {key: value for key, value in release.items() if key != "createdAt"}
-        if release_metadata != comparable:
-            return "missingArtifacts", None
-        image = subprocess.run(["docker", "image", "inspect", release["imageDigest"], "--format", "{{.Id}}"],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               text=True, timeout=10, check=False, env=docker_env())
-        if image.returncode != 0 or image.stdout.strip() != release["imageDigest"]:
-            return "missingArtifacts", None
-        active_path = instance / "active-release.json"
-        active = read_json(active_path, 65536) if active_path.exists() else {}
-        mods_release_id = active.get("modsReleaseId") if isinstance(active, dict) else None
-        if mods_release_id is not None:
-            if not isinstance(mods_release_id, str) or not re.fullmatch(
-                    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", mods_release_id):
-                return "incompatible", None
-            mods_root = instance / "mods" / "releases" / mods_release_id
-            try:
-                safe_dir(mods_root)
-                mods_manifest = read_json(mods_root / "manifest.json", 4 * 1024 * 1024)
-                if (mods_manifest.get("schemaVersion") != 1 or mods_manifest.get("modsReleaseId") != mods_release_id
-                        or mods_manifest.get("instanceId") != request["instanceId"]
-                        or not isinstance(mods_manifest.get("mods"), list)):
-                    return "missingArtifacts", None
-            except (OSError, Rejected):
-                return "missingArtifacts", None
-        return "restorable", release
-    except (OSError, Rejected, KeyError, TypeError, subprocess.SubprocessError):
-        return "missingArtifacts", None
+    except (OSError, Rejected):
+        return None
+    release = next((item for item in catalog.get("releases", [])
+                    if isinstance(item, dict) and item.get("releaseId") == release_id), None)
+    return release.get("dstBuild") if release else None
 
 
 def verify_instance(request, allow_unknown=False, allow_degraded=False):
@@ -474,37 +427,6 @@ def wait_lock(fd, cancel_path):
             time.sleep(0.5)
 
 
-ACCESS_FIELDS = ("adminList", "whitelist", "blocklist", "whitelistSlots")
-
-
-def digest(value):
-    return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
-
-
-def sanitize_cluster_ini(path):
-    parser = configparser.ConfigParser(interpolation=None)
-    parser.optionxform = str
-    parser.read_string(path.read_text(encoding="utf-8"))
-    for section, key in (("NETWORK", "cluster_password"), ("SHARD", "cluster_key"),
-                         ("GAMEPLAY", "whitelist_slots")):
-        if parser.has_option(section, key):
-            parser.remove_option(section, key)
-    output = io.StringIO()
-    parser.write(output)
-    return output.getvalue().encode("utf-8")
-
-
-def sanitize_world_snapshot(path):
-    value = json.loads(path.read_text(encoding="utf-8"))
-    settings = value.get("settings") if isinstance(value, dict) else None
-    advanced = settings.get("advanced") if isinstance(settings, dict) else None
-    if not isinstance(advanced, dict):
-        return canonical(value)
-    for field in ACCESS_FIELDS:
-        advanced[field] = 0 if field == "whitelistSlots" else []
-    if "digest" in value:
-        value["digest"] = digest(settings)
-    return canonical(value)
 
 
 def _worker_impl(task_id):
@@ -583,19 +505,9 @@ def _worker_impl(task_id):
         if request["captureMode"] == "cold" and runtime_before not in ("running", "stopped", "degraded"):
             reject("BACKUP_RUNTIME_INVALID")
         set_status(directory, "running", "preflight")
-        roots = ["data/Master", "config/Cluster_1"]
-        active_path = instance / "active-release.json"
-        active_snapshot = read_json(active_path, 65536) if active_path.exists() else {}
-        for relative in ("active-release.json", "manifest.json", "compose.yaml"):
-            if (instance / relative).exists(): roots.append(relative)
-        for relative in ("desired/mods.json", "deployed-mods.json"):
-            if (instance / relative).exists(): roots.append(relative)
+        roots = ["data/Master"]
         if manifest.get("cavesEnabled") is True:
             roots.append("data/Caves")
-        for relative in ("desired/world.json", "deployed-world.json"):
-            path = instance / relative
-            if path.exists() or path.is_symlink():
-                roots.append(relative)
         files, source_size = archive_module["checked_files"](instance, roots)
         filesystem = os.statvfs(ROOT)
         available = filesystem.f_bavail * filesystem.f_frsize
@@ -628,8 +540,7 @@ def _worker_impl(task_id):
             "captureSemantics": "stoppedBeforeRead" if request["captureMode"] == "cold" else "onDiskBestEffort",
             "runtimeStatusAtCapture": runtime_before, "sizeBytes": 0, "checksum": None,
             "verification": "pending", "restorability": "unknown", "dstBuild": None,
-            "dstReleaseId": None, "modsReleaseId": None,
-            "configRevision": request["expectedRevision"], "containsSecrets": False}
+            "containsSecrets": False}
         atomic_json(backup_stage / "metadata.json", pending_metadata)
         execution = {"schemaVersion": 1, "operationId": task_id,
                      "captureMode": request["captureMode"], "runtimeBefore": runtime_before,
@@ -651,29 +562,18 @@ def _worker_impl(task_id):
                 if state_after_stop != "stopped":
                     reject("BACKUP_STOP_FAILED")
             set_status(directory, "running", "backup", completed="stop" if request["captureMode"] == "cold" else "preflight")
-            active = read_json(instance / "active-release.json", 65536) if (instance / "active-release.json").exists() else {}
-            release_id = active.get("dstReleaseId")
             capture_runtime = "stopped" if request["captureMode"] == "cold" else runtime_before
             backup_identity = {"schemaVersion": 1, "hostId": request["hostId"],
                 "instanceId": request["instanceId"], "backupId": backup_id,
                 "captureMode": request["captureMode"], "runtimeStatus": capture_runtime,
-                "runtimeVerified": capture_runtime in ("running", "stopped"),
-                "configRevision": request["expectedRevision"],
-                "dstReleaseId": release_id, "modsReleaseId": active.get("modsReleaseId"), "reason": request["reason"]}
+                "runtimeVerified": capture_runtime in ("running", "stopped"), "reason": request["reason"]}
             archive_path = backup_stage / "archive.tar.gz"
-            overrides = {}
-            cluster_path = instance / "config" / "Cluster_1" / "cluster.ini"
-            if cluster_path.is_file():
-                overrides["config/Cluster_1/cluster.ini"] = sanitize_cluster_ini(cluster_path)
-            for relative in ("desired/world.json", "deployed-world.json"):
-                path = instance / relative
-                if path.is_file():
-                    overrides[relative] = sanitize_world_snapshot(path)
-            created = archive_module["create_archive"](instance, archive_path, backup_identity, roots, overrides)
+            created = archive_module["create_archive"](instance, archive_path, backup_identity, roots)
             verified = archive_module["inspect_archive"](archive_path, request["hostId"],
                                                            request["instanceId"], created["checksum"])
             set_status(directory, "running", "backupVerify", completed="backup")
-            restorability, release = backup_restorability(instance, request, release_id)
+            dst_build = backup_dst_build(instance)
+            restorability = "restorable"
             desired_path = instance / "desired" / "mods.json"
             desired_mods = read_json(desired_path, 2 * 1024 * 1024) if desired_path.exists() else {}
             mods_refs = [{"workshopId": str(item.get("workshopId")), "enabled": item.get("enabled") is True,
@@ -686,9 +586,7 @@ def _worker_impl(task_id):
                 "captureSemantics": verified["manifest"]["captureSemantics"],
                 "runtimeStatusAtCapture": capture_runtime, "sizeBytes": created["archiveSizeBytes"],
                 "checksum": created["checksum"], "verification": "verified", "restorability": restorability,
-                "dstBuild": release.get("dstBuild") if release else None, "dstReleaseId": release_id,
-                "modsReleaseId": None, "mods": mods_refs,
-                "configRevision": request["expectedRevision"], "containsSecrets": False}
+                "dstBuild": dst_build, "mods": mods_refs, "containsSecrets": False}
             atomic_json(backup_stage / "metadata.json", metadata)
             if backup_dir.exists():
                 reject("BACKUP_ID_EXISTS")
@@ -769,6 +667,8 @@ def restore_runtime(request, manifest, roles, should_run=True):
 
 
 def recover_interrupted(request, directory):
+    task_id = request["operationId"]
+    cancel_path = directory / "cancel.request"
     execution_path = directory / "execution.json"
     try:
         execution = read_json(execution_path)

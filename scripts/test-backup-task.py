@@ -131,39 +131,18 @@ class BackupTaskTests(unittest.TestCase):
         MODULE.start(self.request, "archive source")
         self.verify_mock.assert_called_with(self.request, True)
 
-    def test_backup_restorability_is_verified_from_world_snapshot_and_release_artifacts(self):
+    def test_backup_dst_build_is_a_historical_hint(self):
         release_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        image_digest = "sha256:" + "a" * 64
-        release = {"releaseId": release_id, "imageDigest": image_digest, "verified": True,
-                   "createdAt": "2026-11-09T10:00:00Z"}
-        release_dir = self.root / "staging" / release_id
-        release_dir.mkdir(parents=True, mode=0o700)
-        staged = {key: value for key, value in release.items() if key != "createdAt"}
-        (release_dir / "release-metadata.json").write_text(json.dumps({"schemaVersion": 1, **staged}))
-        (release_dir / "release-metadata.json").chmod(0o600)
-        release_dir.chmod(0o700)
         catalog_dir = self.root / "releases"
         catalog_dir.mkdir(mode=0o700)
-        (catalog_dir / "catalog.json").write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "releases": [release]}))
+        (catalog_dir / "catalog.json").write_text(json.dumps({"schemaVersion": 1, "hostId": HOST,
+            "releases": [{"releaseId": release_id, "dstBuild": "756039"}]}))
         (catalog_dir / "catalog.json").chmod(0o600)
         instance = self.root / "instances" / INSTANCE
-        desired_dir = instance / "desired"
-        desired_dir.mkdir(parents=True, mode=0o700)
-        settings = {"gameMode": "survival"}
-        digest = "sha256:" + __import__("hashlib").sha256(MODULE.canonical(settings)).hexdigest()
-        desired = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 4,
-                   "settings": settings, "secrets": {"tokenRef": OPERATION}}
-        deployed = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 4,
-                    "settings": settings, "digest": digest}
-        (desired_dir / "world.json").write_text(json.dumps(desired))
-        (desired_dir / "world.json").chmod(0o600)
-        (instance / "deployed-world.json").write_text(json.dumps(deployed))
-        (instance / "deployed-world.json").chmod(0o600)
-        with patch.object(MODULE.subprocess, "run", return_value=types.SimpleNamespace(returncode=0, stdout=image_digest)):
-            status, observed = MODULE.backup_restorability(
-                instance, {"instanceId": INSTANCE, "expectedRevision": 4}, release_id)
-        self.assertEqual(status, "restorable")
-        self.assertEqual(observed["releaseId"], release_id)
+        instance.mkdir(parents=True, mode=0o700)
+        (instance / "active-release.json").write_text(json.dumps({"schemaVersion": 1, "dstReleaseId": release_id}))
+        (instance / "active-release.json").chmod(0o600)
+        self.assertEqual(MODULE.backup_dst_build(instance), "756039")
 
     def test_injected_request_is_accepted_by_remote_main_entrypoint(self):
         output = io.StringIO()
@@ -185,31 +164,6 @@ class BackupTaskTests(unittest.TestCase):
         self.assertTrue(envelope["ok"])
         self.assertEqual(envelope["data"]["taskId"], OPERATION)
         self.assertEqual(envelope["data"]["status"], "queued")
-
-
-class BackupSanitizerTests(unittest.TestCase):
-    def test_sanitizes_cluster_secrets_and_access_fields(self):
-        with tempfile.TemporaryDirectory(prefix="backup-sanitize-") as temporary:
-            path = Path(temporary) / "cluster.ini"
-            path.write_text("[NETWORK]\ncluster_password = secret\n[SHARD]\ncluster_key = 0123456789abcdef0123456789abcdef\n[GAMEPLAY]\nwhitelist_slots = 3\n")
-            data = MODULE.sanitize_cluster_ini(path).decode()
-            self.assertNotIn("cluster_password", data)
-            self.assertNotIn("cluster_key", data)
-            self.assertNotIn("whitelist_slots", data)
-
-    def test_sanitizes_world_access_policy_and_recomputes_digest(self):
-        with tempfile.TemporaryDirectory(prefix="backup-world-") as temporary:
-            path = Path(temporary) / "world.json"
-            settings = {"advanced": {"adminList": ["admin"], "whitelist": ["white"],
-                                     "blocklist": ["block"], "whitelistSlots": 2}}
-            path.write_text(json.dumps({"schemaVersion": 1, "settings": settings,
-                                        "digest": MODULE.digest(settings)}))
-            value = json.loads(MODULE.sanitize_world_snapshot(path))
-            self.assertEqual(value["settings"]["advanced"]["adminList"], [])
-            self.assertEqual(value["settings"]["advanced"]["whitelist"], [])
-            self.assertEqual(value["settings"]["advanced"]["blocklist"], [])
-            self.assertEqual(value["settings"]["advanced"]["whitelistSlots"], 0)
-            self.assertEqual(value["digest"], MODULE.digest(value["settings"]))
 
 
 if __name__ == "__main__":

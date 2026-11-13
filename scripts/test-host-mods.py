@@ -75,6 +75,40 @@ class HostModsTests(unittest.TestCase):
             MODULE.delete_item(request)
         self.assertEqual(failure.exception.code, "HOST_MOD_IN_USE")
 
+    def add_artifact(self, digest, prepared_at="2025-01-01T00:00:00Z"):
+        artifact = self.root / "mods" / "prepared" / "123" / digest
+        (artifact / "content").mkdir(parents=True, mode=0o700)
+        (artifact / "content" / "modinfo.lua").write_text("name='x'\n")
+        self.write_json(artifact / "manifest.json", {
+            "schemaVersion": 1, "workshopId": "123", "contentDigest": digest,
+            "sizeBytes": 9, "fileCount": 1, "preparedAt": prepared_at,
+        })
+        return artifact
+
+    def test_cleanup_skips_used_and_backup_versions(self):
+        old = "b" * 64
+        self.add_artifact(old)
+        self.write_json(self.root / "backups" / INSTANCE / "55555555-5555-4555-8555-555555555555" / "metadata.json",
+                        {"schemaVersion": 1, "mods": [{"workshopId": "123", "artifactDigest": old}]})
+        result = MODULE.cleanup(self.request("cleanup"))
+        self.assertEqual(result["deleted"], [])
+
+    def test_cleanup_deletes_older_unreferenced_version(self):
+        old = "b" * 64
+        artifact = self.add_artifact(old)
+        result = MODULE.cleanup(self.request("cleanup"))
+        self.assertEqual([item["contentDigest"] for item in result["deleted"]], [old])
+        self.assertFalse(artifact.exists())
+
+    def test_cleanup_keeps_versions_produced_by_the_current_update(self):
+        old = "b" * 64
+        artifact = self.add_artifact(old, prepared_at="2025-01-01T00:00:00Z")
+        request = self.request("cleanup")
+        request["keep"] = [{"workshopId": "123", "contentDigest": old}]
+        result = MODULE.cleanup(request)
+        self.assertEqual(result["deleted"], [])
+        self.assertTrue(artifact.exists())
+
     def test_deletes_unused_artifact(self):
         self.write_json(self.root / "instances" / INSTANCE / "desired" / "mods.json", {
             "schemaVersion": 1, "instanceId": INSTANCE, "revision": 1, "mods": [],

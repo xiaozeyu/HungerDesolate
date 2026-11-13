@@ -66,7 +66,7 @@ const taskStatusLabel = computed(() => {
 const taskActive = computed(() => !!task.value && ["queued", "running"].includes(task.value.status));
 const modLibrarySummary = computed(() => [
   { label: "内容版本", value: items.value.length },
-  { label: "被实例使用", value: usedCount.value },
+  { label: "使用或备份引用", value: usedCount.value },
   { label: "占用空间", value: formatBytes(totalSize.value) },
   { label: "任务", value: taskActive.value ? "进行中" : "空闲", tone: taskActive.value ? "warning" as const : "default" as const },
 ]);
@@ -636,7 +636,9 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
     <TaskPanel v-if="task" title="准备主机 MOD" :status-label="taskStatusLabel" :stage-label="stageLabel(task.stage)" :tone="taskTone"
       :queue-position="task.queuePosition" :error="task.error"
       :cancellable="!!task.cancelAllowed && ['queued','running'].includes(task.status)" :busy="cancelBusy" @cancel="cancelPrepare">
-      <span v-if="task.status === 'succeeded'" class="muted-text">内容已固定，可供所有专服选择</span>
+      <span v-if="task.status === 'succeeded' && task.result?.autoCleanupError" class="muted-text">内容已固定 · 旧版本清理未完成，下次更新会重试</span>
+      <span v-else-if="task.status === 'succeeded' && task.result?.autoCleanupDeleted" class="muted-text">内容已固定，可供所有专服选择 · 已自动清理 {{ task.result.autoCleanupDeleted }} 个旧版本</span>
+      <span v-else-if="task.status === 'succeeded'" class="muted-text">内容已固定，可供所有专服选择</span>
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
 </FloatingTask>

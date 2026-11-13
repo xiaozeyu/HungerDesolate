@@ -43,6 +43,22 @@ class HostModsDownloadTests(unittest.TestCase):
         self.assertIn('sys.argv[1] == "worker"', source)
         self.assertIn("worker(sys.argv[2])", source)
 
+    def test_auto_cleanup_passes_current_versions_and_parses_deleted(self):
+        with tempfile.TemporaryDirectory(prefix="host-mod-cleanup-") as temporary:
+            directory = Path(temporary)
+            (directory / "probe.py").write_text(
+                "import json, sys\n"
+                "request = json.load(sys.stdin)\n"
+                "assert request['action'] == 'cleanup'\n"
+                "assert request['keep'] == [{'workshopId': '123', 'contentDigest': 'a' * 64}]\n"
+                "print(json.dumps({'ok': True, 'data': {'deleted': [\n"
+                "    {'workshopId': '123', 'contentDigest': 'b' * 64}]}}))\n")
+            request = {"schemaVersion": 1, "requestId": TASK, "serverId": SERVER, "hostId": HOST,
+                       "expectedRecordVersion": 1}
+            deleted = MODULE.run_library_cleanup(
+                directory, request, [{"workshopId": "123", "contentDigest": "a" * 64}])
+            self.assertEqual(deleted, [{"workshopId": "123", "contentDigest": "b" * 64}])
+
     def test_task_result_identifies_host_domain(self):
         request = {"serverId": SERVER, "hostId": HOST, "workshopIds": ["123"]}
         result = MODULE.task_result(request, [{"workshopId": "123"}])

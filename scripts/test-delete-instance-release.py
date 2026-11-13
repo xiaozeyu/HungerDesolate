@@ -1,4 +1,5 @@
 """Test reference-checked Release deletion and exact Docker image removal."""
+import fcntl
 import importlib.util
 import json
 import os
@@ -53,6 +54,7 @@ class ReleaseDeleteTests(unittest.TestCase):
             patch.object(MODULE, "REGISTRY", self.root / "registry.json"),
             patch.object(MODULE, "RELEASES", self.root / "releases"),
             patch.object(MODULE, "STAGING", self.root / "staging"),
+            patch.object(MODULE, "DST", self.root / "dst"),
             patch.object(MODULE, "REGISTRY_LOCK", self.root / "locks" / "registry.lock"),
             patch.object(MODULE, "CATALOG_LOCK", self.root / "releases" / "catalog.lock"),
             patch.object(MODULE.os, "geteuid", return_value=0),
@@ -79,6 +81,10 @@ class ReleaseDeleteTests(unittest.TestCase):
         raise AssertionError(command)
 
     def test_preview_and_delete_remove_registration_staging_and_exact_image(self):
+        dst = self.root / "dst" / RELEASE
+        dst.mkdir(parents=True)
+        (dst / "version.txt").write_text("756039\n")
+        (dst / "version.txt").chmod(0o600)
         with patch.object(MODULE, "docker", side_effect=self.docker_stub) as docker:
             preview = MODULE.inspect_release(self.request())
             encoded_preview = json.dumps(preview)
@@ -88,7 +94,28 @@ class ReleaseDeleteTests(unittest.TestCase):
         self.assertTrue(result["imageRemoved"])
         self.assertEqual(json.loads(MODULE.CATALOG.read_text())["releases"], [])
         self.assertFalse((self.root / "staging" / RELEASE).exists())
+        self.assertTrue(result["dstRemoved"])
+        self.assertFalse(dst.exists())
         self.assertEqual(docker.call_args.args[0], ["docker", "image", "rm", DIGEST])
+
+    def test_active_build_blocks_preview_and_delete(self):
+        build = self.root / "image-build"
+        build.mkdir(mode=0o700)
+        lock_path = build / "build.lock"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(MODULE, "docker", side_effect=self.docker_stub):
+                preview = MODULE.inspect_release(self.request())
+                self.assertTrue(preview["buildActive"])
+                self.assertFalse(preview["allowed"])
+                with self.assertRaises(MODULE.Rejected) as failure:
+                    MODULE.remove(self.request("delete"))
+            self.assertEqual(str(failure.exception), "RELEASE_DELETE_BUILD_ACTIVE")
+            self.assertEqual(len(json.loads(MODULE.CATALOG.read_text())["releases"]), 1)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def test_instance_reference_blocks_deletion(self):
         registry = {"schemaVersion": 1, "hostId": HOST,

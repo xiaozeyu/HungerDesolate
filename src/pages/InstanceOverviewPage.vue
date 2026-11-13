@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Play, Square, RotateCw } from "@lucide/vue";
+import { ArrowUpCircle, Play, Square, RotateCw } from "@lucide/vue";
 import PageHeader from "../components/PageHeader.vue";
+import AppDialog from "../components/AppDialog.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import SummaryBar from "../components/SummaryBar.vue";
@@ -13,8 +14,10 @@ import { useWorkspace } from "../composables/useWorkspace";
 import { useOperations } from "../composables/useOperations";
 import { useTasks } from "../composables/useTasks";
 import { useTaskDrawer } from "../composables/useTaskDrawer";
-import { controlInstance } from "../api/instances";
-import type { UserError } from "../lib/commandError";
+import { controlInstance, listInstanceReleases, type InstanceReleaseSummary } from "../api/instances";
+import { previewInstanceUpdate, runInstanceUpdate, type UpdatePreview } from "../api/updates";
+import { describeError, type UserError } from "../lib/commandError";
+import { formatBytes } from "../lib/environmentView";
 import { hasReadyShardListeners } from "../lib/instanceRuntime";
 import { activeContext } from "../context/activeContext";
 import { operationTargetKey, stageLabel, taskOperationLabel } from "../lib/operationView";
@@ -58,6 +61,98 @@ const runtime = computed(() => data.value?.runtime);
 const shards = computed(() => runtime.value?.shards ?? []);
 const ports = computed(() => runtime.value?.ports.filter(port => port.hostPort !== null) ?? []);
 const readyShards = computed(() => shards.value.filter(shard => shard.ready).length);
+const installedBuild = computed(() => runtime.value?.installedBuild ?? null);
+const revision = computed(() => data.value?.manifestSummary?.configRevision ?? null);
+const updateOpen = ref(false);
+const updateLoading = ref(false);
+const updateError = ref("");
+const updateReleases = ref<InstanceReleaseSummary[]>([]);
+const updateSelected = ref("");
+const updatePreview = ref<UpdatePreview | null>(null);
+const updateBusy = ref(false);
+const updateCandidates = computed(() => {
+  const current = Number(installedBuild.value);
+  if (!Number.isFinite(current)) return [];
+  return updateReleases.value
+    .filter(release => release.verified && Number(release.dstBuild) > current)
+    .sort((left, right) => Number(right.dstBuild) - Number(left.dstBuild));
+});
+const selectedRelease = computed(() => updateCandidates.value.find(release => release.releaseId === updateSelected.value) ?? null);
+const updateWarningLabel = (value: string) => ({
+  UPDATE_ROLLBACK_UNAVAILABLE: "旧 Release 产物不可用，失败后需人工恢复",
+  DST_RELEASE_RUNTIME_UNVERIFIED: "目标 Release 未做运行时验证",
+}[value] ?? value);
+
+async function openUpdateDialog() {
+  const connection = server.value;
+  const instanceTarget = target.value;
+  if (!connection?.hostId || !instanceTarget || updateLoading.value) return;
+  updateLoading.value = true;
+  updateError.value = "";
+  updatePreview.value = null;
+  updateSelected.value = "";
+  try {
+    const response = await listInstanceReleases({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      serverId: connection.serverId, expectedRecordVersion: connection.recordVersion });
+    if (response.serverId !== connection.serverId || response.hostId !== connection.hostId) return;
+    updateReleases.value = response.releases;
+    updateSelected.value = updateCandidates.value[0]?.releaseId ?? "";
+    updateOpen.value = true;
+  } catch (cause) {
+    updateError.value = describeError(cause).message;
+    updateOpen.value = true;
+  } finally {
+    updateLoading.value = false;
+  }
+}
+
+async function previewUpdate() {
+  const connection = server.value;
+  const instanceTarget = target.value;
+  const release = selectedRelease.value;
+  if (!connection?.hostId || !instanceTarget || !release || revision.value === null || updateBusy.value) return;
+  updateBusy.value = true;
+  updateError.value = "";
+  updatePreview.value = null;
+  try {
+    const preview = await previewInstanceUpdate({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      target: instanceTarget, expectedRecordVersion: connection.recordVersion,
+      expectedRevision: revision.value, targetReleaseId: release.releaseId });
+    updatePreview.value = preview;
+  } catch (cause) {
+    const failure = describeError(cause);
+    const blockers = Array.isArray(failure.details?.blockers)
+      ? failure.details.blockers.filter((item): item is string => typeof item === "string") : [];
+    updateError.value = blockers.length ? `${failure.message}：${blockers.join("、")}` : failure.message;
+  } finally {
+    updateBusy.value = false;
+  }
+}
+
+async function confirmUpdate() {
+  const connection = server.value;
+  const instanceTarget = target.value;
+  const preview = updatePreview.value;
+  if (!connection?.hostId || !instanceTarget || !preview || revision.value === null || updateBusy.value) return;
+  updateBusy.value = true;
+  updateError.value = "";
+  const operationId = crypto.randomUUID();
+  try {
+    const response = await runInstanceUpdate({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      target: instanceTarget, expectedRecordVersion: connection.recordVersion,
+      expectedRevision: revision.value, planId: preview.planId, operationId });
+    if (response.task.operationId !== operationId || response.task.operation !== "instanceUpdate") {
+      throw new Error("切换任务回执身份不匹配");
+    }
+    taskStore.receive(response.task);
+    updateOpen.value = false;
+    await refresh();
+  } catch (cause) {
+    updateError.value = describeError(cause).message;
+  } finally {
+    updateBusy.value = false;
+  }
+}
 const summaryItems = computed(() => [
   { label: "运行状态", value: status.value, tone: runtimeStatus.value === "running" ? "success" as const : runtimeStatus.value === "degraded" || runtimeStatus.value === "failed" ? "danger" as const : runtimeStatus.value === "starting" || runtimeStatus.value === "stopping" ? "warning" as const : "default" as const },
   { label: "分片就绪", value: `${readyShards.value}/${shards.value.length}`, tone: shards.value.length && readyShards.value === shards.value.length ? "success" as const : readyShards.value ? "warning" as const : "default" as const },
@@ -149,6 +244,10 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
   <div class="page">
     <PageHeader :eyebrow="name" title="专服概览">
       <template #actions>
+        <button class="button" :disabled="loading || !!runtimeAction" @click="openUpdateDialog">
+          <ArrowUpCircle :size="16"/>
+          切换 DST 版本
+        </button>
         <button class="button" :disabled="loading || !!runtimeAction" @click="refresh">
           <RotateCw :size="16"/>
           刷新
@@ -235,12 +334,44 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
       <template #actions><button class="text-button" type="button" @click="openTaskDrawer">任务记录</button></template>
     </TaskPanel>
 </FloatingTask>
+<AppDialog :open="updateOpen" title="切换 DST 版本" @update:open="value => { if (!value && !updateBusy) { updateOpen = false; updatePreview = null; updateError = ''; } }">
+  <div class="update-dialog">
+    <p v-if="!updateCandidates.length" class="muted-text">没有更高 build 的已验证 Release。请先在 Release 管理页检查并构建。</p>
+    <label v-else>目标版本
+      <select v-model="updateSelected" :disabled="updateBusy" @change="updatePreview = null">
+        <option v-for="release in updateCandidates" :key="release.releaseId" :value="release.releaseId">
+          build {{ release.dstBuild }} · {{ release.releaseId.slice(0, 8) }}
+        </option>
+      </select>
+    </label>
+    <div v-if="updateError" class="environment-error" role="alert">{{ updateError }}</div>
+    <div v-if="updatePreview" class="update-preview">
+      <p>当前 build {{ updatePreview.current.build ?? "未知" }} → 目标 build {{ updatePreview.targetRelease.build ?? "未知" }}</p>
+      <p>将停止 {{ updatePreview.shards.join(" / ") }}；世界存档保护点约 {{ formatBytes(updatePreview.backup.estimatedBytes) }}；可用 {{ formatBytes(updatePreview.backup.availableBytes) }}</p>
+      <p v-if="!updatePreview.rollback.available" class="backup-warning">失败后需人工恢复：{{ updatePreview.rollback.reason }}</p>
+      <p v-for="warning in updatePreview.warnings" :key="warning" class="backup-warning">{{ updateWarningLabel(warning) }}</p>
+    </div>
+  </div>
+  <template #footer>
+    <button class="button" :disabled="updateBusy" @click="updateOpen = false">取消</button>
+    <button v-if="!updatePreview" class="button primary" :disabled="updateBusy || !updateSelected || !updateCandidates.length || revision === null" @click="previewUpdate">
+      {{ updateBusy ? "检测中…" : "预览切换" }}
+    </button>
+    <button v-else class="button primary" :disabled="updateBusy || revision === null" @click="confirmUpdate">
+      {{ updateBusy ? "创建备份…" : "创建备份并切换" }}
+    </button>
+  </template>
+</AppDialog>
     </template>
   </div>
 </template>
 
 
 <style scoped>
+.update-dialog { display: flex; flex-direction: column; gap: 12px; }
+.update-preview { display: flex; flex-direction: column; gap: 6px; }
+.update-preview p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.backup-warning { color: var(--warning); }
 .shard-section { margin-bottom: 38px; }
 .shard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .shard-card { border: 1px solid var(--border); border-top: 2px solid var(--text-tertiary); padding: 16px 18px 14px; background: var(--surface); }

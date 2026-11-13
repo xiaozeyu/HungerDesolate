@@ -1,4 +1,5 @@
-"""List, import and delete host-level Workshop artifacts."""
+"""List, import, delete and clean host-level Workshop artifacts."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -134,7 +135,35 @@ def instances():
     return result
 
 
-def usage(workshop_id, content_digest):
+def backup_references():
+    refs = set()
+    root = ROOT / "backups"
+    if not root.is_dir():
+        return refs
+    for instance_dir in root.iterdir():
+        if not instance_dir.is_dir() or not UUID.fullmatch(instance_dir.name):
+            continue
+        for backup in instance_dir.iterdir():
+            if not backup.is_dir() or not UUID.fullmatch(backup.name):
+                continue
+            try:
+                metadata = read_json(backup / "metadata.json", 262144, missing=None)
+            except Rejected:
+                continue
+            mods = metadata.get("mods") if isinstance(metadata, dict) else None
+            if not isinstance(mods, list):
+                continue
+            for item in mods:
+                if not isinstance(item, dict):
+                    continue
+                workshop_id = str(item.get("workshopId"))
+                digest = str(item.get("artifactDigest"))
+                if WORKSHOP.fullmatch(workshop_id) and DIGEST.fullmatch(digest):
+                    refs.add((workshop_id, digest))
+    return refs
+
+
+def usage(workshop_id, content_digest, backup_refs=None):
     used = []
     for instance_id, path, display_name in instances():
         selected = False
@@ -157,12 +186,14 @@ def usage(workshop_id, content_digest):
                         selected = True
         if selected:
             used.append({"instanceId": instance_id, "displayName": display_name})
+    if backup_refs is not None and (workshop_id, content_digest) in backup_refs:
+        used.append({"instanceId": "backup", "displayName": "备份引用"})
     return used
 
 
-def list_items(request):
-    target_from(request)
+def collect_items():
     items = []
+    references = backup_references()
     if PREPARED.is_dir():
         for workshop in sorted(PREPARED.iterdir(), key=lambda item: item.name):
             if not workshop.is_dir() or not WORKSHOP.fullmatch(workshop.name):
@@ -181,14 +212,63 @@ def list_items(request):
                     "preparedAt": manifest.get("preparedAt"),
                     "sizeBytes": manifest.get("sizeBytes"),
                     "fileCount": manifest.get("fileCount"),
-                    "usedBy": usage(workshop.name, artifact.name),
+                    "usedBy": usage(workshop.name, artifact.name, references),
                     "name": manifest.get("name") or info.get("name"),
                     "author": manifest.get("author") or info.get("author"),
                     "previewUrl": manifest.get("previewUrl"),
                     "version": manifest.get("version") or info.get("version"),
                 })
-    return {"schemaVersion": 1, "items": items, "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
+    return items
+
+
+def list_items(request):
+    target_from(request)
+    return {"schemaVersion": 1, "items": collect_items(), "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
             "requestId": request["requestId"], "recordVersion": request["expectedRecordVersion"]}
+
+
+def reclaimable_items(items, keep=()):
+    grouped = {}
+    for item in items:
+        grouped.setdefault(item["workshopId"], []).append(item)
+    result = []
+    for versions in grouped.values():
+        versions.sort(key=lambda item: (item.get("preparedAt") or "", item["contentDigest"]), reverse=True)
+        for index, item in enumerate(versions):
+            if index == 0 or item["usedBy"] or (item["workshopId"], item["contentDigest"]) in keep:
+                continue
+            result.append(item)
+    result.sort(key=lambda item: (item["workshopId"], item.get("preparedAt") or ""))
+    return result
+
+
+def cleanup(request):
+    target_from(request)
+    keep = set()
+    requested = request.get("keep") if isinstance(request.get("keep"), list) else []
+    for item in requested:
+        if (isinstance(item, dict) and WORKSHOP.fullmatch(str(item.get("workshopId")))
+                and DIGEST.fullmatch(str(item.get("contentDigest")))):
+            keep.add((item["workshopId"], item["contentDigest"]))
+    lock_path = MODS / "library.lock"
+    safe_dir(MODS, create=True)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        items = reclaimable_items(collect_items(), keep)
+        deleted = []
+        for item in items:
+            artifact = PREPARED / item["workshopId"] / item["contentDigest"]
+            safe_dir(artifact)
+            read_manifest(artifact)
+            shutil.rmtree(artifact)
+            deleted.append({"workshopId": item["workshopId"], "contentDigest": item["contentDigest"]})
+        return {"schemaVersion": 1, "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
+                "requestId": request["requestId"], "recordVersion": request["expectedRecordVersion"],
+                "deleted": deleted}
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def delete_item(request):
@@ -201,10 +281,17 @@ def delete_item(request):
     artifact = PREPARED / workshop_id / content_digest
     safe_dir(artifact)
     read_manifest(artifact)
-    used = usage(workshop_id, content_digest)
-    if used:
-        reject("HOST_MOD_IN_USE", {"usedBy": used})
-    shutil.rmtree(artifact)
+    safe_dir(MODS, create=True)
+    lock_fd = os.open(MODS / "library.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        used = usage(workshop_id, content_digest, backup_references())
+        if used:
+            reject("HOST_MOD_IN_USE", {"usedBy": used})
+        shutil.rmtree(artifact)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     return {"schemaVersion": 1, "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
             "requestId": request["requestId"], "recordVersion": request["expectedRecordVersion"],
             "deleted": {"workshopId": workshop_id, "contentDigest": content_digest}}
@@ -219,6 +306,8 @@ def main(request):
             data = list_items(request)
         elif action == "delete":
             data = delete_item(request)
+        elif action == "cleanup":
+            data = cleanup(request)
         else:
             reject("HOST_MOD_ACTION_INVALID")
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)

@@ -1,6 +1,5 @@
 """Read the backup catalog and preview one backup mode for an instance."""
 import json
-import hashlib
 import fcntl
 import os
 from pathlib import Path
@@ -8,12 +7,14 @@ import re
 import shutil
 import stat
 import subprocess
-import tarfile
 import uuid
 
 ROOT = Path("/var/lib/famine-hub")
 MAX_BYTES = 1024 * 1024
 RUNTIME_UID = 1000
+WORLD_ROOTS = ("data/Master", "data/Caves")
+EXCLUDED_NAMES = {"cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt",
+                  "server_log.txt", "server_chat_log.txt", "client_log.txt"}
 
 
 class Rejected(Exception):
@@ -189,7 +190,7 @@ def list_backups(request):
             if release is not None:
                 metadata["dstBuild"] = release.get("dstBuild")
         if metadata.get("verification") == "verified":
-            metadata["restorability"] = assess_restorability(child, metadata, instance, manifest, host_id, instance_id)
+            metadata["restorability"] = assess_restorability(child, metadata, host_id, instance_id)
         items.append(metadata)
         if len(items) > 5000:
             reject("BACKUP_READ_LIMIT")
@@ -200,43 +201,18 @@ def list_backups(request):
             "restoreAcceptancePassed": restore_acceptance(host_id), "items": items}
 
 
-def assess_restorability(backup, metadata, instance, manifest, host_id, instance_id):
+def assess_restorability(backup, metadata, host_id, instance_id):
     archive = backup / "archive.tar.gz"
     try:
         info = archive.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             return "incompatible"
-        archive_module = {}
         source = globals().get("ARCHIVE_SOURCE")
         if not isinstance(source, str):
             return "unknown"
+        archive_module = {}
         exec(compile(source, "<backup-archive>", "exec"), archive_module)
-        inspected = archive_module["inspect_archive"](archive, host_id, instance_id, metadata.get("checksum"))
-        blocker = world_config_snapshot_blocker(archive, inspected["manifest"], instance, instance_id)
-        if blocker:
-            return "incompatible" if blocker == "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID" else "missingArtifacts"
-        release_id = metadata.get("dstReleaseId")
-        active = read_json(instance / "active-release.json", 65536)
-        if not valid_uuid(release_id) or release_id != active.get("dstReleaseId"):
-            return "incompatible"
-        catalog = read_json(ROOT / "releases" / "catalog.json", 1024 * 1024)
-        release = next((item for item in catalog.get("releases", [])
-                        if isinstance(item, dict) and item.get("releaseId") == release_id
-                        and item.get("verified") is True), None)
-        if not release:
-            return "missingArtifacts"
-        artifact_blocker = release_artifact_blocker(release_id, release)
-        if artifact_blocker:
-            return "missingArtifacts"
-        environment = dict(os.environ)
-        for key in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "DOCKER_CONFIG"):
-            environment.pop(key, None)
-        environment.update({"LC_ALL": "C", "DOCKER_HOST": "unix:///var/run/docker.sock"})
-        image = subprocess.run(["docker", "image", "inspect", release["imageDigest"], "--format", "{{.Id}}"],
-                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               text=True, timeout=10, check=False, env=environment)
-        if image.returncode != 0 or image.stdout.strip() != release["imageDigest"]:
-            return "missingArtifacts"
+        archive_module["inspect_archive"](archive, host_id, instance_id, metadata.get("checksum"))
         return "restorable"
     except FileNotFoundError:
         return "missingArtifacts"
@@ -250,10 +226,9 @@ def preview(request):
     if mode not in ("cold", "quasiHot"):
         reject("BACKUP_INPUT_INVALID")
     status, verified = runtime_state(instance_id, manifest)
-    roots = [instance / "data" / "Master", instance / "config" / "Cluster_1"]
+    roots = [instance / "data" / "Master"]
     if manifest.get("cavesEnabled") is True:
         roots.append(instance / "data" / "Caves")
-    safe_directory(instance / "config", allow_runtime=True)
     file_count = 0
     size_bytes = 0
     for data_root in roots:
@@ -273,7 +248,7 @@ def preview(request):
                         or info.st_uid not in (0, os.geteuid(), RUNTIME_UID)
                         or info.st_mode & 0o022):
                     reject("BACKUP_SOURCE_UNSAFE")
-                if name not in ("cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt"):
+                if name not in EXCLUDED_NAMES:
                     file_count += 1
                     size_bytes += info.st_size
     available = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
@@ -288,75 +263,21 @@ def preview(request):
             "warnings": (["QUASI_HOT_FILES_MAY_CHANGE_DURING_CAPTURE"] if mode == "quasiHot" else [])}
 
 
-def release_artifact_blocker(release_id, release):
-    staging = ROOT / "staging" / release_id
-    try:
-        info = staging.lstat()
-    except FileNotFoundError:
-        return "DST_RELEASE_UNAVAILABLE"
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077:
-        return "DST_RELEASE_ARTIFACTS_UNSAFE"
-    try:
-        metadata = read_json(staging / "release-metadata.json", 262144)
-    except FileNotFoundError:
-        return "DST_RELEASE_UNAVAILABLE"
-    metadata.pop("schemaVersion", None)
-    comparable = {key: value for key, value in release.items() if key != "createdAt"}
-    return None if metadata == comparable else "DST_RELEASE_ARTIFACTS_MISMATCH"
-
-
-def world_config_snapshot_blocker(archive_path, archive_manifest, instance, expected_instance_id):
-    revision = archive_manifest.get("configRevision")
-    archived = {item.get("path") for item in archive_manifest.get("files", []) if isinstance(item, dict)}
-    desired_name = "desired/world.json"
-    deployed_name = "deployed-world.json"
-    has_desired = desired_name in archived
-    has_deployed = deployed_name in archived
-    if has_desired != has_deployed:
-        return "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID"
-    try:
-        if has_desired:
-            with tarfile.open(archive_path, "r:gz") as bundle:
-                values = {}
-                for relative in (desired_name, deployed_name):
-                    member = bundle.getmember("data/" + relative)
-                    if not member.isfile() or member.size > 262144:
-                        return "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID"
-                    stream = bundle.extractfile(member)
-                    values[relative] = json.loads(stream.read(262145))
-            desired = values[desired_name]
-            deployed = values[deployed_name]
-        else:
-            desired = read_json(instance / desired_name, 262144)
-            deployed = read_json(instance / deployed_name, 262144)
-            if desired.get("revision") != revision or deployed.get("revision") != revision:
-                return "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING"
-        settings = desired.get("settings") if isinstance(desired, dict) else None
-        deployed_settings = deployed.get("settings") if isinstance(deployed, dict) else None
-        deployed_digest = "sha256:" + hashlib.sha256(json.dumps(deployed_settings, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
-        if (not isinstance(desired, dict) or not isinstance(deployed, dict)
-                or desired.get("schemaVersion") != 1 or desired.get("instanceId") != expected_instance_id
-                or type(desired.get("revision")) is not int or desired.get("revision") < 0
-                or not isinstance(settings, dict)
-                or not isinstance(desired.get("secrets"), dict)
-                or deployed.get("schemaVersion") != 1 or deployed.get("instanceId") != expected_instance_id
-                or type(deployed.get("revision")) is not int or deployed.get("revision") < 0
-                or not isinstance(deployed_settings, dict) or deployed.get("digest") != deployed_digest):
-            return "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID"
-        token_ref = desired["secrets"].get("tokenRef")
-        if not valid_uuid(token_ref):
-            return "WORLD_TOKEN_MISSING"
-        token_path = instance / "desired-secrets" / (token_ref + ".token")
-        token_info = token_path.lstat()
-        if (not stat.S_ISREG(token_info.st_mode) or token_info.st_nlink != 1
-                or token_info.st_size > 8192 or token_info.st_uid not in (0, os.geteuid())
-                or token_info.st_mode & 0o077):
-            return "WORLD_TOKEN_MISSING"
+def installed_build(instance):
+    active_path = instance / "active-release.json"
+    if not active_path.exists():
         return None
-    except FileNotFoundError:
-        return "WORLD_TOKEN_MISSING" if has_desired else "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING"
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, tarfile.TarError):
-        return "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING" if not has_desired else "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID"
+    active = read_json(active_path, 65536)
+    release_id = active.get("dstReleaseId") if isinstance(active, dict) else None
+    if not isinstance(release_id, str):
+        return None
+    try:
+        catalog = read_json(ROOT / "releases" / "catalog.json", 1024 * 1024)
+    except (FileNotFoundError, Rejected):
+        return None
+    release = next((item for item in catalog.get("releases", [])
+                    if isinstance(item, dict) and item.get("releaseId") == release_id), None)
+    return release.get("dstBuild") if release else None
 
 
 def restore_preflight(request):
@@ -382,67 +303,40 @@ def restore_preflight(request):
     exec(compile(source, "<backup-archive>", "exec"), archive_module)
     inspected = archive_module["inspect_archive"](archive, host_id, instance_id, metadata["checksum"])
     archive_manifest = inspected["manifest"]
-    world_config_blocker = world_config_snapshot_blocker(archive, archive_manifest, instance, instance_id)
     runtime, runtime_verified = runtime_state(instance_id, manifest)
     available = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
     blockers = []
-    if metadata.get("configRevision", -1) > request.get("expectedRevision", -2):
-        blockers.append("BACKUP_REVISION_NEWER_THAN_INSTANCE")
     if runtime not in ("running", "stopped", "degraded") or not runtime_verified:
         blockers.append("RUNTIME_STATE_UNVERIFIED")
-    if world_config_blocker:
-        blockers.append(world_config_blocker)
     if available < archive_info.st_size * 2:
         blockers.append("BACKUP_SPACE_INSUFFICIENT")
-    current_release = None
-    current_active = {}
-    try:
-        current_active = read_json(instance / "active-release.json", 65536)
-        current_release = current_active.get("dstReleaseId")
-    except FileNotFoundError:
-        pass
-    backup_release = metadata.get("dstReleaseId")
-    if backup_release and current_release and backup_release != current_release:
-        blockers.append("DST_RELEASE_MISMATCH")
-    if backup_release:
-        catalog_path = ROOT / "releases" / "catalog.json"
-        try:
-            catalog = read_json(catalog_path, 1024 * 1024)
-            releases = catalog.get("releases", [])
-            release = next((item for item in releases if isinstance(item, dict) and item.get("releaseId") == backup_release), None)
-            if not release or release.get("verified") is not True:
-                blockers.append("DST_RELEASE_UNAVAILABLE")
-            else:
-                artifact_blocker = release_artifact_blocker(backup_release, release)
-                if artifact_blocker:
-                    blockers.append(artifact_blocker)
-        except FileNotFoundError:
-            blockers.append("DST_RELEASE_UNAVAILABLE")
-        if archive_manifest.get("dstReleaseId") != backup_release:
-            blockers.append("BACKUP_RELEASE_MISMATCH")
+    backup_build = metadata.get("dstBuild")
+    current_build = installed_build(instance)
+    if (isinstance(backup_build, str) and isinstance(current_build, str)
+            and backup_build.isdigit() and current_build.isdigit()
+            and int(backup_build) > int(current_build)):
+        blockers.append("BACKUP_BUILD_NEWER_THAN_INSTANCE")
     current_size = 0
-    protection_roots = [instance / "data" / "Master", instance / "config" / "Cluster_1"]
+    protection_roots = [instance / "data" / "Master"]
     if manifest.get("cavesEnabled") is True:
         protection_roots.append(instance / "data" / "Caves")
     for root in protection_roots:
         for current, _, files in os.walk(root, followlinks=False):
             for name in files:
+                if name in EXCLUDED_NAMES:
+                    continue
                 info = (Path(current) / name).lstat()
-                if stat.S_ISREG(info.st_mode) and name not in ("cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt"):
+                if stat.S_ISREG(info.st_mode):
                     current_size += info.st_size
     required = archive_info.st_size + int(archive_manifest.get("sizeBytes", 0)) + current_size + max(current_size // 10, 1024 * 1024)
     if available < required:
         blockers.append("RESTORE_SPACE_INSUFFICIENT")
-    if manifest.get("configRevision") >= 9007199254740991:
-        blockers.append("CONFIG_REVISION_EXHAUSTED")
-    protection = {"configRevision": manifest.get("configRevision"), "runtimeStatus": runtime,
-                  "activeReleaseId": current_release, "estimatedSizeBytes": current_size}
+    protection = {"runtimeStatus": runtime, "estimatedSizeBytes": current_size}
     return {"schemaVersion": 1, "requestId": request["requestId"],
             "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
             "backupId": backup_id, "backupChecksum": metadata["checksum"],
-            "backupSizeBytes": archive_info.st_size, "backupConfigRevision": metadata.get("configRevision", 0),
-            "backupDstReleaseId": backup_release, "runtimeStatus": runtime,
-            "availableBytes": available, "currentProtection": protection,
+            "backupSizeBytes": archive_info.st_size, "backupBuild": backup_build,
+            "runtimeStatus": runtime, "availableBytes": available, "currentProtection": protection,
             "allowed": not blockers, "blockers": blockers}
 
 

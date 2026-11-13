@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import uuid
 
 ROOT = Path("/var/lib/famine-hub")
@@ -82,6 +83,64 @@ def validate_release(value):
     return value
 
 
+def image_sizes(releases):
+    digests = sorted({item["imageDigest"] for item in releases})
+    if not digests:
+        return {}
+    environment = dict(os.environ)
+    for key in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "DOCKER_CONFIG"):
+        environment.pop(key, None)
+    environment.update({"LC_ALL": "C", "DOCKER_HOST": "unix:///var/run/docker.sock"})
+    try:
+        result = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}} {{.Size}}", *digests],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, timeout=10, check=False, env=environment)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    if result.returncode != 0:
+        return {}
+    sizes = {}
+    for row in result.stdout.splitlines():
+        parts = row.split()
+        if len(parts) == 2 and parts[0].startswith("sha256:") and parts[1].isdigit():
+            sizes[parts[0]] = int(parts[1])
+    return sizes
+
+
+def release_usage():
+    used = set()
+    try:
+        registry = read_json(ROOT / "registry.json", 2 * 1024 * 1024)
+    except (FileNotFoundError, Rejected):
+        return used
+    for entry in registry.get("instances", []):
+        if isinstance(entry, dict) and valid_uuid(entry.get("dstReleaseId")):
+            used.add(entry["dstReleaseId"])
+    instances_root = ROOT / "instances"
+    if not instances_root.is_dir():
+        return used
+    for instance_dir in instances_root.iterdir():
+        if not instance_dir.is_dir() or not valid_uuid(instance_dir.name):
+            continue
+        for name in ("manifest.json", "active-release.json"):
+            path = instance_dir / name
+            try:
+                value = read_json(path, 65536)
+            except (FileNotFoundError, Rejected):
+                continue
+            if isinstance(value, dict) and valid_uuid(value.get("dstReleaseId")):
+                used.add(value["dstReleaseId"])
+        retained = instance_dir / "retained-releases.json"
+        try:
+            value = read_json(retained, 65536)
+        except (FileNotFoundError, Rejected):
+            continue
+        release_ids = value.get("releaseIds") if isinstance(value, dict) else None
+        if isinstance(release_ids, list):
+            used.update(item for item in release_ids if valid_uuid(item))
+    return used
+
+
 def inspect(request):
     host_id = request.get("hostId")
     if not valid_uuid(host_id):
@@ -98,6 +157,16 @@ def inspect(request):
             or not isinstance(catalog.get("releases"), list) or len(catalog["releases"]) > MAX_RELEASES):
         reject("CREATE_RELEASE_CATALOG_INVALID")
     releases = [validate_release(item) for item in catalog["releases"]]
+    sizes = image_sizes(releases)
+    used = release_usage()
+    verified = [item for item in releases if item["verified"]]
+    newest_id = max(verified, key=lambda item: (int(item["dstBuild"]) if item["dstBuild"].isdigit() else -1,
+                                                item.get("createdAt") or ""),
+                    default={}).get("releaseId")
+    releases = [dict(item, imageSize=sizes.get(item["imageDigest"]),
+                     inUse=item["releaseId"] in used,
+                     reclaimable=item["releaseId"] not in used and item["releaseId"] != newest_id)
+                for item in releases]
     return {"schemaVersion": 1, "hostId": host_id,
             "catalogDigest": "sha256:" + hashlib.sha256(json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             "releases": releases,

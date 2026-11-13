@@ -122,17 +122,22 @@ def render_compose(manifest, release, instance_root):
     mods_release_id = manifest.get("modsReleaseId") or release["releaseId"]
     if not valid_uuid(mods_release_id):
         reject("CREATE_MANIFEST_INVALID")
+    dst_root = Path(instance_root).parent.parent / "dst" / release["releaseId"]
+    shared_dst = dst_root.is_dir()
     services = ["master"] + (["caves"] if caves else [])
     lines = ["services:"]
     for shard in services:
         command_value = release["commands"][shard]
-        if manifest.get("modsReleaseId"):
+        if manifest.get("modsReleaseId") or shared_dst:
             command_value = command_value + ["-ugc_directory", "/srv/ugc"]
         lines.extend(["  " + shard + ":", "    image: " + quote(release["image"] + "@" + release["imageDigest"]),
                       "    init: true", "    restart: " + quote("unless-stopped" if manifest.get("autostart") else "no"),
                       "    command:"])
         lines.extend("      - " + quote(item) for item in command_value)
-        lines.extend(["    working_dir: '/srv/dst/bin64'", "    volumes:",
+        lines.extend(["    working_dir: '/srv/dst/bin64'", "    volumes:"])
+        if shared_dst:
+            lines.append("      - " + quote(str(dst_root) + ":/srv/dst:ro"))
+        lines.extend([
                       "      - " + quote(instance_root + "/data/" + ("Caves" if shard == "caves" else "Master") + ":/srv/data:rw"),
                       "      - " + quote(instance_root + "/config:/srv/data/config:rw"),
                       "      - " + quote(instance_root + "/mods/releases/" + mods_release_id + "/" + ("Caves" if shard == "caves" else "Master") + ":/srv/ugc:rw")])

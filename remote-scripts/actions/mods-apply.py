@@ -492,11 +492,8 @@ def verify_mod_release(release_root, mods, roles, download_ns):
             reject("MOD_RELEASE_CONTENT_INVALID")
 
 
-def backup_current(instance, manifest, request, roles, archive_ns, backup_id):
-    backup_root = ROOT / "backups" / request["instanceId"]
-    safe_dir(ROOT / "backups", create=True); safe_dir(backup_root, create=True)
-    backup = backup_root / backup_id
-    backup.mkdir(mode=0o700)
+def backup_current(instance, request, roles, archive_ns, backup_id, backup):
+    backup.mkdir(mode=0o700, parents=True)
     active = read_json(instance / "active-release.json", 65536, missing={})
     roots = ["config/Cluster_1", "desired/mods.json",
              "active-release.json", "manifest.json", "compose.yaml"]
@@ -770,7 +767,8 @@ def worker(task_id):
         completed_stage = "stop" if runtime_before == "running" else "prepare"
         if request["createProtectionBackup"]:
             CURRENT_STAGE = "backup"
-            backup_id = backup_current(instance, manifest, request, roles, archive_ns, protection_id)
+            backup_id = backup_current(instance, request, roles, archive_ns, protection_id,
+                                       directory / "protection" / protection_id)
             transaction["protectionBackupId"] = backup_id
             atomic_json(directory / "transaction.json", transaction)
             set_status(directory, "running", "backup", completed=completed_stage,
@@ -836,7 +834,7 @@ def worker(task_id):
                 CURRENT_STAGE = "rollback"
                 if runtime_before == "running":
                     compose(instance, manifest, "stop", *roles)
-                backup_path = ROOT / "backups" / request["instanceId"] / backup_id
+                backup_path = directory / "protection" / backup_id
                 restore_stage = restore_paths_from_backup(instance, archive_ns, restore_ns, backup_path, request,
                     backup_id, roles, remove_mod_release_id=mod_release_id)
                 restored_active = read_json(restore_stage / "active-release.json", 65536)
@@ -1022,7 +1020,7 @@ def reconcile_interrupted(request, state):
             archive_ns, _, _, restore_ns, _ = load_task_sources(directory)
             if transaction.get("runtimeBefore") == "running":
                 compose(instance, current_manifest, "stop", *roles)
-            backup_path = ROOT / "backups" / request["instanceId"] / backup_id
+            backup_path = directory / "protection" / backup_id
             stage = restore_paths_from_backup(instance, archive_ns, restore_ns, backup_path, request, backup_id,
                 roles, remove_mod_release_id=transaction.get("newModsReleaseId"))
             previous_manifest = read_json(stage / "manifest.json", 65536)

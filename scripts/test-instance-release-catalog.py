@@ -36,7 +36,7 @@ class CatalogTests(unittest.TestCase):
             info = original_fstat(fd)
             values = list(info); values[4] = 0
             return os.stat_result(values)
-        self.patches = [patch.object(MODULE, "ROOT", root), patch.object(MODULE, "CATALOG", root / "releases" / "catalog.json"), patch.object(MODULE.os, "geteuid", return_value=0), patch.object(Path, "lstat", root_owned), patch.object(MODULE.os, "fstat", root_fstat)]
+        self.patches = [patch.object(MODULE, "ROOT", root), patch.object(MODULE, "CATALOG", root / "releases" / "catalog.json"), patch.object(MODULE.os, "geteuid", return_value=0), patch.object(Path, "lstat", root_owned), patch.object(MODULE.os, "fstat", root_fstat), patch.object(MODULE.subprocess, "run", side_effect=FileNotFoundError)]
         for item in self.patches: item.start()
 
     def tearDown(self):
@@ -77,6 +77,33 @@ class CatalogTests(unittest.TestCase):
         MODULE.CATALOG.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "releases": [release]}))
         MODULE.CATALOG.chmod(0o600)
         self.assertEqual(MODULE.inspect({"hostId": HOST})["blockers"], ["CREATE_RELEASE_REQUIRED"])
+
+    def test_marks_active_and_reclaimable_releases(self):
+        active = dict(RELEASE, dstBuild="2")
+        stale = dict(RELEASE, releaseId="66666666-6666-4666-8666-666666666666", dstBuild="1")
+        catalog = {"schemaVersion": 1, "hostId": HOST, "releases": [active, stale]}
+        MODULE.CATALOG.write_text(json.dumps(catalog))
+        MODULE.CATALOG.chmod(0o600)
+        registry = self.root / "registry.json"
+        registry.write_text(json.dumps({"schemaVersion": 1, "hostId": HOST, "registryRevision": 1,
+            "instances": [{"instanceId": "77777777-7777-4777-8777-777777777777",
+                           "lifecycle": "ready", "dstReleaseId": RELEASE["releaseId"]}]}))
+        registry.chmod(0o600)
+        result = MODULE.inspect({"hostId": HOST})
+        by_id = {item["releaseId"]: item for item in result["releases"]}
+        self.assertTrue(by_id[active["releaseId"]]["inUse"])
+        self.assertFalse(by_id[active["releaseId"]]["reclaimable"])
+        self.assertFalse(by_id[stale["releaseId"]]["inUse"])
+        self.assertTrue(by_id[stale["releaseId"]]["reclaimable"])
+
+    def test_image_sizes_are_read_from_docker_inspect(self):
+        completed = type("Completed", (), {
+            "returncode": 0,
+            "stdout": RELEASE["imageDigest"] + " 12345\n",
+        })()
+        with patch.object(MODULE.subprocess, "run", return_value=completed):
+            sizes = MODULE.image_sizes([RELEASE])
+        self.assertEqual(sizes, {RELEASE["imageDigest"]: 12345})
 
 
 if __name__ == "__main__":

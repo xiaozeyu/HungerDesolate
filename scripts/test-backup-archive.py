@@ -62,17 +62,19 @@ class BackupArchiveTests(unittest.TestCase):
         self.assertIn("config/Cluster_1/Master/server.ini",
                       [item["path"] for item in verified["manifest"]["files"]])
 
-    def test_secret_names_are_excluded_only_at_instance_config_and_root(self):
+    def test_secret_and_log_names_are_excluded_everywhere(self):
         (self.source / "config" / "Cluster_1" / "adminlist.txt").write_text("STEAM_1\n")
         mod_content = self.source / "mods" / "releases" / "mods-1" / "Master" / "adminlist.txt"
         mod_content.parent.mkdir(parents=True)
         mod_content.write_text("mod-owned file\n")
+        (self.source / "Master" / "server_log.txt").write_text("runtime log\n")
         created = MODULE.create_archive(self.source, self.archive, self.identity)
         verified = MODULE.inspect_archive(self.archive, HOST, INSTANCE, created["checksum"])
         paths = {item["path"] for item in verified["manifest"]["files"]}
         self.assertNotIn("config/Cluster_1/adminlist.txt", paths)
         self.assertNotIn("cluster_token.txt", paths)
-        self.assertIn("mods/releases/mods-1/Master/adminlist.txt", paths)
+        self.assertNotIn("mods/releases/mods-1/Master/adminlist.txt", paths)
+        self.assertNotIn("Master/server_log.txt", paths)
 
     def test_quasihot_archive_hashes_the_bytes_captured_in_one_read_pass(self):
         archive = self.root / "changing.tar.gz"

@@ -205,8 +205,9 @@ fn invoke_download(session: &Session, payload: &Value) -> CommandResult<Value> {
         )
     })?);
     let script = STANDARD.encode(DOWNLOAD_SCRIPT.as_bytes());
+    let probe = STANDARD.encode(PROBE_SCRIPT.as_bytes());
     let source = format!(
-        "import base64,json\nworker_source=base64.b64decode('{script}').decode('utf-8')\nnamespace={{'__name__':'host_mods_download'}}\nexec(compile(worker_source,'<host-mods-download>','exec'),namespace)\ntry:\n    namespace['main'](json.loads(base64.b64decode('{request}').decode('utf-8')),worker_source)\nexcept Exception:\n    print(json.dumps({{'ok':False,'code':'HOST_MOD_TASK_CONTROLLER_FAILED'}},separators=(',',':')))\n"
+        "import base64,json\nworker_source=base64.b64decode('{script}').decode('utf-8')\nprobe_source=base64.b64decode('{probe}').decode('utf-8')\nnamespace={{'__name__':'host_mods_download'}}\nexec(compile(worker_source,'<host-mods-download>','exec'),namespace)\ntry:\n    namespace['main'](json.loads(base64.b64decode('{request}').decode('utf-8')),worker_source,probe_source)\nexcept Exception:\n    print(json.dumps({{'ok':False,'code':'HOST_MOD_TASK_CONTROLLER_FAILED'}},separators=(',',':')))\n"
     );
     run_python(session, &source)
 }

@@ -1,5 +1,6 @@
 """Atomically register a successfully built, not-yet-runtime-verified release."""
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 
 ROOT = Path("/var/lib/famine-hub")
 STAGING = ROOT / "staging"
+DST = ROOT / "dst"
 RELEASES = ROOT / "releases"
 CATALOG = RELEASES / "catalog.json"
 LOCK = RELEASES / "catalog.lock"
@@ -104,6 +106,47 @@ def release_entry(metadata, release_id):
     )} | {"verified": True, "runtimeVerified": False}
 
 
+def content_digest(root):
+    files = []
+    for current, directories, names in os.walk(root, followlinks=False):
+        directory = Path(current)
+        for name in directories:
+            if (directory / name).is_symlink():
+                reject("CREATE_RELEASE_DST_DIR_INVALID")
+        for name in names:
+            path = directory / name
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                reject("CREATE_RELEASE_DST_DIR_INVALID")
+            files.append((path.relative_to(root).as_posix(), path))
+    digest = hashlib.sha256()
+    for relative, path in sorted(files, key=lambda item: os.fsencode(item[0])):
+        file_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest.update(f"{file_digest}  ./{relative}\n".encode())
+    return digest.hexdigest()
+
+
+def verify_dst_directory(path, metadata):
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid(), 1000)
+            or info.st_mode & 0o022):
+        reject("CREATE_RELEASE_DST_DIR_INVALID")
+    version = path / "version.txt"
+    binary = path / "bin64" / "dontstarve_dedicated_server_nullrenderer_x64"
+    scripts = path / "data" / "databundles" / "scripts.zip"
+    for file, executable in ((version, False), (binary, True), (scripts, False)):
+        file_info = file.lstat()
+        if not stat.S_ISREG(file_info.st_mode) or file_info.st_size <= 0:
+            reject("CREATE_RELEASE_DST_DIR_INVALID")
+        if executable and not file_info.st_mode & 0o111:
+            reject("CREATE_RELEASE_DST_DIR_INVALID")
+    if version.read_text(encoding="utf-8").strip() != metadata["dstBuild"]:
+        reject("CREATE_RELEASE_BUILD_MISMATCH")
+    expected = metadata.get("artifactDigest")
+    if expected != "sha256:" + content_digest(path):
+        reject("CREATE_RELEASE_DST_DIGEST_MISMATCH")
+
+
 def verify_image(metadata):
     environment = dict(os.environ)
     for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "DOCKER_CONFIG"):
@@ -119,14 +162,19 @@ def verify_image(metadata):
             reject("CREATE_RELEASE_IMAGE_DIGEST_MISMATCH")
 
         image_id = metadata["imageDigest"]
+        dst_dir = DST / metadata["releaseId"]
+        shared = dst_dir.is_dir()
+        volume = ["--volume", str(dst_dir) + ":/srv/dst:ro"] if shared else []
+        if shared:
+            verify_dst_directory(dst_dir, metadata)
         version_check = subprocess.run(
-            ["docker", "run", "--rm", "--network", "none", "--entrypoint", "/bin/sh", image_id,
+            ["docker", "run", "--rm", "--network", "none", *volume, "--entrypoint", "/bin/sh", image_id,
              "-ec", "cat /srv/dst/version.txt"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, timeout=30, check=False, env=environment,
         )
         binary_check = subprocess.run(
-            ["docker", "run", "--rm", "--network", "none", "--entrypoint", "/bin/sh", image_id,
+            ["docker", "run", "--rm", "--network", "none", *volume, "--entrypoint", "/bin/sh", image_id,
              "-ec", "test -x /srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64 && "
                    "ldd /srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -248,6 +296,12 @@ def register(release_id):
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
+    try:
+        (STAGING / release_id / "artifact.tar").unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        print("ARTIFACT_CLEANUP_FAILED", file=sys.stderr)
 
 
 def main(request=None):

@@ -24,7 +24,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [运维增强规划](ops-enhancements-plan.md) | 三个功能的优先级、依赖、难度、里程碑和共同约束 |
-| [DST 更新设计](dst-update-plan.md) | 更新检查、Release 固定、保护点、发布切换、验证和回滚 |
+| [DST 更新设计](dst-update-plan.md) | Release 页检查更新、专服页切换版本、世界存档保护点、验证、回滚和磁盘治理 |
 | [定时备份设计](scheduled-backup-plan.md) | 远端 scheduler、准热备份策略、幂等、保留和空间管理 |
 | [玩家列表设计](player-list-plan.md) | 服务端桥接 MOD、Master/Caves 合并、玩家列表和踢出 |
 | [Release 管理列表 UI 规划](release-management-ui-plan.md) | Release 列表字段、摘要、空状态、响应式与操作层级 |

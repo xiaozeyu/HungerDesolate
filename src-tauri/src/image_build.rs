@@ -12,6 +12,8 @@ use std::{
 
 const BUILD_SCRIPT: &str = include_str!("../../remote-scripts/actions/build-dst-image.sh");
 const DOCKERFILE: &str = include_str!("../../docker/runtime/Dockerfile");
+const BUILD_BASE_DOCKERFILE: &str = include_str!("../../docker/runtime/Dockerfile.build-base");
+const RUNTIME_BASE_DOCKERFILE: &str = include_str!("../../docker/runtime/Dockerfile.runtime-base");
 const BASE_IMAGE_SCRIPT: &str = include_str!("../../docker/runtime/prepare-base-image.sh");
 const INSTALL_SCRIPT: &str = include_str!("../../docker/runtime/install-dst.sh");
 const FETCH_WORKSHOP_SCRIPT: &str = include_str!("../../docker/runtime/fetch-workshop.sh");
@@ -209,6 +211,20 @@ fn execute_build(session: &Session, release_id: &str) -> CommandResult<()> {
     )?;
     upload_script(
         session,
+        &format!("{script_dir}/Dockerfile.build-base"),
+        BUILD_BASE_DOCKERFILE,
+        0o644,
+        "Dockerfile.build-base",
+    )?;
+    upload_script(
+        session,
+        &format!("{script_dir}/Dockerfile.runtime-base"),
+        RUNTIME_BASE_DOCKERFILE,
+        0o644,
+        "Dockerfile.runtime-base",
+    )?;
+    upload_script(
+        session,
         &format!("{script_dir}/prepare-base-image.sh"),
         BASE_IMAGE_SCRIPT,
         0o644,
@@ -361,14 +377,20 @@ fn parse_build_progress(log_content: &str) -> (BuildStatus, Option<BuildProgress
         Some(("登记 Release".to_string(), 95))
     } else if log_content.contains("==> 生成 release 元数据") {
         Some(("生成元数据".to_string(), 90))
+    } else if log_content.contains("==> 校验共享运行时镜像") {
+        Some(("校验运行时镜像".to_string(), 80))
     } else if log_content.contains("==> 提取 DST build 版本") {
         Some(("提取版本信息".to_string(), 80))
-    } else if log_content.contains("SteamCMD phase=download") {
+    } else if log_content.contains("==> 下载 DST 服务端到宿主机")
+        || log_content.contains("SteamCMD phase=download")
+    {
         Some(("下载并校验 DST 服务端".to_string(), 65))
     } else if log_content.contains("SteamCMD phase=bootstrap") {
         Some(("初始化 SteamCMD".to_string(), 55))
     } else if log_content.contains("==> 开始构建 Docker 镜像") {
         Some(("正在构建镜像".to_string(), 50))
+    } else if log_content.contains("==> 准备稳定基础镜像") {
+        Some(("准备共享基础镜像".to_string(), 40))
     } else if log_content.contains("==> 准备 Debian 基础镜像") {
         Some(("准备 Debian 基础镜像".to_string(), 20))
     } else if log_content.contains("==> 准备构建目录") {

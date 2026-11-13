@@ -28,7 +28,7 @@ const taskLabels: Record<string, string> = {
   backupDownload: "下载备份",
   hostModPrepare: "准备主机 MOD",
   dockerInstall: "安装 Docker",
-  instanceUpdate: "更新专服",
+  instanceUpdate: "切换 DST 版本",
 };
 
 const stageLabels: Record<string, string> = {

@@ -157,6 +157,8 @@ export interface TaskResult {
     preparedMods?: {workshopId: string; contentDigest: string; updateCandidate: boolean;
         previousArtifactDigest?: string | null}[];
     modsWarnings?: string[];
+    autoCleanupDeleted?: number;
+    autoCleanupError?: string;
 }
 
 export interface MutationResult<T> {

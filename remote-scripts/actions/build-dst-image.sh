@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在远端主机上构建 DST runtime 镜像
 # 此脚本通过 SSH 执行，不需要本地 Docker
-set -euo pipefail
+set -eEuo pipefail
 umask 077
 trap 'status=$?; printf "\nFAMINE_BUILD_FAILED:%s\n错误：命令执行失败（退出码 %s）：%s\n" "$status" "$status" "$BASH_COMMAND" >&2; exit "$status"' ERR
 
@@ -11,6 +11,67 @@ STAGING_DIR="/var/lib/famine-hub/staging"
 RELEASE_ID="${1:-}"
 STEAMCMD_BOOTSTRAP_DEADLINE="${STEAMCMD_BOOTSTRAP_DEADLINE:-3600s}"
 STEAMCMD_DOWNLOAD_DEADLINE="${STEAMCMD_DOWNLOAD_DEADLINE:-1800s}"
+SCRIPT_VERSION="V3-$(cat "${SCRIPT_DIR}/actions/Dockerfile.build-base" \
+    "${SCRIPT_DIR}/actions/Dockerfile.runtime-base" \
+    "${SCRIPT_DIR}/actions/install-dst.sh" \
+    "${SCRIPT_DIR}/actions/fetch-workshop.sh" | sha256sum | cut -c1-12)"
+BUILD_BASE_IMAGE="hungerdesolate/dst-build-base:${SCRIPT_VERSION}"
+RUNTIME_IMAGE_NAME="hungerdesolate/dst-runtime-base"
+RUNTIME_BASE_IMAGE="${RUNTIME_IMAGE_NAME}:${SCRIPT_VERSION}"
+DST_ROOT="/var/lib/famine-hub/dst"
+DST_DOWNLOAD="$DST_ROOT/.staging-${RELEASE_ID}"
+DST_PUBLISHED=0
+DST_REGISTERED=0
+BUILD_CLEANED=0
+
+cleanup_build_artifacts() {
+    local root_dir
+    root_dir=$(dirname "$BUILD_DIR")
+    cd "$BUILD_DIR" 2>/dev/null || true
+    rm -rf "$BUILD_DIR/dst-runtime-build" "$DST_DOWNLOAD" "$DST_ROOT"/.staging-*
+    docker builder prune --all -f >/dev/null 2>&1 || echo 'IMAGE_BUILD_CACHE_CLEANUP_FAILED' >&2
+    find "$root_dir" -maxdepth 1 -type f -name 'build-*.log' -mtime +7 -delete 2>/dev/null || true
+}
+
+available_bytes() {
+    df -Pk "$BUILD_DIR" | awk 'NR == 2 { printf "%.0f\n", $4 * 1024 }'
+}
+
+release_payload_bytes() {
+    local size
+    if [ -d "$DST_ROOT" ]; then
+        size=$(find "$DST_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.staging-*' -print0 \
+            | xargs -0 -r du -sb 2>/dev/null | sort -nr | head -n 1 | cut -f1)
+        if [ -n "$size" ]; then
+            echo "$size"
+            return
+        fi
+    fi
+    echo $((6 * 1024 * 1024 * 1024))
+}
+
+preflight_space() {
+    local required available
+    required=$(( $(release_payload_bytes) * 2 + 2 * 1024 * 1024 * 1024 ))
+    available=$(available_bytes)
+    if [ "$available" -lt "$required" ]; then
+        printf 'IMAGE_BUILD_SPACE_INSUFFICIENT: required=%s available=%s\n' "$required" "$available" >&2
+        echo 'FAMINE_BUILD_FAILED:1' >&2
+        exit 1
+    fi
+    printf '==> 磁盘空间检查通过 available=%s required=%s\n' "$available" "$required"
+}
+
+ensure_base_image() {
+    local tag=$1 file=$2
+    shift 2
+    if docker image inspect "$tag" --format '{{.Id}}' >/dev/null 2>&1; then
+        printf '==> 基础镜像已存在 %s\n' "$tag"
+        return
+    fi
+    DOCKER_BUILDKIT=1 docker build --platform linux/amd64 --tag "$tag" "$@" -f "$file" \
+        --progress=plain "$SCRIPT_DIR/actions"
+}
 
 if [ -z "$RELEASE_ID" ]; then
     echo "错误：缺少 RELEASE_ID 参数" >&2
@@ -56,63 +117,100 @@ if ! flock -n 9; then
 fi
 # Docker children inherit fd 9; release the lock explicitly on exit so a
 # successful build cannot leave the cache-cleanup lock permanently busy.
-trap 'flock -u 9 2>/dev/null || true' EXIT
+cleanup_on_exit() {
+    local status=$?
+    if [ "$BUILD_CLEANED" -eq 0 ]; then
+        if [ "$DST_PUBLISHED" -eq 1 ] && [ "$DST_REGISTERED" -eq 0 ]; then
+            rm -rf "$DST_ROOT/$RELEASE_ID"
+        fi
+        cleanup_build_artifacts
+    fi
+    flock -u 9 2>/dev/null || true
+    exit "$status"
+}
+trap cleanup_on_exit EXIT
+
+echo '==> 检查构建磁盘空间'
+preflight_space
 
 echo "==> 准备构建目录"
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# 清理旧的构建文件
-rm -rf dst-runtime-build
-mkdir dst-runtime-build
-cd dst-runtime-build
-cp "${SCRIPT_DIR}/actions/install-dst.sh" ./install-dst.sh
-cp "${SCRIPT_DIR}/actions/fetch-workshop.sh" ./fetch-workshop.sh
-
-cp "${SCRIPT_DIR}/actions/Dockerfile" ./Dockerfile
-
-printf '==> 构建参数（bootstrap 超时=%s，DST 下载超时=%s；每阶段最多 3 次）\n' \
+printf '==> 构建参数（bootstrap 超时=%s，DST 下载超时=%s）\n' \
     "$STEAMCMD_BOOTSTRAP_DEADLINE" "$STEAMCMD_DOWNLOAD_DEADLINE"
-IMAGE_NAME="hungerdesolate/dst-runtime"
-BUILD_TAG="release-${RELEASE_ID}"
-
 echo '==> 准备 Debian 基础镜像'
 bash "${SCRIPT_DIR}/actions/prepare-base-image.sh" 9>&-
 
-echo '==> 开始构建 Docker 镜像'
-DOCKER_BUILDKIT=1 docker build 9>&- \
-    --platform linux/amd64 \
-    --build-arg "STEAMCMD_BOOTSTRAP_DEADLINE=${STEAMCMD_BOOTSTRAP_DEADLINE}" \
-    --build-arg "STEAMCMD_DOWNLOAD_DEADLINE=${STEAMCMD_DOWNLOAD_DEADLINE}" \
-    --tag "${IMAGE_NAME}:${BUILD_TAG}" \
-    --progress=plain \
-    .
+echo '==> 准备稳定基础镜像'
+ensure_base_image "$BUILD_BASE_IMAGE" "${SCRIPT_DIR}/actions/Dockerfile.build-base" \
+    --build-arg "STEAMCMD_BOOTSTRAP_DEADLINE=${STEAMCMD_BOOTSTRAP_DEADLINE}"
+ensure_base_image "$RUNTIME_BASE_IMAGE" "${SCRIPT_DIR}/actions/Dockerfile.runtime-base" \
+    --build-arg "BUILD_BASE_IMAGE=${BUILD_BASE_IMAGE}"
 
-echo "==> 获取镜像 digest"
-IMAGE_DIGEST=$(docker image inspect "${IMAGE_NAME}:${BUILD_TAG}" --format='{{.Id}}')
-if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo 'BUILD_IMAGE_ID_INVALID: Docker returned an invalid local image ID' >&2
+echo '==> 准备 DST 目录'
+mkdir -p "$DST_ROOT"
+chmod 700 "$DST_ROOT"
+if [ -e "$DST_ROOT/$RELEASE_ID" ]; then
+    echo 'DST_RELEASE_DIR_EXISTS: release directory already exists' >&2
     echo 'FAMINE_BUILD_FAILED:1' >&2
     exit 1
 fi
 
-echo "==> 验证固定 SteamCMD Workshop 获取能力"
-docker run 9>&- --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
-    -ec 'test -x /usr/local/bin/famine-workshop-fetch && test -s /srv/capabilities/workshop-fetch && grep -Fxq steamcmd-workshop-v1 /srv/capabilities/workshop-fetch'
+echo '==> 下载 DST 服务端到宿主机'
+rm -rf "$DST_DOWNLOAD"
+mkdir -p "$DST_DOWNLOAD"
+chown 1000:1000 "$DST_DOWNLOAD"
+DST_BASE=""
+if [ -d "$DST_ROOT" ]; then
+    DST_BASE=$(ls -1dt "$DST_ROOT"/*/ 2>/dev/null | head -n 1) || DST_BASE=""
+    DST_BASE=${DST_BASE%/}
+fi
+if [ -n "$DST_BASE" ]; then
+    echo "==> 复用最近 DST 目录作为增量基线: ${DST_BASE}"
+    cp -a "$DST_BASE/." "$DST_DOWNLOAD/"
+    chown -R 1000:1000 "$DST_DOWNLOAD"
+fi
+docker run 9>&- --rm --network bridge --user 1000:1000 --env HOME=/home/steam \
+    -v "$DST_DOWNLOAD:/dst" --env DST_DIR=/dst \
+    --env "STEAMCMD_DOWNLOAD_DEADLINE=${STEAMCMD_DOWNLOAD_DEADLINE}" \
+    "$BUILD_BASE_IMAGE" /bin/bash /home/steam/install-dst.sh download
 
-echo "==> 提取 DST build 版本"
-DST_BUILD=$(docker run 9>&- --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
-    -ec 'cat /srv/dst/version.txt')
+if [ ! -x "$DST_DOWNLOAD/bin64/dontstarve_dedicated_server_nullrenderer_x64" ] \
+    || [ ! -s "$DST_DOWNLOAD/version.txt" ] \
+    || [ ! -s "$DST_DOWNLOAD/data/databundles/scripts.zip" ]; then
+    echo 'DST_ARTIFACT_INVALID: downloaded DST content is incomplete' >&2
+    echo 'FAMINE_BUILD_FAILED:1' >&2
+    exit 1
+fi
+mkdir -p "$DST_DOWNLOAD/mods"
+: > "$DST_DOWNLOAD/mods/dedicated_server_mods_setup.lua"
+chown 1000:1000 "$DST_DOWNLOAD/mods" "$DST_DOWNLOAD/mods/dedicated_server_mods_setup.lua"
+DST_BUILD=$(tr -d '[:space:]' < "$DST_DOWNLOAD/version.txt")
 if ! [[ "$DST_BUILD" =~ ^[0-9]+$ ]]; then
     echo 'DST_BUILD_INVALID: version.txt must contain a numeric DST build' >&2
     echo 'FAMINE_BUILD_FAILED:1' >&2
     exit 1
 fi
+DST_CONTENT_DIGEST=$(cd "$DST_DOWNLOAD" && find . -type f -print0 | LC_ALL=C sort -z \
+    | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)
 
+echo '==> 校验共享运行时镜像'
+IMAGE_DIGEST=$(docker image inspect "$RUNTIME_BASE_IMAGE" --format='{{.Id}}')
+if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo 'BUILD_IMAGE_ID_INVALID: Docker returned an invalid local image ID' >&2
+    echo 'FAMINE_BUILD_FAILED:1' >&2
+    exit 1
+fi
+docker run 9>&- --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
+    -ec 'test -x /usr/local/bin/famine-workshop-fetch && test -s /srv/capabilities/workshop-fetch && grep -Fxq steamcmd-workshop-v1 /srv/capabilities/workshop-fetch'
+
+mv "$DST_DOWNLOAD" "$DST_ROOT/$RELEASE_ID"
+DST_PUBLISHED=1
 echo "DST Build: ${DST_BUILD}"
+echo "DST content digest: sha256:${DST_CONTENT_DIGEST}"
 
 echo "==> 生成 release 元数据"
-SCRIPT_VERSION="V2-$(date +%Y%m%d)"
 
 mkdir -p "${STAGING_DIR}/${RELEASE_ID}"
 cd "${STAGING_DIR}/${RELEASE_ID}"
@@ -122,10 +220,10 @@ cat > release-metadata.json <<EOF
   "schemaVersion": 1,
   "releaseId": "${RELEASE_ID}",
   "platform": "linux/amd64",
-  "image": "${IMAGE_NAME}",
+  "image": "${RUNTIME_IMAGE_NAME}",
   "imageDigest": "${IMAGE_DIGEST}",
   "dstBuild": "${DST_BUILD}",
-  "artifactDigest": "${IMAGE_DIGEST}",
+  "artifactDigest": "sha256:${DST_CONTENT_DIGEST}",
   "scriptVersion": "${SCRIPT_VERSION}",
   "verified": false,
   "runtimeVerified": false,
@@ -155,14 +253,18 @@ sudo chown root:root "${STAGING_DIR}/${RELEASE_ID}" "${STAGING_DIR}/${RELEASE_ID
 sudo chmod 700 "${STAGING_DIR}/${RELEASE_ID}"
 sudo chmod 600 "${STAGING_DIR}/${RELEASE_ID}/release-metadata.json"
 sudo python3 -I "${SCRIPT_DIR}/actions/register-built-release.py" "${RELEASE_ID}" 9>&-
+DST_REGISTERED=1
 
-echo "==> 镜像构建完成"
+echo "==> DST Release 准备完成"
 echo "Release ID: ${RELEASE_ID}"
-echo "Image: ${IMAGE_NAME}:${BUILD_TAG}"
-echo "Digest: ${IMAGE_DIGEST}"
+echo "Runtime image: ${RUNTIME_IMAGE_NAME}@${IMAGE_DIGEST}"
+echo "DST directory: ${DST_ROOT}/${RELEASE_ID}"
 echo "DST Build: ${DST_BUILD}"
 echo "Metadata: ${STAGING_DIR}/${RELEASE_ID}/release-metadata.json"
 echo ""
-echo "镜像已保存到 Docker，可以直接使用"
+echo "DST 目录已保存，可直接用于切换或创建实例"
+echo "==> 清理构建缓存"
+cleanup_build_artifacts
+BUILD_CLEANED=1
 flock -u 9 2>/dev/null || true
 echo 'FAMINE_BUILD_COMPLETED'

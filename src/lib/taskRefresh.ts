@@ -3,6 +3,7 @@ import { useDockerTasks } from "../composables/useDockerTasks";
 import { getHostModTask } from "../api/hostMods";
 import { getInstanceBackupTask, getInstanceCreateStatus, getInstanceRestoreTask } from "../api/instances";
 import { getInstanceModApplyTask } from "../api/mods";
+import { getInstanceUpdateTask } from "../api/updates";
 import type { HostTarget, InstanceTarget, ServerSummary, TaskSnapshot } from "../types/contracts";
 
 const inFlight = new Set<string>();
@@ -67,6 +68,15 @@ export async function refreshTask(task: TaskSnapshot, servers: ServerSummary[]):
       const target = instanceTargetOf(task);
       if (!target) return null;
       const response = await getInstanceRestoreTask({
+        schemaVersion: 1, requestId, target,
+        expectedRecordVersion: server.recordVersion, operationId: task.operationId,
+      });
+      return response.task;
+    }
+    case "instanceUpdate": {
+      const target = instanceTargetOf(task);
+      if (!target) return null;
+      const response = await getInstanceUpdateTask({
         schemaVersion: 1, requestId, target,
         expectedRecordVersion: server.recordVersion, operationId: task.operationId,
       });

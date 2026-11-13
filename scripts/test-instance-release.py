@@ -43,6 +43,16 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(MODULE.ReleaseRejected):
                 MODULE.validate_release(value)
 
+    def test_shared_dst_directory_is_mounted_read_only(self):
+        with tempfile.TemporaryDirectory(prefix="release-dst-") as temporary:
+            root = Path(temporary)
+            instance = root / "instances" / INSTANCE_ID
+            instance.mkdir(parents=True)
+            dst = root / "dst" / RELEASE_ID
+            dst.mkdir(parents=True)
+            result = MODULE.render_compose(manifest(), release(), str(instance))
+            self.assertIn(str(dst) + ":/srv/dst:ro", result)
+
     def test_renders_digest_pinned_master_and_caves_compose_without_secrets(self):
         instance_root = "/var/lib/famine-hub/instances/" + INSTANCE_ID
         result = MODULE.render_compose(manifest(), release(), instance_root)

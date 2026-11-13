@@ -28,6 +28,7 @@ mod server_input;
 mod ssh;
 mod ssh_dto;
 mod ssh_state;
+mod updates;
 mod workshop;
 mod workshop_collection;
 mod world_config;
@@ -121,6 +122,13 @@ pub fn run() -> tauri::Result<()> {
             commands::build_dst_image,
             commands::manage_build_cache,
             commands::get_build_status,
+            commands::get_dst_update_status,
+            commands::check_dst_updates,
+            commands::preview_instance_update,
+            commands::run_instance_update,
+            commands::get_instance_update_task,
+            commands::cancel_instance_update,
+            commands::list_instance_update_tasks,
         ])
         .run(tauri::generate_context!())
 }

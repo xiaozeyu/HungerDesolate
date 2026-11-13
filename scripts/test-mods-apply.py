@@ -178,9 +178,10 @@ class ModsApplyTests(unittest.TestCase):
         archive = {"create_archive": lambda _instance, path, _identity, _roots:
                        (path.write_bytes(b"archive"), {"archiveSizeBytes": 7, "checksum": "b" * 64})[1],
                    "inspect_archive": lambda *_args: None}
+        destination = self.root / "mod-apply-tasks" / REQUEST / "protection" / backup_id
         with patch.object(MODULE, "ROOT", self.root):
-            MODULE.backup_current(self.instance, {"schemaVersion": 1}, request, ["master"], archive, backup_id)
-        metadata = json.loads((self.root / "backups" / INSTANCE / backup_id / "metadata.json").read_text())
+            MODULE.backup_current(self.instance, request, ["master"], archive, backup_id, destination)
+        metadata = json.loads((destination / "metadata.json").read_text())
         self.assertEqual(metadata["dstBuild"], "760944")
         self.assertEqual(metadata["restorability"], "restorable")
         self.assertEqual(metadata["dstReleaseId"], RELEASE)

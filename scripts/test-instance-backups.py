@@ -1,11 +1,8 @@
 """Test backup list and capture-mode preview against isolated instance data."""
 import importlib.util
-import hashlib
-import io
 import json
 from pathlib import Path
 import tempfile
-import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -147,73 +144,25 @@ class InstanceBackupsTests(unittest.TestCase):
                 MODULE.preview(dict(self.request, captureMode="quasiHot"))
         self.assertEqual(str(failure.exception), "BACKUP_PATH_UNSAFE")
 
-    def test_release_artifact_lookup_uses_registered_staging_root(self):
+    def test_preview_counts_only_world_data_and_skips_runtime_logs(self):
+        data = self.root / "instances" / INSTANCE / "data" / "Master"
+        (data / "server_log.txt").write_text("runtime log\n")
+        request = dict(self.request, captureMode="quasiHot")
+        with patch.object(MODULE, "runtime_state", return_value=("running", True)):
+            result = MODULE.preview(request)
+        self.assertEqual(result["fileCount"], 1)
+        self.assertTrue(result["worldDataPresent"])
+
+    def test_installed_build_reads_the_active_release_catalog_hint(self):
         release_id = "55555555-5555-4555-8555-555555555555"
-        entry = {"releaseId": release_id, "verified": True, "dstBuild": "build",
-                 "createdAt": "2026-11-09T10:00:00Z"}
-        release_dir = self.root / "staging" / release_id
-        release_dir.mkdir(parents=True)
-        staged = {key: value for key, value in entry.items() if key != "createdAt"}
-        (release_dir / "release-metadata.json").write_text(json.dumps({"schemaVersion": 1, **staged}))
-        (release_dir / "release-metadata.json").chmod(0o600)
-        release_dir.chmod(0o700)
-        self.assertIsNone(MODULE.release_artifact_blocker(release_id, entry))
-        self.assertEqual(MODULE.release_artifact_blocker(release_id, {**entry, "dstBuild": "other"}),
-                         "DST_RELEASE_ARTIFACTS_MISMATCH")
-        self.assertEqual(MODULE.release_artifact_blocker("66666666-6666-4666-8666-666666666666", entry),
-                         "DST_RELEASE_UNAVAILABLE")
-
-    def test_legacy_backup_requires_current_applied_config_at_its_revision(self):
+        (self.root / "releases").mkdir(mode=0o700)
+        (self.root / "releases" / "catalog.json").write_text(json.dumps({"schemaVersion": 1,
+            "hostId": HOST, "releases": [{"releaseId": release_id, "dstBuild": "760944"}]}))
+        (self.root / "releases" / "catalog.json").chmod(0o600)
         instance = self.root / "instances" / INSTANCE
-        settings = {"gameMode": "survival"}
-        digest = "sha256:" + hashlib.sha256(json.dumps(settings, sort_keys=True,
-            separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
-        desired = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 4,
-                   "settings": settings, "secrets": {"tokenRef": "44444444-4444-4444-8444-444444444444"}}
-        deployed = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 4,
-                    "settings": settings, "digest": digest}
-        (instance / "desired").mkdir()
-        (instance / "desired" / "world.json").write_text(json.dumps(desired))
-        (instance / "deployed-world.json").write_text(json.dumps(deployed))
-        (instance / "desired" / "world.json").chmod(0o600)
-        (instance / "desired").chmod(0o700)
-        (instance / "deployed-world.json").chmod(0o600)
-        secrets = instance / "desired-secrets"
-        secrets.mkdir(mode=0o700)
-        token_ref = desired["secrets"]["tokenRef"]
-        (secrets / (token_ref + ".token")).write_bytes(b"token\n")
-        (secrets / (token_ref + ".token")).chmod(0o600)
-        self.assertIsNone(MODULE.world_config_snapshot_blocker(
-            self.root / "unused-legacy-archive.tar.gz", {"configRevision": 4, "files": []}, instance, INSTANCE))
-        self.assertEqual(MODULE.world_config_snapshot_blocker(
-            self.root / "unused-legacy-archive.tar.gz", {"configRevision": 3, "files": []}, instance, INSTANCE),
-            "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING")
-
-    def test_world_snapshot_allows_saved_desired_newer_than_applied_deployed(self):
-        instance = self.root / "instances" / INSTANCE
-        desired_settings = {"gameMode": "survival", "saved": True}
-        deployed_settings = {"gameMode": "endless"}
-        deployed_digest = "sha256:" + hashlib.sha256(json.dumps(deployed_settings,
-            sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
-        token_ref = "44444444-4444-4444-8444-444444444444"
-        desired = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 9,
-                   "settings": desired_settings, "secrets": {"tokenRef": token_ref}}
-        deployed = {"schemaVersion": 1, "instanceId": INSTANCE, "revision": 8,
-                    "settings": deployed_settings, "digest": deployed_digest}
-        secrets = instance / "desired-secrets"
-        secrets.mkdir(mode=0o700)
-        (secrets / (token_ref + ".token")).write_bytes(b"token\n")
-        (secrets / (token_ref + ".token")).chmod(0o600)
-        archive = self.root / "world-snapshot.tar.gz"
-        with tarfile.open(archive, "w:gz") as bundle:
-            for relative, value in (("desired/world.json", desired), ("deployed-world.json", deployed)):
-                payload = json.dumps(value).encode()
-                info = tarfile.TarInfo("data/" + relative)
-                info.size = len(payload)
-                bundle.addfile(info, io.BytesIO(payload))
-        manifest = {"configRevision": 9, "files": [
-            {"path": "desired/world.json"}, {"path": "deployed-world.json"}]}
-        self.assertIsNone(MODULE.world_config_snapshot_blocker(archive, manifest, instance, INSTANCE))
+        (instance / "active-release.json").write_text(json.dumps({"dstReleaseId": release_id}))
+        (instance / "active-release.json").chmod(0o600)
+        self.assertEqual(MODULE.installed_build(instance), "760944")
 
     def test_backup_delete_allows_restore_protection_points(self):
         backup_id = "77777777-7777-4777-8777-777777777777"

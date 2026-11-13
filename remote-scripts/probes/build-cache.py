@@ -12,8 +12,11 @@ from datetime import datetime, timezone
 ROOT = Path("/var/lib/famine-hub")
 BUILD_DIR = ROOT / "image-build"
 CONTEXT = BUILD_DIR / "dst-runtime-build"
+DOWNLOAD = BUILD_DIR / "dst-download"
+DST = ROOT / "dst"
 LOCK = BUILD_DIR / "build.lock"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class Rejected(Exception):
@@ -99,6 +102,33 @@ def docker_cache():
     return {"size": None, "reclaimable": None}
 
 
+def catalog_image_digests():
+    path = ROOT / "releases" / "catalog.json"
+    try:
+        catalog = read_json(path, 1024 * 1024)
+    except (FileNotFoundError, Rejected):
+        return None
+    releases = catalog.get("releases") if isinstance(catalog, dict) else None
+    if not isinstance(releases, list):
+        return None
+    return {item.get("imageDigest") for item in releases
+            if isinstance(item, dict) and isinstance(item.get("imageDigest"), str)}
+
+
+def prune_dangling_images(protected):
+    output = docker(["image", "ls", "--filter", "dangling=true", "--quiet", "--no-trunc"], timeout=60)
+    removed = []
+    for image_id in output.split():
+        if not IMAGE_ID.fullmatch(image_id) or image_id in protected:
+            continue
+        try:
+            docker(["image", "rm", image_id], timeout=120)
+        except Rejected:
+            continue
+        removed.append(image_id)
+    return "".join("image rm " + image_id + "\n" for image_id in removed)
+
+
 def check_target(request):
     if (not isinstance(request, dict) or request.get("schemaVersion") != 1
             or not UUID.fullmatch(str(request.get("requestId", "")))
@@ -120,6 +150,16 @@ def acquire_build_lock():
     return fd
 
 
+def staging_bytes():
+    total = 0
+    if not DST.is_dir():
+        return total
+    for child in DST.iterdir():
+        if child.name.startswith(".staging-") and child.is_dir():
+            total += directory_bytes(child)
+    return total
+
+
 def preview(request):
     check_target(request)
     fd = acquire_build_lock()
@@ -136,7 +176,7 @@ def preview(request):
     return {"schemaVersion": 1, "requestId": request["requestId"],
             "serverId": request["serverId"], "hostId": request["hostId"],
             "recordVersion": request.get("expectedRecordVersion"), "capturedAt": now(),
-            "contextBytes": directory_bytes(CONTEXT), "buildActive": active,
+            "contextBytes": directory_bytes(CONTEXT) + directory_bytes(DOWNLOAD) + staging_bytes(), "buildActive": active,
             "dockerAvailable": docker_available, "dockerCache": cache,
             "allowed": not active and docker_available}
 
@@ -147,16 +187,28 @@ def cleanup(request):
     if fd is None:
         reject("BUILD_CACHE_BUSY")
     try:
-        context_bytes = directory_bytes(CONTEXT)
-        if CONTEXT.exists():
+        context_bytes = directory_bytes(CONTEXT) + directory_bytes(DOWNLOAD) + staging_bytes()
+        if CONTEXT.exists() or DOWNLOAD.exists():
             import shutil
-            shutil.rmtree(CONTEXT)
-        output = docker(["builder", "prune", "--all", "-f"], timeout=300)
+            shutil.rmtree(CONTEXT, ignore_errors=True)
+            shutil.rmtree(DOWNLOAD, ignore_errors=True)
+        if DST.is_dir():
+            import shutil
+            for child in DST.iterdir():
+                if child.name.startswith(".staging-") and child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+        builder_output = docker(["builder", "prune", "--all", "-f"], timeout=300)
+        protected = catalog_image_digests()
+        try:
+            image_output = "" if protected is None else prune_dangling_images(protected)
+        except Rejected:
+            image_output = "IMAGE_PRUNE_UNAVAILABLE\n"
         cache = docker_cache()
         return {"schemaVersion": 1, "requestId": request["requestId"],
                 "serverId": request["serverId"], "hostId": request["hostId"],
                 "recordVersion": request.get("expectedRecordVersion"), "capturedAt": now(),
-                "contextBytes": context_bytes, "dockerOutput": output[-4096:],
+                "contextBytes": context_bytes,
+                "dockerOutput": (builder_output + image_output)[-4096:],
                 "dockerCache": cache}
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)

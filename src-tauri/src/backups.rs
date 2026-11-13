@@ -21,9 +21,6 @@ const SCRIPT: &str = include_str!("../../remote-scripts/probes/instance-backups.
 const TASK_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-task.py");
 const ARCHIVE_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-archive.py");
 const RESTORE_SCRIPT: &str = include_str!("../../remote-scripts/actions/restore-task.py");
-const RELEASE_SCRIPT: &str = include_str!("../../remote-scripts/actions/instance-release.py");
-const MODS_APPLY_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-apply.py");
-const MODS_DOWNLOAD_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-download.py");
 const MAX_OUTPUT: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -153,11 +150,14 @@ pub struct BackupSummary {
     pub verification: String,
     pub restorability: String,
     pub dst_build: Option<String>,
+    #[serde(default)]
     pub dst_release_id: Option<String>,
+    #[serde(default)]
     pub mods_release_id: Option<String>,
     #[serde(default)]
     pub mods: Vec<BackupModRef>,
-    pub config_revision: u64,
+    #[serde(default)]
+    pub config_revision: Option<u64>,
     pub contains_secrets: bool,
 }
 
@@ -341,11 +341,8 @@ fn invoke_task(session: &Session, payload: &Value) -> CommandResult<Value> {
     let task_source = STANDARD.encode(TASK_SCRIPT.as_bytes());
     let archive_source = STANDARD.encode(ARCHIVE_SCRIPT.as_bytes());
     let restore_source = STANDARD.encode(RESTORE_SCRIPT.as_bytes());
-    let release_source = STANDARD.encode(RELEASE_SCRIPT.as_bytes());
-    let mods_apply_source = STANDARD.encode(MODS_APPLY_SCRIPT.as_bytes());
-    let mods_download_source = STANDARD.encode(MODS_DOWNLOAD_SCRIPT.as_bytes());
     let source = format!(
-        "import base64,json\nARCHIVE_SOURCE=base64.b64decode('{archive_source}').decode('utf-8')\nWORKER_SOURCE=base64.b64decode('{task_source}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{restore_source}').decode('utf-8')\nRELEASE_SOURCE=base64.b64decode('{release_source}').decode('utf-8')\nMODS_APPLY_SOURCE=base64.b64decode('{mods_apply_source}').decode('utf-8')\nMODS_DOWNLOAD_SOURCE=base64.b64decode('{mods_download_source}').decode('utf-8')\nrequest=json.loads(base64.b64decode('{request}').decode('utf-8'))\nif request.get('action','').startswith('restore'):\n    namespace={{'__name__':'restore_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'RESTORE_SOURCE':RESTORE_SOURCE,'RELEASE_SOURCE':RELEASE_SOURCE,'MODS_APPLY_SOURCE':MODS_APPLY_SOURCE,'MODS_DOWNLOAD_SOURCE':MODS_DOWNLOAD_SOURCE}}\n    exec(compile(RESTORE_SOURCE,'<restore-task>','exec'),namespace)\n    namespace['main'](request)\nelse:\n    namespace={{'__name__':'backup_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'WORKER_SOURCE':WORKER_SOURCE}}\n    exec(compile(WORKER_SOURCE,'<backup-task>','exec'),namespace)\n    namespace['main'](request)\n"
+        "import base64,json\nARCHIVE_SOURCE=base64.b64decode('{archive_source}').decode('utf-8')\nWORKER_SOURCE=base64.b64decode('{task_source}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{restore_source}').decode('utf-8')\nrequest=json.loads(base64.b64decode('{request}').decode('utf-8'))\nif request.get('action','').startswith('restore'):\n    namespace={{'__name__':'restore_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'RESTORE_SOURCE':RESTORE_SOURCE}}\n    exec(compile(RESTORE_SOURCE,'<restore-task>','exec'),namespace)\n    namespace['main'](request)\nelse:\n    namespace={{'__name__':'backup_task','ARCHIVE_SOURCE':ARCHIVE_SOURCE,'WORKER_SOURCE':WORKER_SOURCE}}\n    exec(compile(WORKER_SOURCE,'<backup-task>','exec'),namespace)\n    namespace['main'](request)\n"
     );
     run_remote(session, &source)
 }
@@ -1324,9 +1321,10 @@ fn check_restore_preflight(
             | "DST_RELEASE_ARTIFACTS_MISMATCH" => {
                 error("DST_RELEASE_UNAVAILABLE", "备份所需的 DST 版本产物不可用")
             }
-            "DST_RELEASE_MISMATCH" | "BACKUP_RELEASE_MISMATCH" => {
-                error("DST_RELEASE_MISMATCH", "备份版本与当前专服不兼容")
-            }
+            "BACKUP_BUILD_NEWER_THAN_INSTANCE" => error(
+                "BACKUP_BUILD_NEWER_THAN_INSTANCE",
+                "备份来自更高的 DST 版本，当前服务端无法可靠读取",
+            ),
             "BACKUP_TARGET_MISMATCH" => error("BACKUP_TARGET_MISMATCH", "备份不属于当前专服"),
             "BACKUP_SPACE_INSUFFICIENT" | "RESTORE_SPACE_INSUFFICIENT" => error(
                 "BACKUP_SPACE_INSUFFICIENT",
@@ -1551,7 +1549,7 @@ fn valid_backup(item: &BackupSummary, target: &InstanceTarget, revision: u64) ->
     item.schema_version == 1
         && item.host_id == target.host_id
         && item.instance_id == target.instance_id
-        && item.config_revision <= revision
+        && item.config_revision.is_none_or(|value| value <= revision)
         && ["cold", "quasiHot"].contains(&item.capture_mode.as_str())
         && ["stoppedBeforeRead", "onDiskBestEffort"].contains(&item.capture_semantics.as_str())
         && ["running", "stopped", "degraded", "unknown"]

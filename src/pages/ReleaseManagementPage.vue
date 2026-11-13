@@ -25,6 +25,7 @@ import {
 } from "../api/instances";
 import { describeError } from "../lib/commandError";
 import { cleanupBuildCache, previewBuildCache, type BuildCachePreview } from "../api/buildCache";
+import { checkDstUpdates, getDstUpdateStatus, type HostDstUpdateStatus } from "../api/updates";
 import { formatBytes } from "../lib/environmentView";
 
 const route = useRoute();
@@ -67,8 +68,17 @@ const deleteTypedName = ref("");
 const deleteBusy = ref(false);
 const deleteError = ref("");
 const cachePreview = ref<BuildCachePreview | null>(null);
-const cacheBusy = ref(false);
-const cacheError = ref("");
+const updateStatus = ref<HostDstUpdateStatus | null>(null);
+const updateCheckBusy = ref(false);
+const updateCheckError = ref("");
+let updatePollTimer: number | undefined;
+let updatePollStartedAt = 0;
+let updateDisposed = false;
+const reclaimableReleases = computed(() => releases.value.filter(release => release.reclaimable));
+const cleanupOpen = ref(false);
+const cleanupBusy = ref(false);
+const cleanupError = ref("");
+const cleanupResult = ref("");
 let actionSequence = 0;
 
 function targetSnapshot() {
@@ -81,6 +91,188 @@ function isCurrent(target: { serverId: string; hostId: string; recordVersion: nu
   const value = server.value;
   return !!value && value.serverId === target.serverId && value.hostId === target.hostId
     && value.recordVersion === target.recordVersion && (sequence === undefined || actionSequence === sequence);
+}
+
+const updateStageLabel = computed(() => {
+  const stage = updateStatus.value?.stage;
+  if (stage === "image") return "正在准备检查镜像…";
+  if (stage === "steamcmd") return "正在通过 SteamCMD 查询最新 build…";
+  if (stage === "finalize") return "正在整理检查结果…";
+  return "正在检查最新 DST build…";
+});
+
+function stopUpdatePoll() {
+  if (updatePollTimer !== undefined) {
+    window.clearTimeout(updatePollTimer);
+    updatePollTimer = undefined;
+  }
+  updatePollStartedAt = 0;
+}
+
+function scheduleUpdatePoll() {
+  if (updateDisposed) return;
+  const value = server.value;
+  if (!value?.hostId) return;
+  if (updatePollStartedAt === 0) updatePollStartedAt = Date.now();
+  if (Date.now() - updatePollStartedAt > 13 * 60 * 1000) {
+    if (updateStatus.value) updateStatus.value = { ...updateStatus.value, checking: false, stage: null };
+    updateCheckError.value = "检查超时，请稍后刷新或重试";
+    stopUpdatePoll();
+    return;
+  }
+  const serverId = value.serverId;
+  const hostId = value.hostId;
+  const expectedRecordVersion = value.recordVersion;
+  if (updatePollTimer !== undefined) window.clearTimeout(updatePollTimer);
+  updatePollTimer = window.setTimeout(async () => {
+    updatePollTimer = undefined;
+    if (server.value?.serverId !== serverId || server.value.hostId !== hostId
+      || server.value.recordVersion !== expectedRecordVersion) return;
+    await loadUpdateStatus();
+  }, 3000);
+}
+
+async function loadUpdateStatus() {
+  if (updateDisposed) return;
+  const value = server.value;
+  if (!value?.hostId) return;
+  const expectedRecordVersion = value.recordVersion;
+  const requestId = crypto.randomUUID();
+  try {
+    const status = await getDstUpdateStatus({ schemaVersion: 1, requestId, serverId: value.serverId,
+      hostId: value.hostId, expectedRecordVersion });
+    if (updateDisposed || server.value?.serverId !== value.serverId || server.value.hostId !== value.hostId
+      || server.value.recordVersion !== expectedRecordVersion || status.requestId !== requestId
+      || status.target.serverId !== value.serverId || status.target.hostId !== value.hostId) return;
+    updateStatus.value = status;
+    updateCheckError.value = "";
+    if (status.checking || updateCheckBusy.value) scheduleUpdatePoll();
+    else stopUpdatePoll();
+  } catch (cause) {
+    if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
+      updateCheckError.value = describeError(cause).message;
+      if (updateStatus.value?.checking || updateCheckBusy.value) scheduleUpdatePoll();
+      else {
+        updateStatus.value = null;
+        stopUpdatePoll();
+      }
+    }
+  }
+}
+
+async function checkUpdates() {
+  const value = server.value;
+  if (!value?.hostId || updateCheckBusy.value) return;
+  if (updateStatus.value?.checking) {
+    scheduleUpdatePoll();
+    return;
+  }
+  updateCheckBusy.value = true;
+  updateCheckError.value = "";
+  scheduleUpdatePoll();
+  const expectedRecordVersion = value.recordVersion;
+  const requestId = crypto.randomUUID();
+  try {
+    const status = await checkDstUpdates({ schemaVersion: 1, requestId, serverId: value.serverId,
+      hostId: value.hostId, expectedRecordVersion });
+    if (updateDisposed || server.value?.serverId !== value.serverId || server.value.hostId !== value.hostId
+      || server.value.recordVersion !== expectedRecordVersion || status.requestId !== requestId
+      || status.target.serverId !== value.serverId || status.target.hostId !== value.hostId) return;
+    updateStatus.value = status;
+    if (status.checking) scheduleUpdatePoll();
+    else stopUpdatePoll();
+  } catch (cause) {
+    if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
+      updateCheckError.value = describeError(cause).message;
+      await loadUpdateStatus();
+    }
+  } finally {
+    updateCheckBusy.value = false;
+  }
+}
+
+async function openDiskCleanup() {
+  const target = targetSnapshot();
+  if (!target || cleanupBusy.value) return;
+  cleanupOpen.value = true;
+  cleanupError.value = "";
+  cleanupResult.value = "";
+  cachePreview.value = null;
+  cleanupBusy.value = true;
+  const sequence = ++actionSequence;
+  try {
+    const response = await previewBuildCache({ schemaVersion: 1, requestId: crypto.randomUUID(), action: "preview",
+      serverId: target.serverId, hostId: target.hostId, expectedRecordVersion: target.recordVersion });
+    if (!isCurrent(target, sequence)) return;
+    if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存预览身份不匹配");
+    cachePreview.value = response;
+  } catch (cause) {
+    if (isCurrent(target, sequence)) cleanupError.value = describeError(cause).message;
+  } finally {
+    if (isCurrent(target, sequence)) cleanupBusy.value = false;
+  }
+}
+
+async function confirmDiskCleanup() {
+  const target = targetSnapshot();
+  if (!target || cleanupBusy.value) return;
+  cleanupBusy.value = true;
+  cleanupError.value = "";
+  cleanupResult.value = "";
+  let deleted = 0;
+  let skipped = 0;
+  let cacheCleaned = false;
+  try {
+    for (const release of reclaimableReleases.value) {
+      try {
+        const preview = await previewInstanceReleaseDelete({
+          schemaVersion: 1, requestId: crypto.randomUUID(), target: { serverId: target.serverId, hostId: target.hostId },
+          expectedRecordVersion: target.recordVersion, releaseId: release.releaseId,
+        });
+        if (!preview.allowed) {
+          skipped++;
+          continue;
+        }
+        await deleteInstanceRelease({
+          schemaVersion: 1, requestId: crypto.randomUUID(), target: { serverId: target.serverId, hostId: target.hostId },
+          expectedRecordVersion: target.recordVersion, releaseId: release.releaseId,
+          catalogDigest: preview.catalogDigest, typedName: release.dstBuild,
+        });
+        deleted++;
+      } catch (cause) {
+        cleanupError.value = describeError(cause).message;
+        break;
+      }
+    }
+    if (!cleanupError.value && cachePreview.value?.allowed) {
+      const before = cachePreview.value.dockerCache.size;
+      const outcome = await operations.run({
+        kind: "buildCacheCleanup",
+        target: { serverId: target.serverId, hostId: target.hostId },
+        title: "清理构建缓存",
+        stage: "清理构建缓存",
+        work: async setStage => {
+          setStage("清理 Docker 构建缓存");
+          const response = await cleanupBuildCache({ schemaVersion: 1, requestId: crypto.randomUUID(), action: "cleanup",
+            serverId: target.serverId, hostId: target.hostId, expectedRecordVersion: target.recordVersion });
+          if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存清理身份不匹配");
+          return response;
+        },
+        completeStage: response => before
+          ? `Docker 缓存 ${before} → ${response.dockerCache.size ?? "不可用"}`
+          : `Docker 缓存 ${response.dockerCache.size ?? "已清理"}`,
+      });
+      if (outcome.error) cleanupError.value = outcome.error.message;
+      else cacheCleaned = true;
+    }
+    if (!cleanupError.value) {
+      cleanupResult.value = `已清理 ${deleted} 个 Release${skipped ? `，跳过 ${skipped} 个` : ""}${cacheCleaned ? "，构建缓存已清理" : ""}`;
+      cleanupOpen.value = false;
+    }
+    await refresh();
+  } finally {
+    cleanupBusy.value = false;
+  }
 }
 
 function statusTone(release: InstanceReleaseSummary): "success" | "warning" | "danger" {
@@ -158,7 +350,7 @@ async function confirmDeleteRelease() {
     deletePreview.value = null;
     deleteTypedName.value = "";
     actionMessage.value = { releaseId: result.releaseId,
-      message: !result.stagingRemoved ? "Release 已删除，但 staging 文件清理未完成"
+      message: !result.stagingRemoved || !result.dstRemoved ? "Release 已删除，但文件清理未完成"
         : result.imageShared ? "Release 已删除，共用镜像仍被其他 Release 使用"
           : result.imageRemoved ? "Release 与镜像已删除" : "Release 已删除，镜像本已不存在" };
     await refresh();
@@ -249,6 +441,7 @@ watch(() => buildEntry.value?.status.status, (next, previous) => {
 }, { flush: "sync" });
 
 watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordVersion], () => {
+  stopUpdatePoll();
   actionSequence++;
   pendingReleaseId.value = "";
   pendingStage.value = "";
@@ -259,72 +452,33 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   deleteBusy.value = false;
   deleteError.value = "";
   cachePreview.value = null;
-  cacheError.value = "";
-  cacheBusy.value = false;
+  cleanupOpen.value = false;
+  cleanupBusy.value = false;
+  cleanupError.value = "";
+  cleanupResult.value = "";
+  updateStatus.value = null;
+  updateCheckBusy.value = false;
+  updateCheckError.value = "";
+  void loadUpdateStatus();
   buildStarting.value = false;
   buildStartError.value = "";
 });
 
 onUnmounted(() => {
+  updateDisposed = true;
+  stopUpdatePoll();
   actionSequence++;
-});
-
-async function openCacheCleanup() {
-  const target = targetSnapshot();
-  if (!target || cacheBusy.value) return;
-  const sequence = ++actionSequence;
-  cacheBusy.value = true;
-  cacheError.value = "";
-  try {
-    const response = await previewBuildCache({ schemaVersion: 1, requestId: crypto.randomUUID(), action: "preview",
-      serverId: target.serverId, hostId: target.hostId, expectedRecordVersion: target.recordVersion });
-    if (!isCurrent(target, sequence)) return;
-    if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存预览身份不匹配");
-    cachePreview.value = response;
-  } catch (cause) {
-    if (isCurrent(target, sequence)) cacheError.value = describeError(cause).message;
-  } finally {
-    if (isCurrent(target, sequence)) cacheBusy.value = false;
-  }
-}
-
-async function confirmCacheCleanup() {
-  const preview = cachePreview.value;
-  const target = targetSnapshot();
-  if (!preview || !target || cacheBusy.value || !preview.allowed) return;
-  const before = preview.dockerCache.size;
-  cacheBusy.value = true;
-  cacheError.value = "";
-  const outcome = await operations.run({
-    kind: "buildCacheCleanup",
-    target: { serverId: target.serverId, hostId: target.hostId },
-    title: "清理构建缓存",
-    stage: "清理构建缓存",
-    work: async setStage => {
-      setStage("清理 Docker 构建缓存");
-      const response = await cleanupBuildCache({ schemaVersion: 1, requestId: crypto.randomUUID(), action: "cleanup",
-        serverId: target.serverId, hostId: target.hostId, expectedRecordVersion: target.recordVersion });
-      if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存清理身份不匹配");
-      return response;
-    },
-    completeStage: response => before
-      ? `Docker 缓存 ${before} → ${response.dockerCache.size ?? "不可用"}`
-      : `Docker 缓存 ${response.dockerCache.size ?? "已清理"}`,
-  });
-  cacheBusy.value = false;
-  if (outcome.error) {
-    cacheError.value = outcome.error.message;
-    return;
-  }
-  cachePreview.value = null;
-}</script>
+});</script>
 
 <template>
   <div class="page release-page">
     <PageHeader :eyebrow="server?.displayName" title="DST Release 管理">
       <template #actions>
-        <button class="button" :disabled="loading || !server || cacheBusy" @click="openCacheCleanup">
-          <Trash2 :size="16" />清理构建缓存
+        <button class="button" :disabled="loading || !server || updateCheckBusy || updateStatus?.checking || building" @click="checkUpdates">
+          <RefreshCw :size="16" />{{ updateCheckBusy || updateStatus?.checking ? "检查中…" : "检查 DST 更新" }}
+        </button>
+        <button class="button" :disabled="loading || !server || cleanupBusy || building" @click="openDiskCleanup">
+          <Trash2 :size="16" />{{ cleanupBusy ? "清理中…" : "清理磁盘" }}
         </button>
         <button class="button" :disabled="building || !server || !!dockerNotice || hostConnection.busyServerId.value === server?.serverId" @click="startBuild">
           <Hammer :size="16" />{{ hostConnection.busyServerId.value === server?.serverId ? "连接中…" : building ? "构建中…" : "构建镜像" }}
@@ -334,6 +488,17 @@ async function confirmCacheCleanup() {
         </button>
       </template>
     </PageHeader>
+
+    <div class="release-update-status" role="status">
+      <span v-if="updateCheckBusy || updateStatus?.checking">{{ updateStatus?.checking ? updateStageLabel : "正在启动检查…" }}</span>
+      <span v-else-if="updateStatus?.latest">最新 DST build {{ updateStatus.latest.build }} · 检查于 {{ formatReleaseDate(updateStatus.latest.checkedAt) }}</span>
+      <span v-else-if="updateStatus?.lastCheckError">尚未成功检查 DST 更新</span>
+      <span v-else>尚未检查 DST 更新</span>
+      <span v-if="updateStatus?.candidateReleases.length">可用 Release {{ updateStatus.candidateReleases.length }} 个</span>
+      <span v-if="updateStatus?.lastCheckError">{{ updateStatus.lastCheckError.message }}</span>
+      <span v-if="updateCheckError">{{ updateCheckError }}</span>
+      <span v-if="cleanupResult">{{ cleanupResult }}</span>
+    </div>
 
     <div v-if="error" class="environment-error release-feedback" role="alert">
       <strong>{{ error.message }}</strong>
@@ -368,9 +533,12 @@ async function confirmCacheCleanup() {
           </div>
           <div class="release-status-cell">
             <StatusLabel :tone="statusTone(release)" :label="statusLabel(release)" />
+            <span v-if="release.inUse" class="release-retention">使用中</span>
+            <span v-else-if="release.reclaimable" class="release-retention">可回收</span>
           </div>
           <div class="release-digest-cell">
             <span class="mono" :title="release.image">{{ release.image }}</span>
+            <span>{{ release.imageSize != null ? formatBytes(release.imageSize) : "镜像大小未知" }}</span>
           </div>
           <div class="release-created-cell">{{ formatReleaseDate(release.createdAt) }}</div>
           <div class="release-actions">
@@ -419,6 +587,36 @@ async function confirmCacheCleanup() {
     </div>
 </FloatingTask>
 
+    <AppDialog :open="cleanupOpen" title="清理磁盘" description="清理构建临时文件、未被引用的 Docker 镜像和可回收 Release；使用中的 Release 会跳过。" @update:open="value => { if (!value && !cleanupBusy) cleanupOpen = false; }">
+      <div class="form-stack">
+        <p v-if="cleanupError" class="environment-error" role="alert">{{ cleanupError }}</p>
+        <section class="disk-cleanup-section">
+          <strong>构建缓存</strong>
+          <dl v-if="cachePreview" class="creation-facts">
+            <div><dt>构建目录</dt><dd>{{ formatBytes(cachePreview.contextBytes) }}</dd></div>
+            <div><dt>Docker 构建缓存</dt><dd>{{ cachePreview.dockerCache.size ?? "不可用" }}</dd></div>
+            <div><dt>Docker 可回收</dt><dd>{{ cachePreview.dockerCache.reclaimable ?? "—" }}</dd></div>
+            <div><dt>构建状态</dt><dd>{{ cachePreview.buildActive ? "正在构建，暂不可清理" : cachePreview.dockerAvailable ? "空闲" : "Docker 不可用" }}</dd></div>
+          </dl>
+          <p v-else>{{ cleanupError ? "构建缓存不可用。" : "读取构建缓存…" }}</p>
+        </section>
+        <section class="disk-cleanup-section">
+          <strong>可回收 Release</strong>
+          <p v-if="!reclaimableReleases.length">无可回收 Release。</p>
+          <div v-else class="release-cleanup-list">
+            <ul>
+              <li v-for="release in reclaimableReleases" :key="release.releaseId">
+                build {{ release.dstBuild }} · {{ release.releaseId.slice(0, 8) }} · {{ release.imageSize != null ? formatBytes(release.imageSize) : "大小未知" }}
+              </li>
+            </ul>
+          </div>
+        </section>
+      </div>
+      <template #footer>
+        <button class="button" :disabled="cleanupBusy" @click="cleanupOpen = false">取消</button>
+        <button class="button danger" :disabled="cleanupBusy || (!reclaimableReleases.length && !cachePreview?.allowed)" @click="confirmDiskCleanup">{{ cleanupBusy ? "清理中…" : "清理" }}</button>
+      </template>
+    </AppDialog>
     <AppDialog :open="!!deletePreview" title="删除 DST Release" description="删除 Release 登记及独占镜像；共用镜像保留。已归档专服的数据保留，但恢复时可能需要重新导入原镜像。" @update:open="closeDeleteDialog">
       <div v-if="deletePreview" class="form-stack">
         <dl class="environment-facts">
@@ -432,6 +630,7 @@ async function confirmCacheCleanup() {
         <div v-if="!deletePreview.allowed" class="environment-error" role="status">
           <strong>该 Release 仍有以下引用，不能删除：</strong>
           <ul>
+            <li v-if="deletePreview.buildActive">正在构建 Release，暂不能删除</li>
             <li v-for="id in deletePreview.instanceReferences" :key="`instance:${id}`">活动实例：<span class="mono">{{ id }}</span></li>
             <li v-for="id in deletePreview.taskReferences" :key="`task:${id}`">未结束或待核实任务：<span class="mono">{{ id }}</span></li>
             <template v-if="!deletePreview.sharedImage">
@@ -445,23 +644,6 @@ async function confirmCacheCleanup() {
       <template #footer>
         <button class="button" :disabled="deleteBusy" @click="closeDeleteDialog(false)">取消</button>
         <button class="button danger" :disabled="deleteBusy || !deletePreview?.allowed || deleteTypedName!==deletePreview?.dstBuild" @click="confirmDeleteRelease">{{ deleteBusy ? "正在删除…" : "删除 Release" }}</button>
-      </template>
-    </AppDialog>
-    <AppDialog :open="!!cachePreview" title="清理构建缓存" description="删除构建上下文并清理全部 Docker 构建缓存；不会删除 Release 镜像。" @update:open="value => { if (!value && !cacheBusy) { cachePreview = null; cacheError = ''; } }">
-      <div v-if="cachePreview" class="form-stack">
-        <dl class="creation-facts">
-          <div><dt>构建目录</dt><dd>{{ formatBytes(cachePreview.contextBytes) }}</dd></div>
-          <div><dt>Docker 构建缓存</dt><dd>{{ cachePreview.dockerCache.size ?? "不可用" }}</dd></div>
-          <div><dt>Docker 可回收</dt><dd>{{ cachePreview.dockerCache.reclaimable ?? "—" }}</dd></div>
-          <div><dt>Docker</dt><dd>{{ cachePreview.dockerAvailable ? "可用" : "不可用" }}</dd></div>
-          <div><dt>构建状态</dt><dd>{{ cachePreview.buildActive ? "正在构建，暂不可清理" : "空闲" }}</dd></div>
-        </dl>
-        <p v-if="!cachePreview.allowed" class="environment-error">{{ cachePreview.buildActive ? "当前有镜像构建任务，不能清理缓存。" : "Docker 不可用，不能清理构建缓存。" }}</p>
-        <p v-if="cacheError" class="error-strip" role="alert">{{ cacheError }}</p>
-      </div>
-      <template #footer>
-        <button class="button" :disabled="cacheBusy" @click="cachePreview = null; cacheError = ''">取消</button>
-        <button class="button danger" :disabled="cacheBusy || !cachePreview?.allowed" @click="confirmCacheCleanup">{{ cacheBusy ? "清理中…" : "清理缓存" }}</button>
       </template>
     </AppDialog>
     <FingerprintTrustDialog :open="hostConnection.trustOpen.value" :display-name="hostConnection.challengeServer.value?.displayName ?? ''" :host="hostConnection.challengeServer.value?.host ?? ''" :ssh-port="hostConnection.challengeServer.value?.sshPort ?? 22" :challenge="hostConnection.challenge.value" :busy="hostConnection.busyServerId.value === hostConnection.challengeServer.value?.serverId" :error="hostConnection.trustError.value" @update:open="value => { if (!value) hostConnection.closeTrust() }" @confirm="hostConnection.confirmTrust"/>
@@ -491,6 +673,12 @@ async function confirmCacheCleanup() {
 .build-log summary { width: fit-content; cursor: pointer; }
 .build-log pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--space-3); border: 1px solid var(--border); background: var(--surface-muted); }
 .release-feedback { margin-bottom: var(--space-3); }
+.release-update-status { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); color: var(--text-secondary); font-size: 12px; }
+.release-retention { color: var(--text-secondary); font-size: 11px; }
+.disk-cleanup-section { display: grid; gap: var(--space-2); }
+.disk-cleanup-section > strong { font-size: 12px; font-weight: 600; }
+.disk-cleanup-section > p { color: var(--text-secondary); font-size: 12px; }
+.release-cleanup-list ul { margin: var(--space-2) 0 0; padding-left: var(--space-4); color: var(--text-secondary); font-size: 12px; }
 .release-table-wrap { min-width: 0; }
 .release-table { display: grid; grid-template-columns: minmax(140px, .85fr) minmax(84px, .5fr) minmax(220px, 1.5fr) minmax(110px, .65fr) minmax(150px, .8fr); gap: var(--space-4); align-items: center; }
 .release-table-head { min-height: 36px; color: var(--text-secondary); font-size: 11px; border-bottom: 1px solid var(--border); }

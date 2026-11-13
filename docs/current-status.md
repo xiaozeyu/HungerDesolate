@@ -17,7 +17,14 @@
 
 - DST runtime 镜像构建、登记和基础验证。
 - Release 导入、删除和引用检查。
-- 构建缓存预览与全部清理。
+- 构建缓存预览与清理；只删除未被 catalog 引用的 dangling 镜像。
+- 构建前磁盘空间预检；空间不足不开始下载。
+- 构建成功或失败后自动清理构建上下文、BuildKit 缓存；构建日志保留 7 天。
+- 构建使用共享 `dst-build-base` / `dst-runtime-base` 镜像；DST 下载到 `dst/<releaseId>`，Compose 只读挂载，不再为每个 Release 构建镜像。
+- 新 Release 先复制最近 DST 目录作为增量基线，再执行 `app_update`，不额外保留下载缓存。
+- 旧镜像形式 Release 继续兼容；删除 P2 Release 会清理对应 DST 目录，共享运行时镜像保留。
+- Release 列表显示镜像大小和使用中/可回收提示；“清理磁盘”合并清理构建缓存与可回收 Release，构建中禁止删除。
+- 登记后清理遗留 `artifact.tar`。
 - 构建和验证任务进入全局任务记录。
 
 ### 专服
@@ -26,6 +33,23 @@
 - 专服列表、概览、运行摘要、分片日志和诊断。
 - 专服列表进入时读取一次、手动刷新，不再后台轮询；运行采集合并为每个分片一次容器探测。
 - 删除前保护检查；删除会永久移除实例目录、备份和旧归档目录。
+
+### 备份
+
+- 归档只保存世界存档（`data/Master`、`data/Caves`），不包含服务器配置、Release、Compose 或凭据。
+- 恢复使用当前活动 Release，只替换世界存档；兼容旧归档。
+- 备份 `dstBuild` 高于当前 build 时阻断恢复；MOD 差异只返回 warning。
+- MOD 应用的完整回滚快照保存在任务目录，不进入备份列表。
+
+### DST 更新
+
+- Release 管理页按主机检查最新 DST build，缓存检查结果并列出匹配的已验证 Release。
+- 检查状态持久化为 running/ok/failed 并记录阶段；切换页面后重新进入会恢复“检查中”并轮询，重复点击不会再次运行 SteamCMD。
+- 检查优先使用已 bootstrap 的 `dst-build-base` 工具镜像，SteamCMD 最长 600 秒；超时/失败会清理检查容器，残留容器在下次检查前回收。
+- 专服概览页提供“切换 DST 版本”：预览目标 Release、停服分片、世界存档保护点和回滚能力。
+- 切换任务使用一次性 systemd worker，持有 heavy/实例锁；创建保护点、切换 active-release/manifest/compose、重建容器并验证。
+- 失败时按保护点和 transaction 恢复旧 Release + 旧存档；其他实例摘要变化会判失败。
+- 当前 worker 未写入 heavyQueue，取消只在阶段检查点生效；跨实例排队依赖 heavy 锁。
 
 ### 世界配置
 
@@ -43,6 +67,7 @@
 - 专服 MOD 从主机库多选加入、启用/禁用、配置编辑和应用。
 - 解析失败时回退主机库名称/版本；数字选项描述可正常解析。
 - 主机库图片在版本变化后更新。
+- 主机 MOD 更新成功后自动清理旧版本：每个 Workshop 保留最新版本，实例/活动 MOD Release/备份引用不删除。
 
 ### 数据与任务
 

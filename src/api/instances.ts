@@ -31,9 +31,9 @@ export interface BackupSummary {
   runtimeStatusAtCapture: "running" | "stopped" | "degraded" | "unknown";
   sizeBytes: number; checksum: string | null; verification: "pending" | "verified" | "failed";
   restorability: "restorable" | "missingArtifacts" | "incompatible" | "unknown";
-  dstBuild: string | null; dstReleaseId: string | null; modsReleaseId: string | null;
+  dstBuild: string | null; dstReleaseId?: string | null; modsReleaseId?: string | null;
   mods?: { workshopId: string; enabled: boolean; artifactDigest?: string | null }[];
-  configRevision: number; containsSecrets: boolean;
+  configRevision?: number; containsSecrets: boolean;
 }
 export interface BackupListResponse {
   schemaVersion: 1; requestId: string; target: InstanceTarget; configRevision: number;
@@ -110,13 +110,13 @@ export interface InstanceDeletePreview {
 export function previewInstanceDelete(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRegistryRevision:number}):Promise<InstanceDeletePreview>{return call("preview_instance_delete",request);}
 export interface InstanceDeleteResponse {schemaVersion:1;requestId:string;target:InstanceTarget;recordVersion:number;registryRevision:number;releasedReservations:number;removed:boolean;retired:boolean;removedContainers:number;removedNetworks:number;}
 export function deleteInstance(request:{schemaVersion:1;requestId:string;target:InstanceTarget;expectedRecordVersion:number;expectedRegistryRevision:number;planId:string;operationId:string;typedName:string}):Promise<InstanceDeleteResponse>{return call("delete_instance",request);}
-export interface InstanceReleaseSummary { releaseId:string; platform:string; image:string; imageDigest:string; dstBuild:string; artifactDigest:string; scriptVersion:string; createdAt?: string | null; verified:boolean; runtimeVerified:boolean; commands:Record<string,string[]>; }
+export interface InstanceReleaseSummary { releaseId:string; platform:string; image:string; imageDigest:string; dstBuild:string; artifactDigest:string; scriptVersion:string; createdAt?: string | null; verified:boolean; runtimeVerified:boolean; commands:Record<string,string[]>; imageSize?: number | null; inUse?: boolean; reclaimable?: boolean; }
 export interface InstanceReleaseCatalogResponse { schemaVersion:1; requestId:string; serverId:string; hostId:string; recordVersion:number; catalogDigest:string|null; releases:InstanceReleaseSummary[]; blockers:string[]; }
 export function listInstanceReleases(request: ConnectionRequest): Promise<InstanceReleaseCatalogResponse> { return call("list_instance_releases",request); }
 export function verifyInstanceReleaseBase(request:{schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};expectedRecordVersion:number;releaseId:string}):Promise<{schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};recordVersion:number;releaseId:string;verified:boolean}>{return call("verify_instance_release_base",request);}
-export interface InstanceReleaseDeletePreview {schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};releaseId:string;dstBuild:string;imageDigest:string;instanceReferences:string[];taskReferences:string[];containerReferences:string[];sharedImage:boolean;allowed:boolean;catalogDigest:string;}
+export interface InstanceReleaseDeletePreview {schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};releaseId:string;dstBuild:string;imageDigest:string;instanceReferences:string[];taskReferences:string[];containerReferences:string[];sharedImage:boolean;buildActive?:boolean;allowed:boolean;catalogDigest:string;}
 export function previewInstanceReleaseDelete(request:{schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};expectedRecordVersion:number;releaseId:string}):Promise<InstanceReleaseDeletePreview>{return call("preview_instance_release_delete",request);}
-export interface InstanceReleaseDeleteResponse {schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};releaseId:string;imageRemoved:boolean;imageShared:boolean;stagingRemoved:boolean;}
+export interface InstanceReleaseDeleteResponse {schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};releaseId:string;imageRemoved:boolean;imageShared:boolean;stagingRemoved:boolean;dstRemoved:boolean;}
 export function deleteInstanceRelease(request:{schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};expectedRecordVersion:number;releaseId:string;catalogDigest:string;typedName:string}):Promise<InstanceReleaseDeleteResponse>{return call("delete_instance_release",request);}
 export interface BuildImageResponse { schemaVersion:1; requestId:string; serverId:string; recordVersion:number; releaseId:string; status:string; message:string; }
 export function buildDstImage(request:{schemaVersion:1;requestId:string;target:{serverId:string;hostId:string};expectedRecordVersion:number;releaseId?:string}):Promise<BuildImageResponse>{return call("build_dst_image",request);}

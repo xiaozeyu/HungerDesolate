@@ -139,13 +139,13 @@ Token、服务器密码与分片密钥普通 DTO 只暴露 configured/missing/un
 | WorkshopMetadata | workshopId(十进制字符串)、title、author、description、sourceUrl、metadataUpdatedAt、configSchema/null、fetchStatus |
 | InstanceMod | workshopId、desiredEnabled、desiredConfig、deployedEnabled/null、deployedConfigDigest/null、desiredDigest、installedVersion/null、availableVersion/null、checkedAt/null、status |
 | InstanceMods | revision、items[]、desiredDigest、deployedDigest/null、releaseId/null、lastCheckedAt/null、warnings[] |
-| BackupSummary | backupId、hostId、instanceId、createdAt、reason、captureMode(cold/quasiHot)、captureSemantics、runtimeStatusAtCapture、sizeBytes、checksum/null(仅 pending/failed)、verification、restorability、dstBuild、dstReleaseId、modsReleaseId、configRevision、containsSecrets |
+| BackupSummary | backupId、hostId、instanceId、createdAt、reason、captureMode(cold/quasiHot)、captureSemantics、runtimeStatusAtCapture、sizeBytes、checksum/null(仅 pending/failed)、verification、restorability、dstBuild、mods[]、containsSecrets；`dstReleaseId`/`modsReleaseId`/`configRevision` 仅旧数据兼容，不参与恢复判定 |
 | UpdateStatus | installedBuild/null、availableBuild/null、checkedAt/null、dstUpdateState、modUpdateCounts、activeReleases、rollbackCapability、warnings[] |
 | LogPage | shardKind、streamId、cursor/null、nextCursor/null、lines[{sequence,time/null,text}]、truncated、rotated |
 
 WorkshopMetadata 不含启用、实例路径或安装状态。版本未知时不显示“已最新”；检查失败保留旧检查时间和失败原因。Lua 配置解析使用安全结构解析，禁止前端或远端执行来自 MOD 的任意 Lua。
 
-`verification`：pending/verified/failed。`restorability`：restorable/missingArtifacts/incompatible/unknown。每个备份明确归属；校验通过不等价在所有版本均可恢复。备份包含秘密时下载和导出需明确提示且不生成无保护副本；诊断包必须排除秘密。
+`verification`：pending/verified/failed。`restorability`：restorable/missingArtifacts/incompatible/unknown。每个备份明确归属；归档只含世界存档，恢复不依赖备份 Release；备份 build 高于当前 build 时阻断。备份包含秘密时下载和导出需明确提示且不生成无保护副本；诊断包必须排除秘密。
 
 集合分页统一 `{ items, nextCursor: string | null }`，默认 limit 50、最大 200；日志默认 200 行、最大 1000 行且单次 UTF-8 内容最多 512 KiB。cursor 是后端不透明值，绑定目标、筛选与数据流，跨实例使用拒绝。排序由服务端确定，不能使用前端数组位置作为恢复/删除标识。
 
@@ -556,7 +556,7 @@ interface InstanceCreationResult {
 
 创建任务的 `journal` 只包含持久化阶段变更，不代表容器 stdout/stderr。Compose/Docker 校验诊断按错误详情单独返回并限长；不读取或保存完整游戏日志。
 
-Release 删除通过 `preview_instance_release_delete/delete_instance_release` 执行。删除重查 catalog digest、活动实例登记及 manifest/active-release、未结束或待核实任务、容器引用及共享镜像。retired 登记只保留历史，不阻断 Release 删除；归档文件不修改，确认时说明恢复可能需重新导入原镜像。活动实例、未结束任务引用阻断删除；独占镜像被任意容器（含停止容器）引用时阻断。共用 digest 仅删除当前 Release 登记并保留镜像，其他 Release 的容器引用不阻断该登记删除。预览列出具体引用 ID，用户须输入 DST build 确认；执行时在锁内重查，镜像只按固定 digest 删除。
+Release 删除通过 `preview_instance_release_delete/delete_instance_release` 执行。删除重查 catalog digest、活动实例登记及 manifest/active-release、未结束或待核实任务、容器引用、构建锁及共享镜像。retired 登记只保留历史，不阻断 Release 删除；归档文件不修改，确认时说明恢复可能需重新导入原镜像。活动实例、未结束任务引用阻断删除；独占镜像被任意容器（含停止容器）引用时阻断；构建锁活动时 preview 返回 `buildActive`，delete 返回 `RELEASE_DELETE_BUILD_ACTIVE`。共用 digest 仅删除当前 Release 登记并保留镜像，其他 Release 的容器引用不阻断该登记删除。预览列出具体引用 ID，用户须输入 DST build 确认；执行时先取得构建锁，再在 registry/catalog 锁内重查，镜像只按固定 digest 删除。
 | `CREATE_REGISTRY_CHANGED` | 注册表在执行期间变化 | 刷新后重新提交 |
 | `CREATE_ADMISSION_FAILED` | 接纳阶段失败（注册锁内检查） | 查看错误详情、刷新后重新提交 |
 
@@ -609,17 +609,17 @@ type GetInstanceCreationStatusResponse = {
 | preview_apply_instance_mods / previewInstanceMods | P | target、expectedRevision | 实际差异、固定摘要、运行状态、分片与阻断原因 |
 | apply_instance_mods / applyInstanceMods | T | target、expectedRevision、desiredDigest、operationId、createProtectionBackup | 接纳持久任务；按 `createProtectionBackup` 决定是否在发布前创建冷保护备份，从主机库发布 MOD Release/配置、重建并验证。实例 MOD 页面只从主机库选择版本，UI 的“应用更改”自动 preview 后 apply，页面开关决定是否为本次应用创建备份 |
 | list_host_mods / listHostMods | Q | HostTarget、expectedRecordVersion | 主机公共 MOD 内容列表、版本、大小、使用实例 |
-| delete_host_mod / deleteHostMod | M | HostTarget、workshopId、contentDigest | 删除未被实例 desired/deployed/活动 Release 引用的主机内容 |
-| prepare_host_mods / prepareHostMods | T | HostTarget、workshopIds、sourceHandles、operationId | 主机级 SteamCMD 准备任务；写入 `mods/prepared` |
+| delete_host_mod / deleteHostMod | M | HostTarget、workshopId、contentDigest | 删除未被实例 desired/deployed、活动 Release 或备份 metadata 引用的主机内容 |
+| prepare_host_mods / prepareHostMods | T | HostTarget、workshopIds、sourceHandles、operationId | 主机级 SteamCMD 准备任务；写入 `mods/prepared`，成功后自动清理未被引用的旧版本 |
 | get_host_mod_task / list_host_mod_tasks | Q | HostTarget、operationId 或列表 | 主机级 MOD 准备任务查询 |
 | get_instance_mod_apply_task / getInstanceModApplyTask | Q | target、operationId | 查询持久应用任务与中断恢复结果 |
 | list_instance_mod_apply_tasks / listInstanceModApplyTasks | Q | target | 列出该实例 MOD 应用任务 |
-| get_update_status / getUpdateStatus | Q | target | UpdateStatus，已缓存的检查结果 |
-| check_instance_updates / checkInstanceUpdates | Q | target | 采集可用 DST/MOD 版本；不改变活动产物 |
-| preview_instance_update / previewInstanceUpdate | P | target、scope(dst/mods/both)、expectedRevision | 固定目标 build/Workshop 摘要与回滚能力 |
-| run_instance_update / runInstanceUpdate | T | target、planId、expectedRevision、operationId | 保护备份后更新预览指定的目标产物 |
+| get_dst_update_status / getDstUpdateStatus | Q | HostTarget | HostDstUpdateStatus，读取主机级状态缓存，不联网；返回 checking/stage/startedAt；running 但检查锁已释放时返回中断错误 |
+| check_dst_updates / checkDstUpdates | Q | HostTarget | 联网检查 DST 最新 build；开始写 running，失败写 lastCheckError；检查锁非阻塞，已有检查运行时直接返回当前状态，不重复运行 SteamCMD |
+| preview_instance_update / previewInstanceUpdate | P | target、expectedRevision、targetReleaseId | 固定目标 Release、分片、保护点和回滚能力；只接受 build 高于当前的已验证 Release |
+| run_instance_update / runInstanceUpdate | T | target、planId、expectedRevision、operationId | 世界存档保护点后切换 Release 并验证 |
 
-当前已实现的 `get_workshop_metadata` 在桌面端通过 HTTPS 查询 Steam Workshop，并返回 `author`/`creatorSteamId` 供主机 MOD 添加前确认，最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，返回期望/已部署启用、期望/已部署配置、期望/已部署产物摘要、准备摘要/时间和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁。配置编辑请求的 `schemaBindings[]` 结构为 `{ workshopId, artifactDigest, modinfoSha256, changedFields[] }`；Rust 在 revision 未变化时重新读取实例快照，复求当前 schema，校验绑定摘要、可编辑字段、枚举候选值与基础类型，并确认未声明字段保持原值。游戏侧以 `name` 持久化配置，同名项会作为共享字段编辑；同名定义的共同候选集/类型由前后端共同校验，无法安全合并的组只读而不阻断其他字段。revision 已变化时由远端操作回执优先支持同一 operationId 幂等重放，新的过期操作仍由 CAS 拒绝。编辑保存会固定当前已准备 contentDigest，成功仅推进实例期望状态与全局 revision，不代表内容已部署或正在运行。配置表单只提交实际修改的字段；复杂/不支持字段与未知旧值保留不变。应用预览通过单一远端权威 probe 绑定 target/revision，列出变更、分片和阻断原因，不要求实例已有冷备份或主机恢复验收；提交时携带 `desiredDigest` 和 `createProtectionBackup` 并在远端重验。应用 worker 获取重型锁、世界配置锁和实例写锁，生成 Master/Caves 独立 UGC MOD Release，校验复制后各 Workshop 内容摘要与 setup 文件，冷停服后按 `createProtectionBackup` 决定是否创建冷保护备份，再原子发布活动 Release、`modoverrides.lua`、部署快照和确定性 Compose；按原状态重建分片，并对原本运行的实例验证游戏进程。请求备份时，失败使用该备份恢复完整原 MOD/配置/Compose/世界组合；未请求备份时不做自动恢复，任务失败并明确提示检查部署状态。worker 中断时 status 查询等待 admission grace 后进行对账。`disable` 和 `remove` 先只保存 desired，必须再预览并应用才会生效。保护备份与普通备份均纳入 MOD desired/deployed 状态和活动 MOD Release；恢复时 rebasing 到新全局 revision。MOD Release 的实际 UGC 下载参数和 Linux amd64 运行兼容仍需实机验收。
+当前已实现的 `get_workshop_metadata` 在桌面端通过 HTTPS 查询 Steam Workshop，并返回 `author`/`creatorSteamId` 供主机 MOD 添加前确认，最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，返回期望/已部署启用、期望/已部署配置、期望/已部署产物摘要、准备摘要/时间和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁。配置编辑请求的 `schemaBindings[]` 结构为 `{ workshopId, artifactDigest, modinfoSha256, changedFields[] }`；Rust 在 revision 未变化时重新读取实例快照，复求当前 schema，校验绑定摘要、可编辑字段、枚举候选值与基础类型，并确认未声明字段保持原值。游戏侧以 `name` 持久化配置，同名项会作为共享字段编辑；同名定义的共同候选集/类型由前后端共同校验，无法安全合并的组只读而不阻断其他字段。revision 已变化时由远端操作回执优先支持同一 operationId 幂等重放，新的过期操作仍由 CAS 拒绝。编辑保存会固定当前已准备 contentDigest，成功仅推进实例期望状态与全局 revision，不代表内容已部署或正在运行。配置表单只提交实际修改的字段；复杂/不支持字段与未知旧值保留不变。应用预览通过单一远端权威 probe 绑定 target/revision，列出变更、分片和阻断原因，不要求实例已有冷备份或主机恢复验收；提交时携带 `desiredDigest` 和 `createProtectionBackup` 并在远端重验。应用 worker 获取重型锁、世界配置锁和实例写锁，生成 Master/Caves 独立 UGC MOD Release，校验复制后各 Workshop 内容摘要与 setup 文件，冷停服后按 `createProtectionBackup` 决定是否创建冷保护备份，再原子发布活动 Release、`modoverrides.lua`、部署快照和确定性 Compose；按原状态重建分片，并对原本运行的实例验证游戏进程。请求备份时，失败使用该备份恢复完整原 MOD/配置/Compose/世界组合；未请求备份时不做自动恢复，任务失败并明确提示检查部署状态。worker 中断时 status 查询等待 admission grace 后进行对账。`disable` 和 `remove` 先只保存 desired，必须再预览并应用才会生效。保护备份与普通备份均纳入 MOD desired/deployed 状态和活动 MOD Release；恢复时 rebasing 到新全局 revision。MOD Release 的实际 UGC 下载参数和 Linux amd64 运行兼容仍需实机验收。MOD 应用前置保护点的完整回滚快照存放在 `mod-apply-tasks/<taskId>/protection/`，不再进入用户备份列表。
 
 主机级 MOD 更新检查将 Workshop `contentHandle` 与主机库 manifest 的 `sourceHandle` 比较；变化时通过 `prepare_host_mods` 获取新内容并写入 `mods/prepared`，不自动改变实例 desired。实例从 `list_host_mods` 选择版本，`save_instance_mods` 只保存 `artifactDigest`。`prepare_host_mods` 使用 HostTarget 和主机任务，不接收实例目标；成功结果只证明内容固定在主机库。
 
@@ -631,13 +631,13 @@ type GetInstanceCreationStatusResponse = {
 | --- | --- | --- | --- |
 | list_instance_backups / listInstanceBackups | Q | target、cursor、limit | BackupSummary 分页，包含 retired 实例历史 |
 | preview_instance_backup / previewInstanceBackup | P | target、captureMode(cold/quasiHot)、expectedRevision | 一致性语义、停服影响、空间估算；准热备份不满足破坏性操作保护点 |
-| create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；metadata 保留采集模式、运行状态、`mods[]`（workshopId/enabled/artifactDigest）引用，不保存活动 MOD Release 内容；`BackupSummary.mods` 返回引用 |
+| create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；归档只含世界存档（`data/Master`、`data/Caves`），不保存服务器身份、配置、Compose 或 Release 引用；metadata 保留采集模式、运行状态、`dstBuild`、`mods[]`（workshopId/enabled/artifactDigest）引用作为提示；`BackupSummary.mods` 返回引用 |
 | download_instance_backup / downloadInstanceBackup | T | target、backupId、operationId、本地授权 destinationHandle | SFTP 下载及本地 checksum；不允许前端随意传远端路径 |
-| restore_instance_backup / restoreInstanceBackup | T | target、backupId、expectedRevision、operationId、createProtectionBackup | 用户确认恢复后检查归属、checksum、Release 产物、空间与运行状态；从主机库最新内容重建 MOD Release，缺失 MOD 返回 `modsWarnings` 但继续恢复；跨实例明确拒绝。`createProtectionBackup=false` 时不创建恢复前保护点 |
+| restore_instance_backup / restoreInstanceBackup | T | target、backupId、expectedRevision、operationId、createProtectionBackup | 用户确认恢复后检查归属、checksum、空间与运行状态；只恢复世界存档到当前活动 Release，不切换 Release、不覆盖配置/Compose/MOD/凭据；备份 build 高于当前 build 时返回 `BACKUP_BUILD_NEWER_THAN_INSTANCE`；从主机库最新内容重建 MOD Release，缺失 MOD 返回 `modsWarnings` 但继续恢复；跨实例明确拒绝。`createProtectionBackup=false` 时不创建恢复前保护点 |
 | delete_instance_backup / deleteInstanceBackup | M | target、expectedRevision、backupId、expectedChecksum | checksum CAS、实例归属和维护锁校验后删除备份；恢复前保护点与普通备份一样可删除，不再保留“最新一份不可删”的限制 |
 | read_instance_logs / readInstanceLogs | Q | target、shardKind、cursor、limit | LogPage，游标绑定 stream/target |
 | get_instance_diagnostics / getInstanceDiagnostics | Q | target | 有限健康摘要、证据、失败任务 ID、恢复入口 |
-| manage_build_cache / manageBuildCache | Q/M | HostTarget、action(preview/cleanup) | 预览构建目录与 Docker Build Cache；清理构建上下文并执行受控 `docker builder prune`，不删除 Release 镜像 |
+| manage_build_cache / manageBuildCache | Q/M | HostTarget、action(preview/cleanup) | 预览构建目录与 Docker Build Cache；清理构建上下文、执行受控 `docker builder prune`，只删除未被 catalog 引用的 dangling 镜像，不删除 Release 镜像 |
 | list_tasks / listTasks | Q | HostTarget 或 bootstrap ConnectionTaskTarget、instanceId 可选、cursor、limit | 固定目标 TaskSnapshot 分页，不依赖当前详情；合并本地下载/准备任务索引 |
 | get_task / getTask | Q | HostTarget 或 bootstrap ConnectionTaskTarget、taskId | 校验远端任务归属，返回 TaskSnapshot |
 | get_operation / getOperation | Q | HostTarget 或 bootstrap ConnectionTaskTarget、operationId | 返回 task/shortMutation/notFound 三种结果；恢复接受应答丢失，不重新执行 |

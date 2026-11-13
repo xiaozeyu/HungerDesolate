@@ -386,7 +386,29 @@ def verify_scope(request, required_image=None):
     return image_ref, release_id
 
 
-def start(request, worker_source):
+def run_library_cleanup(directory, request, prepared):
+    cleanup_request = {key: request[key] for key in
+                       ("schemaVersion", "requestId", "serverId", "hostId", "expectedRecordVersion")}
+    cleanup_request.update({"action": "cleanup",
+        "keep": [{"workshopId": item["workshopId"], "contentDigest": item["contentDigest"]}
+                 for item in prepared]})
+    try:
+        result = subprocess.run([sys.executable, "-I", str(directory / "probe.py")],
+            input=json.dumps(cleanup_request), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=120, check=False, env=dict(os.environ))
+    except (OSError, subprocess.TimeoutExpired):
+        reject("HOST_MOD_CLEANUP_FAILED")
+    try:
+        envelope = json.loads(result.stdout)
+    except ValueError:
+        reject("HOST_MOD_CLEANUP_FAILED")
+    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+        reject(str(envelope.get("code") if isinstance(envelope, dict) else "HOST_MOD_CLEANUP_FAILED"))
+    data = envelope.get("data")
+    return data.get("deleted") if isinstance(data, dict) and isinstance(data.get("deleted"), list) else []
+
+
+def start(request, worker_source, probe_source=None):
     if os.geteuid() != 0:
         reject("ROOT_REQUIRED")
     valid_request(request)
@@ -425,6 +447,14 @@ def start(request, worker_source):
                 output.write(worker_source.encode()); output.flush(); os.fsync(fd)
         finally:
             os.close(fd)
+        if probe_source is not None:
+            probe_path = directory / "probe.py"
+            fd = os.open(probe_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o700)
+            try:
+                with os.fdopen(fd, "wb", closefd=False) as output:
+                    output.write(probe_source.encode()); output.flush(); os.fsync(fd)
+            finally:
+                os.close(fd)
         unit = "famine-queue-controller"
         admit_queue(request)
         atomic_bytes(ROOT / "queue-controller.py", worker_source.encode(), 0o700)
@@ -725,8 +755,16 @@ def worker(task_id):
             set_status(directory, "running", "verify", completed="download",
                 progress={"kind": "determinate", "completed": index + 1, "total": len(request["workshopIds"])}, result=result)
         shutil.rmtree(staging_root, ignore_errors=True)
+        CURRENT_STAGE = "cleanup"
+        set_status(directory, "running", "cleanup", completed="verify", result=result)
+        try:
+            result["autoCleanupDeleted"] = len(run_library_cleanup(directory, request, result["preparedMods"]))
+        except Rejected as failure:
+            result["autoCleanupError"] = failure.code
+        except Exception:
+            result["autoCleanupError"] = "HOST_MOD_CLEANUP_FAILED"
         CURRENT_STAGE = "finalize"
-        return set_status(directory, "succeeded", "finalize", completed="verify", result=result,
+        return set_status(directory, "succeeded", "finalize", completed="cleanup", result=result,
             progress={"kind": "determinate", "completed": len(request["workshopIds"]), "total": len(request["workshopIds"])})
     except Exception as failure:
         if getattr(failure, "code", None) == "HOST_MOD_CANCELLED":
@@ -786,10 +824,10 @@ def list_tasks(request):
     return result[:100]
 
 
-def main(request, worker_source):
+def main(request, worker_source, probe_source=None):
     try:
         action = request.get("action")
-        if action == "start": data = {"task": start(request, worker_source)}
+        if action == "start": data = {"task": start(request, worker_source, probe_source)}
         elif action == "status": data = {"task": status(request)}
         elif action == "cancel": data = {"task": cancel(request)}
         elif action == "list": data = list_tasks(request)

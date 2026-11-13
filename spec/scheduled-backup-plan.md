@@ -32,7 +32,7 @@
 现有 `quasiHot` 行为：
 
 - 不要求服务同步，不停止分片；
-- 逐文件读取 `data/Master`、`data/Caves`、`config/Cluster_1`、active-release、manifest、Compose、desired/deployed；
+- 逐文件读取 `data/Master`、`data/Caves`；归档边界以 [备份与恢复文件边界](../docs/backup-restore-boundaries.md) 为目标，只含世界存档，服务器配置/身份不进入归档；
 - 记录开始/结束时间和文件级摘要；
 - metadata：`captureMode=quasiHot`、`captureSemantics=onDiskBestEffort`、`runtimeStatusAtCapture`；
 - 文件可能在采集期间变化，因此不宣称跨文件一致；
@@ -441,10 +441,10 @@ interface BackupSummary {
 
 - 定时备份使用 `quasiHot`，不能作为更新/恢复/MOD 应用前的保护点；这些操作仍必须创建 cold 保护点。
 - 更新/恢复/MOD 应用任务存在时，scheduler 跳过；不会在停服窗口抓取半状态。
-- 更新完成后，下一次定时备份采集新 DST build；备份 metadata 的 `dstReleaseId/dstBuild` 由现有逻辑从 active-release/catalog 取得。
-- 恢复前保护点、手动备份、定时备份都进入同一列表；恢复能力仍按现有 Release 产物/Availability 校验。
+- 更新完成后，下一次定时备份采集新 DST build；metadata 的 `dstBuild` 只作为提示，不再记录/依赖 `dstReleaseId`。
+- 恢复前保护点、手动备份、定时备份都进入同一列表；恢复使用当前活动 Release，不依赖备份 Release 产物。
 - 删除实例时清理该实例的策略和 schedule state；已有备份按实例删除流程处理（当前删除会永久删除实例备份，产品文案需保持一致）。
-- 删除 Release 时，定时备份的 `dstReleaseId` 也计入引用；不能因为“只是定时备份”就允许删除其依赖 Release。
+- 删除 Release 不再被定时备份引用阻断；更新保护点/retained 引用仍保护旧 Release。
 
 ## 13. 安全与数据
 
@@ -510,7 +510,7 @@ interface BackupSummary {
 | 实例停止 | 准热备份成功；metadata stopped |
 | 磁盘不足 | 保留清理后仍不足则跳过；不删最后一份 |
 | 删除 scheduled 备份 | 通过现有 checksum/锁校验；列表/磁盘一致 |
-| 删除 Release | 被定时备份引用时拒绝 |
+| 删除 Release | 不再被定时备份引用；更新保护点/retained 引用仍拒绝 |
 | 删除本地主机连接 | 不停止远端 timer/策略；需先在实例上禁用策略；文档和删除连接确认中说明 |
 | 卸载桌面应用 | 远端 timer/策略仍存在；需先在应用内禁用或手动移除 systemd 单元；不能承诺卸载即停止备份 |
 | 删除实例 | 策略/状态清理；备份按实例删除流程处理 |

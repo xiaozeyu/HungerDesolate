@@ -102,6 +102,31 @@ class RegisterBuiltReleaseTests(unittest.TestCase):
         self.assertFalse(release["runtimeVerified"])
         self.assertEqual((self.root / "releases").stat().st_mode & 0o777, 0o700)
 
+    def test_shared_dst_directory_registers_with_content_digest(self):
+        metadata = json.loads((self.root / "staging" / RELEASE_ID / "release-metadata.json").read_text())
+        dst = self.root / "dst" / RELEASE_ID
+        (dst / "bin64").mkdir(parents=True, mode=0o700)
+        (dst / "data" / "databundles").mkdir(parents=True, mode=0o700)
+        (dst / "version.txt").write_text("build-1\n")
+        binary = dst / "bin64" / "dontstarve_dedicated_server_nullrenderer_x64"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        (dst / "data" / "databundles" / "scripts.zip").write_bytes(b"scripts")
+        metadata["artifactDigest"] = "sha256:" + MODULE.content_digest(dst)
+        (self.root / "staging" / RELEASE_ID / "release-metadata.json").write_text(json.dumps(metadata))
+        responses = [
+            SimpleNamespace(returncode=0, stdout=DIGEST + "\n"),
+            SimpleNamespace(returncode=0, stdout="build-1\n"),
+            SimpleNamespace(returncode=0, stdout="libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6\n"),
+            SimpleNamespace(returncode=0, stdout="steamcmd-workshop-v1\n"),
+        ]
+        with patch.object(MODULE, "DST", self.root / "dst"), \
+             patch.object(MODULE.subprocess, "run", side_effect=responses):
+            MODULE.register(RELEASE_ID)
+        release = json.loads(MODULE.CATALOG.read_text())["releases"][0]
+        self.assertEqual(release["image"], "hungerdesolate/dst-runtime")
+        self.assertEqual(release["artifactDigest"], metadata["artifactDigest"])
+
     def test_digest_mismatch_prevents_catalog_registration(self):
         result = SimpleNamespace(returncode=0, stdout="sha256:" + "b" * 64 + "\n")
         with patch.object(MODULE.subprocess, "run", return_value=result):

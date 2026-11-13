@@ -5,7 +5,7 @@ export LC_ALL=C
 
 steamcmd_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$steamcmd_dir"
-dst_dir="$steamcmd_dir/dst"
+dst_dir="${DST_DIR:-$steamcmd_dir/dst}"
 phase=${1:-}
 case "$phase" in
     # SteamCMD bootstrap 需要下载客户端更新，为慢速 CDN 保留有界等待时间。

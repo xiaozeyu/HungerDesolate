@@ -73,6 +73,7 @@ pub struct ReleaseDeleteResponse {
     pub image_removed: bool,
     pub image_shared: bool,
     pub staging_removed: bool,
+    pub dst_removed: bool,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +147,10 @@ fn remote_error(code: &str) -> Box<CommandError> {
         "RELEASE_IN_USE" => (
             "RELEASE_IN_USE",
             "该 Release 仍被实例、任务或容器引用，不能删除",
+        ),
+        "RELEASE_DELETE_BUILD_ACTIVE" => (
+            "RELEASE_DELETE_BUILD_ACTIVE",
+            "正在构建 Release，暂不能清理；请等待构建结束后重试",
         ),
         "RELEASE_CONFIRMATION_MISMATCH" => (
             "RELEASE_CONFIRMATION_MISMATCH",
@@ -481,6 +486,10 @@ pub fn delete_release(
                 .unwrap_or(false),
             staging_removed: data
                 .get("stagingRemoved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            dst_removed: data
+                .get("dstRemoved")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         })

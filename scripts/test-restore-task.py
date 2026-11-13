@@ -146,22 +146,6 @@ class RestoreTaskStateTests(unittest.TestCase):
             self.assertEqual((instance / "compose.yaml").read_text(), "old compose\n")
             self.assertEqual(MODULE.read_json(instance / "active-release.json"), {"version": "old"})
 
-    def test_legacy_restore_uses_current_active_release_when_backup_has_no_snapshot(self):
-        with tempfile.TemporaryDirectory(prefix="restore-legacy-active-") as temporary:
-            current = {"schemaVersion": 1, "dstReleaseId": "66666666-6666-4666-8666-666666666666",
-                       "modsReleaseId": None}
-            restored = MODULE.restored_active_snapshot(Path(temporary), current)
-        self.assertEqual(restored, current)
-
-    def test_restore_prefers_archived_active_release_snapshot(self):
-        with tempfile.TemporaryDirectory(prefix="restore-active-") as temporary:
-            staging = Path(temporary)
-            archived = {"schemaVersion": 1, "dstReleaseId": "77777777-7777-4777-8777-777777777777",
-                        "modsReleaseId": None}
-            MODULE.atomic_json(staging / "active-release.json", archived)
-            restored = MODULE.restored_active_snapshot(staging, {"dstReleaseId": "66666666-6666-4666-8666-666666666666"})
-        self.assertEqual(restored, archived)
-
     def test_restore_error_payload_carries_only_explicit_rollback_diagnostics(self):
         request = {"hostId": HOST_ID, "instanceId": INSTANCE_ID}
         payload = MODULE.error_payload("BACKUP_ROLLBACK_FAILED", request, TASK_ID,
@@ -211,7 +195,7 @@ class RestoreTaskStateTests(unittest.TestCase):
         self.assertEqual(first[-4:], ["create", "--force-recreate", "master", "caves"])
         self.assertEqual(second[-3:], ["start", "master", "caves"])
 
-    def test_restore_start_launches_the_bundled_worker_and_release_helper(self):
+    def test_restore_start_launches_the_bundled_worker_and_archive_helper(self):
         with tempfile.TemporaryDirectory(prefix="restore-start-") as temporary:
             root = Path(temporary) / "hub"
             tasks = root / "restore-tasks"
@@ -229,217 +213,24 @@ class RestoreTaskStateTests(unittest.TestCase):
                  patch.object(MODULE, "wait_controller_active", return_value=True), \
                  patch.object(MODULE.subprocess, "run", return_value=launch) as run, \
                  patch.object(MODULE, "RESTORE_SOURCE", "worker source", create=True), \
-                 patch.object(MODULE, "ARCHIVE_SOURCE", "archive source", create=True), \
-                 patch.object(MODULE, "RELEASE_SOURCE", "release source", create=True), \
-                 patch.object(MODULE, "MODS_APPLY_SOURCE", "mods apply source", create=True), \
-                 patch.object(MODULE, "MODS_DOWNLOAD_SOURCE", "mods download source", create=True):
+                 patch.object(MODULE, "ARCHIVE_SOURCE", "archive source", create=True):
                 state = MODULE.start(request)
 
             operation_dir = tasks / request["operationId"]
             self.assertEqual(state["status"], "queued")
             self.assertTrue((operation_dir / "worker.py").is_file())
-            self.assertEqual((operation_dir / "release-source.py").read_text(), "release source")
-            self.assertEqual((operation_dir / "mods-apply-source.py").read_text(), "mods apply source")
-            self.assertEqual((operation_dir / "mods-download-source.py").read_text(), "mods download source")
+            self.assertEqual((operation_dir / "archive-source.py").read_text(), "archive source")
+            self.assertFalse((operation_dir / "release-source.py").exists())
             self.assertIn(str(root / "queue-controller.py"), run.call_args.args[0])
 
-    def test_restore_worker_bundle_includes_archive_and_release_helpers(self):
+    def test_restore_worker_bundle_includes_archive_helper_only(self):
         with tempfile.TemporaryDirectory(prefix="restore-bundle-") as temporary:
             directory = Path(temporary)
-            MODULE.write_worker_bundle(directory, "worker source", "archive source", "release source",
-                                       "mods apply source", "mods download source")
+            MODULE.write_worker_bundle(directory, "worker source", "archive source")
 
             self.assertEqual((directory / "worker.py").read_text(), "worker source")
             self.assertEqual((directory / "archive-source.py").read_text(), "archive source")
-            self.assertEqual((directory / "release-source.py").read_text(), "release source")
-            self.assertEqual((directory / "mods-apply-source.py").read_text(), "mods apply source")
-            self.assertEqual((directory / "mods-download-source.py").read_text(), "mods download source")
-            self.assertEqual(stat.S_IMODE((directory / "release-source.py").stat().st_mode), 0o600)
-
-    def test_missing_mod_snapshot_is_restored_as_no_mods_not_current_state(self):
-        with tempfile.TemporaryDirectory(prefix="restore-missing-mods-") as temporary:
-            root = Path(temporary)
-            staging = root / "staging"
-            instance = root / "instance"
-            current = instance / "desired" / "mods.json"
-            current.parent.mkdir(parents=True)
-            current.write_text(json.dumps({"schemaVersion": 1, "instanceId": INSTANCE_ID,
-                "revision": 9, "mods": [{"workshopId": "123", "enabled": True,
-                    "configurationOptions": {}, "artifactDigest": "a" * 64}]}))
-            current.chmod(0o600)
-            self.assertEqual(MODULE.read_mod_snapshot(staging, False), (None, None))
-
-            archived = staging / "desired" / "mods.json"
-            archived.parent.mkdir(parents=True)
-            archived.write_text(json.dumps({"schemaVersion": 1, "instanceId": INSTANCE_ID,
-                "revision": 3, "mods": []}))
-            archived.chmod(0o600)
-            deployed = staging / "deployed-mods.json"
-            deployed.write_text(json.dumps({"schemaVersion": 1, "instanceId": INSTANCE_ID,
-                "revision": 3, "mods": []}))
-            deployed.chmod(0o600)
-            desired_value, deployed_value = MODULE.read_mod_snapshot(staging, True)
-            self.assertEqual(desired_value["revision"], 3)
-            self.assertEqual(deployed_value["revision"], 3)
-
-    def test_mod_snapshot_can_restore_desired_before_first_deployment(self):
-        desired = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 8,
-                   "mods": [{"workshopId": "123", "enabled": True, "artifactDigest": "a" * 64}]}
-        restored_desired, restored_deployed = MODULE.rebase_mod_states(
-            desired, None, INSTANCE_ID, 10)
-        self.assertEqual(restored_desired["revision"], 10)
-        self.assertIsNone(restored_deployed)
-
-    def test_mod_snapshot_revision_is_rebased_to_the_new_revision(self):
-        desired = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 9, "mods": []}
-        deployed = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 9, "mods": []}
-        restored_desired, restored_deployed = MODULE.rebase_mod_states(
-            desired, deployed, INSTANCE_ID, 12)
-        self.assertEqual(restored_desired["revision"], 12)
-        self.assertEqual(restored_deployed["revision"], 12)
-
-    def test_restore_json_reader_accepts_optional_missing_deployed_mod_snapshot(self):
-        with tempfile.TemporaryDirectory(prefix="restore-optional-mods-") as temporary:
-            root = Path(temporary)
-            desired = root / "desired" / "mods.json"
-            desired.parent.mkdir()
-            desired.write_text(json.dumps({"schemaVersion": 1, "instanceId": INSTANCE_ID,
-                "revision": 8, "mods": []}))
-            desired.chmod(0o600)
-
-            self.assertEqual(MODULE.read_json(root / "deployed-mods.json", 2 * 1024 * 1024, missing=None), None)
-            self.assertEqual(MODULE.read_json(desired, 2 * 1024 * 1024)["mods"], [])
-
-    def test_mod_snapshot_rejects_state_from_another_instance(self):
-        desired = {"schemaVersion": 1, "instanceId": HOST_ID, "revision": 8, "mods": []}
-        with self.assertRaises(MODULE.Rejected) as failure:
-            MODULE.rebase_mod_states(desired, None, INSTANCE_ID, 10)
-        self.assertEqual(failure.exception.code, "BACKUP_MODS_SNAPSHOT_INVALID")
-
-    def test_world_config_snapshot_is_validated_and_rebased_together(self):
-        settings = {"gameMode": "survival"}
-        digest = "sha256:" + __import__("hashlib").sha256(MODULE.canonical(settings)).hexdigest()
-        desired = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 8,
-                   "settings": settings, "secrets": {"tokenRef": "reference"}}
-        deployed = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 8,
-                    "settings": settings, "digest": digest}
-        restored_desired, restored_deployed = MODULE.rebase_world_config(
-            desired, deployed, INSTANCE_ID, 10)
-        self.assertEqual(restored_desired["revision"], 10)
-        self.assertEqual(restored_deployed["revision"], 10)
-        deployed["digest"] = "sha256:" + "0" * 64
-        with self.assertRaises(MODULE.Rejected) as failure:
-            MODULE.rebase_world_config(desired, deployed, INSTANCE_ID, 11)
-        self.assertEqual(failure.exception.code, "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID")
-
-    def test_world_snapshot_rebases_desired_and_deployed_independently(self):
-        desired_settings = {"gameMode": "survival", "new": True}
-        deployed_settings = {"gameMode": "endless"}
-        deployed_digest = "sha256:" + __import__("hashlib").sha256(
-            MODULE.canonical(deployed_settings)).hexdigest()
-        desired = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 9,
-                   "settings": desired_settings, "secrets": {"tokenRef": "reference"}}
-        deployed = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 8,
-                    "settings": deployed_settings, "digest": deployed_digest}
-        restored_desired, restored_deployed = MODULE.rebase_world_config(
-            desired, deployed, INSTANCE_ID, 10)
-        self.assertEqual(restored_desired["revision"], 10)
-        self.assertEqual(restored_deployed["revision"], 10)
-        self.assertEqual(restored_desired["settings"], desired_settings)
-        self.assertEqual(restored_deployed["settings"], deployed_settings)
-
-    def test_restore_uses_the_current_token_reference_instead_of_the_backup_reference(self):
-        old_ref = "44444444-4444-4444-8444-444444444444"
-        current_ref = "55555555-5555-4555-8555-555555555555"
-        restored = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 10,
-                    "settings": {}, "secrets": {"tokenRef": old_ref}}
-        current = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 11,
-                   "settings": {}, "secrets": {"tokenRef": current_ref}}
-
-        result = MODULE.preserve_current_secret_refs(restored, current)
-
-        self.assertEqual(result["secrets"]["tokenRef"], current_ref)
-        self.assertEqual(restored["secrets"]["tokenRef"], old_ref)
-
-    def test_restore_keeps_backup_token_when_no_current_token_is_configured(self):
-        old_ref = "44444444-4444-4444-8444-444444444444"
-        restored = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 10,
-                    "settings": {}, "secrets": {"tokenRef": old_ref}}
-        current = {"schemaVersion": 1, "instanceId": INSTANCE_ID, "revision": 11,
-                   "settings": {}, "secrets": {"tokenRef": None}}
-
-        result = MODULE.preserve_current_secret_refs(restored, current)
-
-        self.assertEqual(result["secrets"]["tokenRef"], old_ref)
-
-    def test_restore_recreates_secret_token_and_sets_runtime_file_ownership(self):
-        with tempfile.TemporaryDirectory(prefix="restore-token-") as temporary:
-            root = Path(temporary)
-            instance = root / "instance"
-            staging = root / "staging"
-            secret_dir = instance / "desired-secrets"
-            secret_dir.mkdir(parents=True, mode=0o700)
-            config = staging / "config" / "Cluster_1"
-            config.mkdir(parents=True, mode=0o700)
-            secret_ref = "44444444-4444-4444-8444-444444444444"
-            (secret_dir / (secret_ref + ".token")).write_bytes(b"private-token\n")
-            (secret_dir / (secret_ref + ".token")).chmod(0o600)
-            world = staging / "data" / "Master" / "save.zip"
-            world.parent.mkdir(parents=True)
-            world.write_bytes(b"world")
-            desired = {"secrets": {"tokenRef": secret_ref}}
-            MODULE.restore_cluster_token(instance, staging, desired)
-            with patch.object(os, "chown") as chown:
-                MODULE.assign_runtime_ownership(staging / "data" / "Master")
-                MODULE.assign_runtime_ownership(staging / "config" / "Cluster_1")
-            token = config / "cluster_token.txt"
-            self.assertEqual(token.read_bytes(), b"private-token")
-            self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o600)
-            self.assertTrue(any(call.args[1:] == (1000, 1000) for call in chown.call_args_list))
-
-    def test_rebuild_mods_repairs_extracted_shard_directory_permissions(self):
-        with tempfile.TemporaryDirectory(prefix="restore-mods-permissions-") as temporary:
-            root = Path(temporary)
-            staging = root / "staging"
-            shard = staging / "config" / "Cluster_1" / "Master"
-            shard.mkdir(parents=True, mode=0o700)
-            staging.chmod(0o700)
-            (staging / "config").chmod(0o700)
-            (staging / "config" / "Cluster_1").chmod(0o700)
-            shard.chmod(0o755)
-            desired = {"mods": []}
-            apply_ns = {"modoverrides": lambda mods: b"return {}\n"}
-            with patch.object(MODULE.os, "chown"):
-                MODULE.rebuild_restore_mods(
-                    staging, "22222222-2222-4222-8222-222222222222", desired, 2,
-                    "11111111-1111-4111-8111-111111111111", ["Master"], {}, apply_ns, {})
-            override = shard / "modoverrides.lua"
-            self.assertEqual(override.read_bytes(), b"return {}\n")
-            self.assertEqual(stat.S_IMODE(override.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(shard.stat().st_mode), 0o700)
-
-    def test_restore_preserves_current_player_lists_outside_the_backup(self):
-        with tempfile.TemporaryDirectory(prefix="restore-player-lists-") as temporary:
-            root = Path(temporary)
-            instance = root / "instance"
-            staging = root / "staging"
-            current = instance / "config" / "Cluster_1"
-            current.mkdir(parents=True, mode=0o700)
-            for name, payload in (("adminlist.txt", b"STEAM_1\n"),
-                                  ("whitelist.txt", b"STEAM_2\n"),
-                                  ("blocklist.txt", b"STEAM_3\n")):
-                path = current / name
-                path.write_bytes(payload)
-                path.chmod(0o600)
-            staged_config = staging / "config" / "Cluster_1"
-            staged_config.mkdir(parents=True, mode=0o700)
-            staged_config.chmod(0o755)
-            preserved = MODULE.preserve_player_lists(instance)
-            MODULE.write_player_lists(staging, preserved)
-            self.assertEqual(stat.S_IMODE(staged_config.stat().st_mode), 0o700)
-            for name in ("adminlist.txt", "whitelist.txt", "blocklist.txt"):
-                self.assertEqual((staging / "config" / "Cluster_1" / name).read_bytes(),
-                                 (current / name).read_bytes())
+            self.assertEqual(stat.S_IMODE((directory / "archive-source.py").stat().st_mode), 0o600)
 
     def test_restore_commit_moves_staged_directories_without_copying_ownership(self):
         source = (Path(__file__).parents[1] / "remote-scripts" / "actions" / "restore-task.py").read_text()
@@ -540,48 +331,6 @@ class RestoreTaskStateTests(unittest.TestCase):
                 updated = MODULE.set_status(task_dir, "running", "preflight")
                 self.assertEqual(updated["status"], "running")
                 self.assertEqual(MODULE.load(TASK_ID)["sequence"], 2)
-
-
-class RestoreBoundaryTests(unittest.TestCase):
-    def test_release_staging_allows_read_only_permissions(self):
-        with tempfile.TemporaryDirectory(prefix="restore-release-dir-") as temporary:
-            path = Path(temporary) / "release"
-            path.mkdir(mode=0o700)
-            path.chmod(0o755)
-            MODULE.safe_release_dir(path)
-            path.chmod(0o775)
-            with self.assertRaises(MODULE.Rejected):
-                MODULE.safe_release_dir(path)
-    def test_preserves_current_access_policy_and_digest(self):
-        current = {"settings": {"advanced": {"adminList": ["current-admin"], "whitelist": ["current-white"],
-                                              "blocklist": ["current-block"], "whitelistSlots": 1}}}
-        desired = {"settings": {"advanced": {"adminList": ["old"], "whitelist": [], "blocklist": [], "whitelistSlots": 0}}}
-        deployed = {"settings": {"advanced": {"adminList": ["old"], "whitelist": [], "blocklist": [], "whitelistSlots": 0}},
-                    "digest": "old"}
-        MODULE.preserve_access_policy(desired, deployed, current)
-        self.assertEqual(desired["settings"]["advanced"]["adminList"], ["current-admin"])
-        self.assertEqual(deployed["settings"]["advanced"]["whitelistSlots"], 1)
-        self.assertEqual(deployed["digest"], "sha256:" + __import__("hashlib").sha256(
-            MODULE.canonical(deployed["settings"])).hexdigest())
-
-    def test_preserves_current_cluster_access_fields(self):
-        with tempfile.TemporaryDirectory(prefix="restore-cluster-") as temporary:
-            instance = Path(temporary) / "instance"
-            staging = Path(temporary) / "staging"
-            for directory in (instance, staging, instance / "config", staging / "config",
-                              instance / "config" / "Cluster_1", staging / "config" / "Cluster_1"):
-                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-                directory.chmod(0o700)
-            (instance / "config" / "Cluster_1" / "cluster.ini").write_text(
-                "[NETWORK]\ncluster_password = current-password\n[SHARD]\ncluster_key = current-key\n[GAMEPLAY]\nwhitelist_slots = 4\n")
-            (staging / "config" / "Cluster_1" / "cluster.ini").write_text(
-                "[NETWORK]\ncluster_password = old-password\n[SHARD]\ncluster_key = old-key\n[GAMEPLAY]\nwhitelist_slots = 9\n")
-            MODULE.preserve_cluster_access(instance, staging)
-            data = (staging / "config" / "Cluster_1" / "cluster.ini").read_text()
-            self.assertIn("current-password", data)
-            self.assertIn("current-key", data)
-            self.assertIn("whitelist_slots = 4", data)
-            self.assertNotIn("old-password", data)
 
 
 if __name__ == "__main__":

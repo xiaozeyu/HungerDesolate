@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "naive-poc",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--config", "poc/naive-ui/vite.config.ts"],
+      "port": 1425
+    }
+  ]
+}

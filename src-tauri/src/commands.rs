@@ -991,6 +991,104 @@ pub async fn manage_build_cache(
 }
 
 #[tauri::command]
+pub async fn get_dst_update_status(
+    state: State<'_, AppState>,
+    request: crate::updates::HostUpdateRequest,
+) -> CommandResult<crate::updates::HostDstUpdateStatus> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getDstUpdateStatus",
+        safe_request_id(&request.request_id),
+        move || crate::updates::get_status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn check_dst_updates(
+    state: State<'_, AppState>,
+    request: crate::updates::HostUpdateRequest,
+) -> CommandResult<crate::updates::HostDstUpdateStatus> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "checkDstUpdates",
+        safe_request_id(&request.request_id),
+        move || crate::updates::check(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_instance_update(
+    state: State<'_, AppState>,
+    request: crate::updates::PreviewRequest,
+) -> CommandResult<crate::updates::UpdatePreview> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "previewInstanceUpdate",
+        safe_request_id(&request.request_id),
+        move || crate::updates::preview(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn run_instance_update(
+    state: State<'_, AppState>,
+    request: crate::updates::RunRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "runInstanceUpdate",
+        safe_request_id(&request.request_id),
+        move || crate::updates::run(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_instance_update_task(
+    state: State<'_, AppState>,
+    request: crate::updates::TaskStatusRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getInstanceUpdateTask",
+        safe_request_id(&request.request_id),
+        move || crate::updates::task_status(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_instance_update(
+    state: State<'_, AppState>,
+    request: crate::updates::TaskStatusRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "cancelInstanceUpdate",
+        safe_request_id(&request.request_id),
+        move || crate::updates::task_cancel(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_instance_update_tasks(
+    state: State<'_, AppState>,
+    request: crate::updates::TaskListRequest,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "listInstanceUpdateTasks",
+        safe_request_id(&request.request_id),
+        move || crate::updates::task_list(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn get_build_status(
     state: State<'_, AppState>,
     request: crate::image_build::GetBuildStatusRequest,

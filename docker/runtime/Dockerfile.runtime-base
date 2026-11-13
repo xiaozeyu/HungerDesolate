@@ -1,0 +1,38 @@
+# Stable runtime base: Debian runtime libraries, UID 1000 user and workshop helper.
+ARG BUILD_BASE_IMAGE
+FROM ${BUILD_BASE_IMAGE} AS steamcmd
+FROM debian:12-slim
+
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g; s/security.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g; s/security.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
+    fi
+
+RUN dpkg --add-architecture i386 && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        lib32gcc-s1 \
+        lib32stdc++6 \
+        libcurl3-gnutls \
+        libcurl4:i386 \
+        libcurl4-gnutls-dev:i386 \
+        && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -g 1000 famine && \
+    useradd -u 1000 -g 1000 -m -s /bin/bash famine
+
+COPY --from=steamcmd /home/steam/steamcmd.sh /opt/famine/steamcmd/steamcmd.sh
+COPY --from=steamcmd /home/steam/linux32 /opt/famine/steamcmd/linux32
+COPY --from=steamcmd /home/steam/package /opt/famine/steamcmd/package
+COPY fetch-workshop.sh /usr/local/bin/famine-workshop-fetch
+
+WORKDIR /srv/dst/bin64
+RUN chmod 0755 /usr/local/bin/famine-workshop-fetch && \
+    chown -R famine:famine /opt/famine/steamcmd && \
+    mkdir -p /srv/config /srv/data /srv/ugc /srv/capabilities && \
+    printf '%s\n' 'steamcmd-workshop-v1' > /srv/capabilities/workshop-fetch && \
+    chown -R famine:famine /srv
+
+USER famine

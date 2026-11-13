@@ -16,6 +16,7 @@ CATALOG = ROOT / "releases" / "catalog.json"
 REGISTRY = ROOT / "registry.json"
 RELEASES = ROOT / "releases"
 STAGING = ROOT / "staging"
+DST = ROOT / "dst"
 REGISTRY_LOCK = ROOT / "locks" / "registry.lock"
 CATALOG_LOCK = RELEASES / "catalog.lock"
 MAX_BYTES = 1024 * 1024
@@ -96,6 +97,43 @@ def lock(path):
     return fd
 
 
+def try_build_lock(create=False):
+    directory = ROOT / "image-build"
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        if not create:
+            return None
+        directory.mkdir(mode=0o700)
+        info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+            or info.st_mode & 0o022):
+        reject("RELEASE_DELETE_STATE_INVALID")
+    fd = os.open(directory / "build.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o077):
+        os.close(fd)
+        reject("RELEASE_DELETE_STATE_INVALID")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return False
+    return fd
+
+
+def build_active():
+    fd = try_build_lock()
+    if fd is None:
+        return False
+    if fd is False:
+        return True
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+    return False
+
+
 def docker(command, timeout=15):
     env = dict(os.environ)
     for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION", "DOCKER_CONFIG"):
@@ -157,7 +195,19 @@ def release_directory(release_id):
     return path
 
 
-def inspect_release(request):
+def dst_directory(release_id):
+    path = DST / release_id
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid(), 1000)
+            or info.st_mode & 0o022):
+        reject("RELEASE_DELETE_STATE_INVALID")
+    return path
+
+
+def inspect_release(request, check_build=True):
     host_id, release_id = request.get("hostId"), request.get("releaseId")
     if not valid_uuid(host_id) or not valid_uuid(release_id):
         reject("RELEASE_DELETE_INPUT_INVALID")
@@ -190,6 +240,11 @@ def inspect_release(request):
                 pointer = instance_dir / filename
                 if pointer.exists() and safe_json(pointer, 65536).get("dstReleaseId") == release_id:
                     instance_refs.add(instance_dir.name)
+            retained = instance_dir / "retained-releases.json"
+            if retained.exists():
+                value = safe_json(retained, 65536)
+                if isinstance(value.get("releaseIds"), list) and release_id in value["releaseIds"]:
+                    instance_refs.add(instance_dir.name)
     if any(not valid_uuid(value) for value in instance_refs):
         reject("RELEASE_DELETE_STATE_INVALID")
     task_refs = []
@@ -207,29 +262,34 @@ def inspect_release(request):
     same_image = [item.get("releaseId") for item in catalog["releases"]
                   if isinstance(item, dict) and item.get("imageDigest") == entry.get("imageDigest")]
     containers = image_containers(entry.get("imageDigest"))
-    shared_image = len(same_image) > 1
+    shared_image = len(same_image) > 1 or entry.get("image") == "hungerdesolate/dst-runtime-base"
+    active = build_active() if check_build else False
     return {"hostId": host_id, "releaseId": release_id, "dstBuild": entry.get("dstBuild"),
             "image": entry.get("image"), "imageDigest": entry.get("imageDigest"),
             "catalogDigest": digest(catalog), "instanceReferences": sorted(instance_refs),
             "taskReferences": task_refs, "containerReferences": containers,
-            "sharedImage": shared_image,
-            "allowed": not (instance_refs or task_refs or (containers and not shared_image))}
+            "sharedImage": shared_image, "buildActive": active,
+            "allowed": not (instance_refs or task_refs or active
+                            or (containers and not shared_image))}
 
 
 def remove(request):
     if os.geteuid() != 0:
         reject("ROOT_REQUIRED")
-    inspected = inspect_release(request)
+    inspected = inspect_release(request, check_build=False)
     if request.get("catalogDigest") != inspected["catalogDigest"]:
         reject("RELEASE_CATALOG_CHANGED")
     if request.get("typedName") != inspected["dstBuild"]:
         reject("RELEASE_CONFIRMATION_MISMATCH")
     if not inspected["allowed"]:
         reject("RELEASE_IN_USE")
+    build_fd = try_build_lock(create=True)
+    if build_fd is False:
+        reject("RELEASE_DELETE_BUILD_ACTIVE")
     registry_fd = lock(ROOT / "locks" / "registry.lock")
     catalog_fd = lock(CATALOG_LOCK)
     try:
-        inspected = inspect_release(request)
+        inspected = inspect_release(request, check_build=False)
         if request.get("catalogDigest") != inspected["catalogDigest"]:
             reject("RELEASE_CATALOG_CHANGED")
         if request.get("typedName") != inspected["dstBuild"]:
@@ -240,6 +300,7 @@ def remove(request):
         old_catalog = json.loads(json.dumps(catalog))
         image_shared = inspected["sharedImage"]
         path = release_directory(inspected["releaseId"])
+        dst_path = dst_directory(inspected["releaseId"])
         catalog["releases"] = [item for item in catalog["releases"] if item.get("releaseId") != inspected["releaseId"]]
         write_catalog(catalog)
 
@@ -260,14 +321,23 @@ def remove(request):
                 shutil.rmtree(path)
             except OSError:
                 staging_removed = False
+        dst_removed = True
+        if dst_path is not None:
+            try:
+                shutil.rmtree(dst_path)
+            except OSError:
+                dst_removed = False
         return {"releaseId": inspected["releaseId"], "catalogDigest": digest(catalog),
                 "imageRemoved": image_removed, "imageShared": image_shared,
-                "stagingRemoved": staging_removed}
+                "stagingRemoved": staging_removed, "dstRemoved": dst_removed}
     finally:
         fcntl.flock(catalog_fd, fcntl.LOCK_UN)
         os.close(catalog_fd)
         fcntl.flock(registry_fd, fcntl.LOCK_UN)
         os.close(registry_fd)
+        if build_fd is not None and build_fd is not False:
+            fcntl.flock(build_fd, fcntl.LOCK_UN)
+            os.close(build_fd)
 
 
 def main(request):

@@ -196,13 +196,13 @@ Docker 的 always/unless-stopped 对手动停止和 daemon 重启行为不同。
 
 releaseId 是实例内不可变安全标识；记录 imageDigest、实际 DST build、产物 checksum、Workshop 项摘要、创建任务和验证结果。staging 校验成功后才成为 release。
 
-构建使用 Docker daemon 自带的 BuildKit，不再创建独立 `docker-container` builder。构建前由 `prepare-base-image.sh` 确认本地存在 linux/amd64 的 `debian:12-slim`；缺失时依次从 DaoCloud、1ms.run、Tencent Cloud 内网镜像和 Docker Hub 拉取并打本地标签。基础镜像准备失败返回 `BASE_IMAGE_UNAVAILABLE`，不进入 Dockerfile、不登记 Release。构建脚本不修改 daemon.json 或重启共享服务；两条构建路线共用同一 Dockerfile，不再维护内嵌副本。
+构建使用 Docker daemon 自带的 BuildKit，不再创建独立 `docker-container` builder。构建前由 `prepare-base-image.sh` 确认本地存在 linux/amd64 的 `debian:12-slim`；缺失时依次从 DaoCloud、1ms.run、Tencent Cloud 内网镜像和 Docker Hub 拉取并打本地标签。基础镜像准备失败返回 `BASE_IMAGE_UNAVAILABLE`，不进入 Dockerfile、不登记 Release。构建脚本不修改 daemon.json 或重启共享服务；远端构建使用共享 `dst-build-base`/`dst-runtime-base`，DST 安装到 `dst/<releaseId>` 并由 Compose 只读挂载，不再构建每 Release 镜像；本地构建路线保留原双阶段 `Dockerfile`。
 
 每次部署记录完整组合 `deploymentId → configRevision/digests + dstReleaseId + modsReleaseId`。停止目标分片后，在一个 active-release.json 内原子切换组合，再按该组合重建受管服务。不要分散修改多个 symlink 后假设任意断点都是一致发布。manifest 最后记录验证结果；journal 可恢复中间态。
 
 DST 二进制可在同实例两分片只读共享；UGC 可写区按分片独立，MOD 任务顺序准备一致版本。若实际 DST 自动写入要求与只读布局冲突，阶段 0 调整具体 mount 与启动流程，但不允许多个实例共享可写 MOD 或在线覆盖当前产物。
 
-不主动承诺从官方重新下载任意旧 build。只有留存历史产物、MOD 摘要及完整保护备份时才提供自动回滚。release GC 计算 active、备份、任务、恢复点引用，保护引用永不清除；容量不足时阻断新操作，不能删掉唯一恢复产物凑空间。
+不主动承诺从官方重新下载任意旧 build。只有留存历史产物、MOD 摘要及完整保护备份时才提供自动回滚。release GC 计算 active、任务、更新保护点/retained 引用；普通备份不再引用 Release，更新成功后旧 Release 可回收。容量不足时阻断新操作，不能删掉唯一恢复产物凑空间。
 
 ## 6. 端口分配与资源预算
 
@@ -299,13 +299,13 @@ Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、ena
 
 配置表单按 schema 的候选项、布尔、数字和字符串类型渲染；复杂值与不支持字段只读。游戏界面按数组位置展示配置项，但持久化以 `name` 为键；同名项在应用中合并成一个共享值控件，候选值取所有同名定义的交集。类型冲突、无共同候选项或当前值不明的同名组只读，不阻塞同一 MOD 的其他字段。保存只合并用户实际修改的字段，保留未知字段及旧值，并可显式恢复 MOD 默认值。编辑请求绑定 workshopId、已准备 contentDigest、modinfoSha256 和 changedFields；Rust 在保存前按完整 target 与 expectedRevision 重新读取快照并复求 schema，校验内容/schema 摘要、所有同名定义的类型/候选值及未声明字段未变化。revision 已变化时跳过预校验，由远端 save controller 先处理 operationId 回执重放，再执行 CAS，保持丢失响应后的幂等行为。编辑成功固定当前内容摘要并更新 desired，不改 active-release/UGC，不宣称已部署。
 
-主机级 MOD 内容准备使用 HostTarget 和 `host-mod-tasks`。worker 从本地主机已验证 Release 中选择固定 digest 且带有 `steamcmd-workshop-v1` 能力标记的镜像作为 SteamCMD 工具容器；下载容器不挂 Docker socket，仅挂主机 task staging，以非 root 用户、只读根文件系统和资源限制运行 SteamCMD。完成后校验文件类型、路径、数量、总大小、modinfo 与逐文件摘要，将内容发布到只读 `mods/prepared/<workshopId>/<contentDigest>`（目录 `0555`、文件 `0444`、manifest `0600`），供所有实例选择。实例 desired 只记录 `workshopId/enabled/configurationOptions/artifactDigest`，不再写实例 `mods/prepared`。应用时从主机库复制内容到实例 MOD Release，并校验摘要。匿名 SteamCMD 下载、Linux amd64 网络路径和实际 Workshop 样本尚待实机验收。
+主机级 MOD 内容准备使用 HostTarget 和 `host-mod-tasks`。worker 从本地主机已验证 Release 中选择固定 digest 且带有 `steamcmd-workshop-v1` 能力标记的镜像作为 SteamCMD 工具容器；下载容器不挂 Docker socket，仅挂主机 task staging，以非 root 用户、只读根文件系统和资源限制运行 SteamCMD。完成后校验文件类型、路径、数量、总大小、modinfo 与逐文件摘要，将内容发布到只读 `mods/prepared/<workshopId>/<contentDigest>`（目录 `0555`、文件 `0444`、manifest `0600`），供所有实例选择。任务成功后在 `cleanup` 阶段自动删除未被引用的旧版本，本次产出和仍被实例/活动 Release/备份引用的版本保留；清理失败不影响更新结果。实例 desired 只记录 `workshopId/enabled/configurationOptions/artifactDigest`，不再写实例 `mods/prepared`。应用时从主机库复制内容到实例 MOD Release，并校验摘要。匿名 SteamCMD 下载、Linux amd64 网络路径和实际 Workshop 样本尚待实机验收。
 
 应用流程：解析/去重/校验 → staging 顺序下载每分片需要的内容 → 记录可识别实际版本/摘要 → 验证一致性与权限 → 停目标分片 → 按请求可选创建冷保护备份（不请求时跳过） → 切换完整部署 → 启动/重读配置与运行证据。未创建备份时失败不做自动恢复，任务错误明确提示检查部署状态；MOD 应用不以主机恢复验收或已有备份作为放行门槛。
 
 下载成功、配置已部署、运行验证通过分别记录阶段。任何 MOD 自动下载或写 UGC 行为必须在阶段 0 核对；不得因启动时会下载就省略版本和失败证据。手动“检查更新”是只读查询，不占维护栏；真正下载/部署进入任务。
 
-主机级 MOD 内容库：`/var/lib/famine-hub/mods/prepared/<workshopId>/<contentDigest>` 保存公共 Workshop 内容；`host-mod-tasks` 保存主机级准备任务。实例应用只从主机库复制内容。主机库删除检查实例 desired/deployed 和活动 MOD Release 引用。备份不保存活动 MOD Release 内容，恢复从主机库最新内容重建 MOD Release；缺失 MOD 返回 warning 但继续恢复。
+主机级 MOD 内容库：`/var/lib/famine-hub/mods/prepared/<workshopId>/<contentDigest>` 保存公共 Workshop 内容；`host-mod-tasks` 保存主机级准备任务。实例应用只从主机库复制内容。主机库删除检查实例 desired/deployed、活动 MOD Release 和备份 metadata 引用；更新成功后自动清理未被引用的旧版本。备份不保存活动 MOD Release 内容，恢复从主机库最新内容重建 MOD Release；缺失 MOD 返回 warning 但继续恢复。
 
 当前代码已实现完整 desired → preview → 持久 apply task 路径：远端复核 revision/digest；按每实例独立 modsReleaseId 生成 Master/Caves UGC 内容和 setup 文件，逐分片复核内容 digest；停止后归档世界、MOD desired/deployed、活动 MOD Release、Compose 与配置，发布后重建容器。原来运行的实例需通过进程验证，原来停止的实例保持停止。请求冷保护备份时，失败或任务中断使用该保护点恢复原部署组合；未请求时不自动恢复。禁用和移除只改 desired，仍须走预览/应用才能部署。普通备份与恢复现已包含 MOD 状态和活动 MOD Release。
 
@@ -314,6 +314,8 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 ## 10. 备份与恢复
 
 ### 10.1 备份内容与一致性
+
+> 规划调整（未实现，见 [DST 更新设计](dst-update-plan.md#96-历史备份恢复)）：归档边界将收窄为只保留 `data/Master`、`data/Caves`；`config/Cluster_1`、`active-release.json`、`manifest.json`、`compose.yaml`、`desired/deployed` 状态、Release 引用和凭据不再进入归档。恢复始终使用当前活动 Release，不切换版本、不覆盖服务器配置。以下现有描述在实现前仍代表当前行为。
 
 包括：完整世界数据、可复现配置、`desired/world.json` 与 `deployed-world.json` 的一致快照、configRevision/digests、DST build/产物标识、MOD 发布摘要、schema、hostId/instanceId，以及秘密的受保护引用。`desired-secrets` 与 `cluster_token.txt` 不进入归档；恢复保留备份的世界设置，但优先使用恢复前当前 `desired-secrets` 中的 token/password 引用重建凭据文件，避免回退到备份时的旧凭据。引用/文件缺失则预检阻断；Klei 已撤销或拒绝的令牌仍需用户重新生成，不能由本地文件校验推断令牌有效。
 
@@ -329,6 +331,8 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 游戏已在其他维护任务内停止时，由同一锁 owner 调用备份子阶段，不能递归再获取自己的 flock。备份操作失败时阻断下一破坏性阶段。创建任务尚无存档、首次安装等例外要记录“无已有世界”，不是任意跳过备份。
 
 ### 10.2 恢复
+
+> 规划调整（未实现）：恢复只替换世界存档并使用当前活动 Release；不再检查备份 Release 产物、配置快照或 revision 兼容性，也不再改写 manifest/Compose/desired/deployed。旧归档只提取 `data/Master`、`data/Caves`。以下步骤在实现前仍代表当前行为。
 
 1. 备份包含 `desired/world.json` 与 `deployed-world.json` 的非秘密配置快照。用户点击确认恢复后，命令在接纳远端任务前同步检查 backupId、原实例归属、checksum/schema/路径安全、已应用配置快照、产物可用与兼容性、空间和运行状态；检查失败不创建恢复任务。旧备份缺少快照时，仅当当前 desired/deployed 都与该备份 revision 一致才允许恢复，否则阻断。
 2. 预检通过后由持久 worker 在 heavy、实例 world-config 和 instance 三把锁内重新检查；已核实身份但运行退化的分片先统一停服，无法确认 Docker/容器身份时阻断。解压到 staging 并验证容量、权限、摘要；恢复出的 `data/Master`、`data/Caves`、`config/Cluster_1` 以及 `mods/releases/<id>` 的 Master/Caves 内容递归归还 DST UID/GID 1000，目录设为 0700、普通文件 0600；MOD release 的 `manifest.json` 保持 root:root 0600。归档排除的 Token 由当前实例 creds 重建，玩家名单保留恢复前当前配置。不允许普通跨实例恢复。
@@ -349,7 +353,7 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 
 ### 11.1 更新
 
-check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按预览执行，不在排队后无声升级为更晚版本。
+check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按预览执行，不在排队后无声升级为更晚版本。主机级 DST build 检查不是任务：`updates/dst-latest.json` 保存 `running/ok/failed`、阶段和错误码，检查锁非阻塞；重复启动返回当前状态，缓存 running 但锁已释放时报告中断。检查优先使用 `dst-build-base` 的已 bootstrap SteamCMD，SteamCMD 最长 600 秒；每次使用唯一容器名，超时/失败后清理，下次检查前回收同前缀残留容器。
 
 流程：取得重任务/实例锁 → revalidate → staging 下载/校验 → 停分片 → 一致保护备份 → 切换完整部署 → 启动 → 验证实际 build、MOD、存档、容器身份与必要网络证据 → finalize。
 
@@ -373,7 +377,7 @@ check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按�
 | 保留策略 | count/age/space 规则；活动任务引用和唯一恢复点不删除；保护备份可由用户删除，先预览再清理 | policy revision CAS；任何删除失败记录事件，不能清除索引假装成功 |
 | 健康历史 | 有界实例采样，只记录证据、时间和 schema；摘要不推断未采集状态 | get_health_history 分页，主机/实例隔离 |
 | 专服诊断 | `get_instance_diagnostics` 读取有界运行摘要、分片容器状态、脱敏最近日志和失败/中断任务证据；不读取秘密文件，当前不做历史曲线与日志游标 |
-| 构建缓存 | `manage_build_cache` 预览构建目录和 Docker Build Cache，确认后删除 `image-build/dst-runtime-build` 并执行 `docker builder prune -f`；构建锁活动时拒绝，不删除 Release 镜像 |
+| 构建缓存 | `manage_build_cache` 预览构建目录和 Docker Build Cache，确认后删除 `image-build/dst-runtime-build`、执行 `docker builder prune --all -f`，并只删除未被 catalog 引用的 dangling 镜像；构建锁活动时拒绝，不删除 Release 镜像 |
 | 诊断包 | 有限日志、任务摘要、非敏感 manifest、能力/版本；排除 Token/密钥/存档个人信息和秘密文件 | export_diagnostics；持久化前脱敏，用户预览范围，测试敏感样本不出现 |
 | 旧部署发现 | 只读扫描旧目录/service/端口/版本，返回 sourceId 与摘要，不接管旧默认目录 | discover_legacy_deployment |
 | 迁移 | 预览 → 保护备份 → 停旧服务 → 复制到新独立实例 → 验证 → 启动新 Compose；失败停新并恢复旧 | preview/run_legacy_migration；旧路径/keyring 不自动授权导入，不删除旧数据 |

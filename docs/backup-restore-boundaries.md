@@ -1,185 +1,116 @@
 # 备份与恢复文件边界
 
 - 适用版本：1.0.5
-- 依据：`remote-scripts/actions/backup-task.py`、`backup-archive.py`、`restore-task.py`
-- 状态：边界已按当前实现整理，访问策略和凭据采用“恢复时保留当前值”的规则
+- 依据：`remote-scripts/actions/backup-task.py`、`backup-archive.py`、`restore-task.py`、`mods-apply.py`
+- 状态：已按下方边界实现
 
 ## 1. 备份内容
 
-备份根目录为实例目录 `/var/lib/famine-hub/instances/<instanceId>`。
+归档只保存世界存档：
 
-| 路径 | 内容 |
-| --- | --- |
-| `data/Master/` | Master 世界存档 |
-| `data/Caves/` | Caves 世界存档，仅启用洞穴时 |
-| `config/Cluster_1/` | 世界配置，见下节 |
-| `active-release.json` | 当前活动 Release |
-| `manifest.json` | 实例身份、端口、拓扑和配置版本 |
-| `compose.yaml` | Compose 定义 |
-| `desired/mods.json` | 期望 MOD 状态 |
-| `deployed-mods.json` | 已部署 MOD 状态 |
-| `desired/world.json` | 期望世界配置 |
-| `deployed-world.json` | 已部署世界配置 |
+```text
+进入归档：
+  data/Master/
+  data/Caves/（启用洞穴时）
 
-## 2. config 文件边界
+不进入归档：
+  config/Cluster_1/
+  active-release.json
+  manifest.json
+  compose.yaml
+  desired/world.json、deployed-world.json
+  desired/mods.json、deployed-mods.json
+  mods/、desired-secrets/
+  运行日志和临时文件
+```
 
-### 备份并恢复
-
-- `config/Cluster_1/cluster.ini` 中的非敏感、非访问策略字段
-- `config/Cluster_1/Master/server.ini`
-- `config/Cluster_1/Caves/server.ini`（启用洞穴时）
-- `config/Cluster_1/Master/worldgenoverride.lua`
-- `config/Cluster_1/Caves/worldgenoverride.lua`
-- 其他不属于排除名单的普通配置
-
-### 不进入归档
+排除的文件名固定为：
 
 ```text
 cluster_token.txt
 adminlist.txt
-whitelist.txt
 blocklist.txt
-desired-secrets/
-mods/prepared/
-mods/releases/
-host.json
-registry.json
-tasks/
-operations/
-staging/
-locks/
-日志
+whitelist.txt
+server_log.txt
+server_chat_log.txt
+client_log.txt
 ```
 
-### 备份时清洗
+metadata 与归档分开保存，记录身份、采集模式、时间、checksum、大小、`dstBuild` 和 MOD 引用。旧 metadata 中的 `dstReleaseId`、`modsReleaseId`、`configRevision` 只作历史信息，不参与恢复门禁。
 
-`cluster.ini` 写入归档前会移除：
+## 2. 恢复行为
 
-- `NETWORK.cluster_password`
-- `SHARD.cluster_key`
-- `GAMEPLAY.whitelist_slots`
+恢复只替换世界存档，始终使用当前活动 Release：
 
-`desired/world.json` 和 `deployed-world.json` 写入归档前会把访问策略字段重置为中性值：
+1. 校验备份归属、metadata、checksum 和归档结构；
+2. 停分片（按需创建世界存档保护点）；
+3. 解压并只提交 `data/Master`、`data/Caves`；
+4. 按当前运行状态重建/启动容器并验证进程、端口和版本；
+5. 不改 `active-release.json`、`manifest.json`、`compose.yaml`、`config/Cluster_1`、世界配置、MOD、访问策略或凭据。
 
-- `adminList = []`
-- `whitelist = []`
-- `blocklist = []`
-- `whitelistSlots = 0`
+规则：
 
-`deployed-world.json` 的 `digest` 会同步重算，保证归档自身可验证。
+- 不校验、不切换备份记录的 Release；备份不能用来切换 DST 版本。
+- 若备份 `dstBuild` 高于当前 build，恢复阻断 `BACKUP_BUILD_NEWER_THAN_INSTANCE`；低于或未知时允许恢复。
+- MOD 与当前实例不同时返回 `modsWarnings`，允许继续；不自动改写当前 MOD。
+- 恢复前保护点只含世界存档，同样可在当前 Release 上恢复。
 
-因此备份不再包含管理员名单、白名单、黑名单、服务器密码或 cluster key。
+## 3. 旧归档兼容
 
-## 3. 恢复时保留当前值
+历史归档可能包含 `config/Cluster_1`、`active-release.json`、`manifest.json`、`compose.yaml` 或 `desired/deployed` 文件。
 
-恢复不是简单覆盖。以下内容使用恢复前实例的当前值：
+- 恢复只提取 `data/Master`、`data/Caves`，忽略其余文件；
+- 不读取旧归档中的 Release 身份，不触发版本切换；
+- 旧 metadata 中的 `dstReleaseId`、`modsReleaseId`、`configRevision` 只作历史信息。
 
-- `adminlist.txt`
-- `whitelist.txt`
-- `blocklist.txt`
-- `settings.advanced.adminList`
-- `settings.advanced.whitelist`
-- `settings.advanced.blocklist`
-- `settings.advanced.whitelistSlots`
-- `cluster.ini` 的 `cluster_password`
-- `cluster.ini` 的 `cluster_key`
-- `cluster_token.txt`
-- Token 与服务器密码引用
-- 活动 Release 的可恢复性校验使用当前 catalog
+## 4. 不备份、不恢复
 
-恢复流程会：
+服务器信息：
 
-1. 保留当前玩家名单文件；
-2. 把当前访问策略合并到恢复后的 desired/deployed world settings；
-3. 重算 deployed world digest；
-4. 把当前密码、cluster key、whitelist slots 写回恢复后的 `cluster.ini`；
-5. 从当前 `desired-secrets` 重建 `cluster_token.txt`；
-6. 从主机当前 MOD 库重建实例 MOD Release；
-7. 校验活动 Release 仍存在并已验证；
-8. 恢复世界数据和其余配置；
-9. 根据恢复前运行状态创建/启动容器。
+- Release、manifest、Compose、端口和拓扑；
+- `config/Cluster_1`、世界配置和 MOD 配置；
+- 实例 registry、任务、锁和日志。
 
-## 4. 恢复不负责恢复的内容
+秘密与访问策略：
 
-- 主机注册表和主机身份；
-- 主机级 Release catalog、staging 和构建产物；
-- 主机 MOD 固定产物；
-- 实例 MOD Release 内容；
-- 备份文件自身；
-- 任务、操作、锁、staging 和日志；
-- 其他实例。
+- Klei Token、服务器密码、`cluster_key`；
+- 管理员名单、白名单、黑名单、`whitelistSlots`。
 
-## 5. 设计结论
+恢复不会覆盖当前实例的这些值和文件。
 
-### 属于世界状态，应该备份
+## 5. 内部保护点
 
-- 世界存档；
-- 世界生成配置；
-- 游戏模式、人数、PVP、暂停等玩法配置；
-- 分片端口配置；
-- MOD 引用和 MOD 配置；
-- Release、manifest、compose 身份快照。
+- 恢复和 DST 更新创建的保护点是用户可见备份，按 §1 的世界存档边界保存。
+- MOD 应用的完整回滚快照存放在 `mod-apply-tasks/<taskId>/protection/`，不再写入用户备份目录；它属于任务事务，不进入备份列表。
 
-### 属于当前访问策略，不备份、不恢复
+## 6. 运行权限
 
-- 管理员名单；
-- 白名单；
-- 黑名单；
-- `whitelistSlots`。
-
-这些字段在恢复时保留当前实例的值，避免“恢复备份后管理员被恢复成旧名单”或白名单槽位与名单不一致。
-
-### 属于秘密，不备份、不恢复
-
-- Klei Token；
-- 服务器密码；
-- `cluster_key`；
-- `desired-secrets` 内的凭据。
-
-恢复时从当前实例凭据重新生成。
-
-### 需要产品确认
-
-- `voteEnabled`
-- `voteKickPercentage`
-- `pauseWhenEmpty`
-
-当前作为世界玩法配置处理；如果以后将它们定义为实例访问策略，应并入“恢复时保留当前值”的集合。
-
-## 6. 旧备份兼容性
-
-本次清洗只作用于新创建的备份。修复前生成的归档可能仍包含旧的 `cluster_password`、`cluster_key`、管理员名单或白名单设置。
-
-- 恢复旧备份时，当前实现仍会用当前访问策略和当前凭据覆盖恢复结果，行为是安全的；
-- 但旧归档文件本身仍可能含有敏感内容；
-- 建议重新创建备份，并在需要时轮换服务器密码和 cluster key，再删除旧归档。
-
-## 7. 运行权限收口
-
-恢复提交完成后、创建容器前，`normalize_restored_runtime_permissions()` 会强制统一运行文件的属主和权限：
+恢复提交后、创建容器前，世界存档递归归还 DST UID/GID 1000：
 
 ```text
-config/Cluster_1/                          UID 1000, 0700/0600
-mods/releases/<modsReleaseId>/              UID 1000, 0700/0600
-mods/releases/<modsReleaseId>/manifest.json root, 0600
-mods/releases/<modsReleaseId>/              root, 0755（目录本身）
+data/Master/    UID 1000, 目录 0700、普通文件 0600
+data/Caves/     UID 1000, 目录 0700、普通文件 0600
 ```
 
-其中 `modoverrides.lua`、`dedicated_server_mods_setup.lua` 和 UGC 内容必须能被容器内 UID 1000 读取。恢复过程中由 root 创建的临时文件不能直接进入运行态。
+`config/Cluster_1`、MOD Release 和凭据不由恢复流程改写，因此保持当前实例的权限和内容。
 
-## 8. 验证
+## 7. 验证
 
 ```text
 python3 scripts/test-backup-archive.py
 python3 scripts/test-backup-task.py
+python3 scripts/test-backup-worker.py
+python3 scripts/test-instance-backups.py
 python3 scripts/test-restore-task.py
-python3 scripts/test-world-config.py
+python3 scripts/test-restore-mods.py
+python3 scripts/test-mods-apply.py
 ```
 
 覆盖：
 
-- 备份归档 override 内容与摘要校验；
-- `cluster.ini` 敏感字段清洗；
-- 世界快照访问策略清洗及 digest 重算；
-- 恢复后管理员/白名单/白名单槽位保持当前值；
-- 恢复后密码和 cluster key 保持当前值。
+- 归档只含世界存档且排除日志；
+- 旧归档只提取世界存档；
+- 恢复不切换 Release、不改 manifest/Compose/配置；
+- 备份 build 高于当前 build 时阻断；
+- MOD 差异只警告；
+- MOD 应用保护点存于任务目录。

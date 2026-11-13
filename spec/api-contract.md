@@ -614,8 +614,8 @@ type GetInstanceCreationStatusResponse = {
 | get_host_mod_task / list_host_mod_tasks | Q | HostTarget、operationId 或列表 | 主机级 MOD 准备任务查询 |
 | get_instance_mod_apply_task / getInstanceModApplyTask | Q | target、operationId | 查询持久应用任务与中断恢复结果 |
 | list_instance_mod_apply_tasks / listInstanceModApplyTasks | Q | target | 列出该实例 MOD 应用任务 |
-| get_dst_update_status / getDstUpdateStatus | Q | HostTarget | HostDstUpdateStatus，读取主机级状态缓存，不联网；返回 checking/stage/startedAt；running 但检查锁已释放时返回中断错误 |
-| check_dst_updates / checkDstUpdates | Q | HostTarget | 联网检查 DST 最新 build；开始写 running，失败写 lastCheckError；检查锁非阻塞，已有检查运行时直接返回当前状态，不重复运行 SteamCMD |
+| get_dst_update_status / getDstUpdateStatus | Q | HostTarget | HostDstUpdateStatus，读取主机级状态缓存，不联网；返回 checking/stage/stageDetail/startedAt、lastCheckError.detail；running 但检查锁已释放时返回中断错误 |
+| check_dst_updates / checkDstUpdates | Q | HostTarget | 联网检查 DST 最新 Steam buildid；开始写 running，失败写 lastCheckError（含输出尾部 detail）；检查锁非阻塞，已有检查运行时直接返回当前状态，不重复运行 SteamCMD；候选 Release 只按 catalog 的 steamBuildId 匹配 |
 | preview_instance_update / previewInstanceUpdate | P | target、expectedRevision、targetReleaseId | 固定目标 Release、分片、保护点和回滚能力；只接受 build 高于当前的已验证 Release |
 | run_instance_update / runInstanceUpdate | T | target、planId、expectedRevision、operationId | 世界存档保护点后切换 Release 并验证 |
 

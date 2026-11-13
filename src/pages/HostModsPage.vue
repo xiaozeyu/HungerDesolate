@@ -784,12 +784,12 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
     <AppDialog :open="!!syncTarget" title="同步到专服" @update:open="value => { if (!value && !syncBusy) syncTarget = null }">
       <div v-if="syncLoading" class="muted-text" role="status">正在检查使用此 MOD 的专服…</div>
       <template v-else-if="syncTarget">
-        <p>将把 <strong>{{ syncTarget.name ?? syncTarget.workshopId }}</strong> <span class="mono">{{ syncTarget.version ?? "" }}</span> 的期望版本同步到 {{ syncEntries.length }} 个专服。</p>
-        <p class="form-hint">只更新期望 MOD 版本，不会自动应用或重启专服。</p>
+        <p>将把 <strong>{{ syncTarget.name ?? syncTarget.workshopId }}</strong> - <span class="mono">{{ syncTarget.version ?? "" }}</span> 的期望版本同步到 {{ syncEntries.length }} 个专服</p>
+        <p class="form-hint">只更新期望 MOD 版本，不会自动应用或重启专服</p>
         <div v-if="syncEntries.length" class="table-wrap">
           <NDataTable :columns="syncColumns" :data="syncEntries" :bordered="false" :single-line="true" size="medium" :row-key="syncRowKey"/>
         </div>
-        <p v-else-if="!syncErrors.length" class="muted-text">没有使用此 MOD 的专服需要同步。</p>
+        <p v-else-if="!syncErrors.length" class="muted-text">没有使用此 MOD 的专服需要同步</p>
         <div v-if="syncErrors.length" class="environment-error" role="alert">
           <strong>同步检查未完成</strong>
           <ul><li v-for="error in syncErrors" :key="error">{{ error }}</li></ul>

@@ -1,12 +1,15 @@
 """Host-level DST build check and cached update status."""
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import stat
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 import uuid
 
@@ -15,9 +18,13 @@ UPDATES = ROOT / "updates"
 CACHE = UPDATES / "dst-latest.json"
 LOCK = UPDATES / "check.lock"
 MAX_OUTPUT = 256 * 1024
+MAX_DETAIL = 2048
 STEAMCMD = "/opt/famine/steamcmd/steamcmd.sh"
 BUILD_BASE = "hungerdesolate/dst-build-base:"
 CHECK_CONTAINER_PREFIX = "famine-dst-check-"
+STEAM_TOTAL_TIMEOUT = 900
+STEAM_STALL_TIMEOUT = 180
+TOOL_VOLUME_PREFIX = "famine-dst-check-tool-"
 ERROR_MESSAGES = {
     "DST_UPDATE_CHECK_FAILED": "SteamCMD 未能获取 DST 最新版本",
     "DST_UPDATE_CHECK_TIMEOUT": "SteamCMD 查询超时，请检查主机网络后重试",
@@ -30,13 +37,14 @@ ERROR_MESSAGES = {
 
 
 class Rejected(Exception):
-    def __init__(self, code):
+    def __init__(self, code, detail=None):
         super().__init__(code)
         self.code = code
+        self.detail = detail
 
 
-def reject(code):
-    raise Rejected(code)
+def reject(code, detail=None):
+    raise Rejected(code, detail)
 
 
 def valid_uuid(value):
@@ -110,12 +118,16 @@ def catalog_releases():
         reject("DST_UPDATE_CACHE_INVALID")
     releases = []
     for item in catalog["releases"]:
+        steam_build_id = item.get("steamBuildId") if isinstance(item, dict) else None
         if (not isinstance(item, dict) or not valid_uuid(item.get("releaseId"))
                 or not isinstance(item.get("dstBuild"), str) or not item["dstBuild"].isdigit()
                 or not isinstance(item.get("imageDigest"), str)
                 or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["imageDigest"])
                 or type(item.get("verified")) is not bool
-                or type(item.get("runtimeVerified")) is not bool):
+                or type(item.get("runtimeVerified")) is not bool
+                or (steam_build_id is not None
+                    and (not isinstance(steam_build_id, str)
+                         or not re.fullmatch(r"[0-9]{1,20}", steam_build_id)))):
             continue
         releases.append(item)
     return releases
@@ -222,29 +234,133 @@ def docker_server_version():
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def run_steamcmd(tool):
+def detail_text(data):
+    text = data.decode("utf-8", errors="replace").replace("\r", "\n")
+    text = "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n".join(lines)[-MAX_DETAIL:]
+
+
+def tool_volume(tool):
+    digest = hashlib.sha256(tool["image"].encode()).hexdigest()[:16]
+    return TOOL_VOLUME_PREFIX + digest
+
+
+def tool_mount(tool):
+    if tool["steamcmd"] == "/home/steam/steamcmd.sh":
+        return "/home/steam", "steamcmd.sh"
+    return "/opt/famine", "steamcmd/steamcmd.sh"
+
+
+def ensure_tool_volume(tool):
+    volume = tool_volume(tool)
+    mount_path, marker = tool_mount(tool)
+    created = docker_command(["volume", "create", volume], timeout=30)
+    if created is None or created.returncode != 0:
+        return None
+    seeded = docker_command(
+        ["run", "--rm", "--user", "0:0", "-v", volume + ":/persist",
+         "--entrypoint", "/bin/sh", tool["image"], "-ec",
+         "if [ ! -x /persist/" + marker + " ]; then cp -a " + mount_path + "/. /persist/; fi; "
+         "chown -R 1000:1000 /persist"],
+        timeout=60)
+    if seeded is None or seeded.returncode != 0:
+        return None
+    return volume
+
+
+def run_steamcmd(tool, progress=None):
     version = docker_server_version()
     if version and (version == "29.4.2" or version.startswith(("29.4.2-", "29.4.2+"))):
         reject("DST_UPDATE_CHECK_DOCKER_INCOMPATIBLE")
     name = CHECK_CONTAINER_PREFIX + uuid.uuid4().hex
+    mount_path, _ = tool_mount(tool)
+    volume = ensure_tool_volume(tool)
+    # Keep the persistent volume for SteamCMD bootstrap/package state only; the
+    # login/home directory stays inside the disposable container.
+    home = "/tmp/steam-home" if volume else tool["home"]
+    command = ["docker", "run", "--rm", "--name", name, "--network", "bridge",
+               "--user", "1000:1000", "--env", "HOME=" + home]
+    if volume:
+        command += ["-v", volume + ":" + mount_path]
+    command += [tool["image"], tool["steamcmd"],
+                "+@ShutdownOnFailedCommand", "1", "+@NoPromptForPassword", "1",
+                "+login", "anonymous", "+app_info_update", "1",
+                "+app_info_print", "343050", "+app_info_print", "343050",
+                "+logoff", "+quit"]
     try:
-        result = subprocess.run(
-            ["docker", "run", "--rm", "--name", name, "--network", "bridge", "--user", "1000:1000",
-             "--env", "HOME=" + tool["home"], tool["image"], tool["steamcmd"],
-             "+@ShutdownOnFailedCommand", "1", "+@NoPromptForPassword", "1",
-             "+login", "anonymous", "+app_info_update", "1", "+app_info_print", "343050", "+quit"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=600, check=False, env=docker_env())
-    except subprocess.TimeoutExpired:
-        cleanup_container(name)
-        reject("DST_UPDATE_CHECK_TIMEOUT")
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, env=docker_env())
     except FileNotFoundError:
-        reject("DST_UPDATE_CHECK_FAILED")
-    output = result.stdout[:MAX_OUTPUT].decode("utf-8", errors="replace")
-    if result.returncode != 0:
+        reject("DST_UPDATE_CHECK_FAILED", "无法启动 Docker 客户端")
+    output = bytearray()
+    last_progress = 0.0
+    started = time.monotonic()
+    last_activity = started
+    selector = selectors.DefaultSelector()
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            events = selector.select(timeout=1)
+            if events:
+                try:
+                    chunk = os.read(process.stdout.fileno(), 8192)
+                except BlockingIOError:
+                    chunk = b""
+                if chunk:
+                    last_activity = time.monotonic()
+                    output.extend(chunk)
+                    if len(output) > MAX_OUTPUT:
+                        del output[:len(output) - MAX_OUTPUT]
+                    if progress and time.monotonic() - last_progress >= 3:
+                        last_progress = time.monotonic()
+                        progress(detail_text(bytes(output)))
+                elif process.poll() is not None:
+                    break
+            elif process.poll() is not None:
+                break
+            if time.monotonic() - last_activity > STEAM_STALL_TIMEOUT:
+                process.kill()
+                process.wait()
+                cleanup_container(name)
+                reject("DST_UPDATE_CHECK_TIMEOUT",
+                       detail_text(bytes(output)) or "SteamCMD 长时间没有输出")
+            if time.monotonic() - started > STEAM_TOTAL_TIMEOUT:
+                process.kill()
+                process.wait()
+                cleanup_container(name)
+                reject("DST_UPDATE_CHECK_TIMEOUT", detail_text(bytes(output)) or "SteamCMD 查询超时")
+        while True:
+            try:
+                chunk = os.read(process.stdout.fileno(), 8192)
+            except (BlockingIOError, OSError):
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > MAX_OUTPUT:
+                del output[:len(output) - MAX_OUTPUT]
+    finally:
+        selector.close()
+        process.stdout.close()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
         cleanup_container(name)
-        reject("DST_UPDATE_CHECK_FAILED")
-    return parse_build(output)
+        reject("DST_UPDATE_CHECK_TIMEOUT", detail_text(bytes(output)) or "SteamCMD 未正常退出")
+    detail = detail_text(bytes(output))
+    if process.returncode != 0:
+        cleanup_container(name)
+        reject("DST_UPDATE_CHECK_FAILED", detail or "SteamCMD 退出码 " + str(process.returncode))
+    try:
+        return parse_build(bytes(output).decode("utf-8", errors="replace"))
+    except Rejected as failure:
+        if not failure.detail:
+            failure.detail = detail
+        raise
 
 
 def read_cache(host):
@@ -288,6 +404,7 @@ def status_data(host, releases):
         latest = {"build": build, "checkedAt": success_at, "source": "steamCmd"}
     checking = False
     stage = None
+    stage_detail = None
     started_at = None
     last_error = None
     if cache.get("result") == "running":
@@ -295,19 +412,23 @@ def status_data(host, releases):
         if lock_held():
             checking = True
             stage = cache.get("stage") if isinstance(cache.get("stage"), str) else None
+            stage_detail = cache.get("stageDetail") if isinstance(cache.get("stageDetail"), str) else None
         else:
             last_error = {"code": "DST_UPDATE_CHECK_INTERRUPTED",
                           "message": error_message("DST_UPDATE_CHECK_INTERRUPTED"),
+                          "detail": None,
                           "at": started_at or now()}
     elif cache.get("result") == "failed":
         code = cache.get("errorCode") or "DST_UPDATE_CHECK_FAILED"
         last_error = {"code": code, "message": error_message(code),
+                      "detail": cache.get("errorDetail") if isinstance(cache.get("errorDetail"), str) else None,
                       "at": cache.get("checkedAt") or now()}
     candidates = [release_summary(item) for item in releases
-                  if item["verified"] and latest is not None and item["dstBuild"] == latest["build"]]
+                  if item["verified"] and latest is not None
+                  and item.get("steamBuildId") == latest["build"]]
     return {"schemaVersion": 1, "requestId": None, "target": None,
             "latest": latest, "candidateReleases": candidates, "lastCheckError": last_error,
-            "checking": checking, "stage": stage, "startedAt": started_at}
+            "checking": checking, "stage": stage, "stageDetail": stage_detail, "startedAt": started_at}
 
 
 def check(request):
@@ -329,29 +450,50 @@ def check(request):
                  "lastSuccessAt": previous.get("lastSuccessAt") or previous.get("checkedAt"),
                  "source": "steamCmd", "sourceImageDigest": previous.get("sourceImageDigest"),
                  "latestBuild": previous.get("latestBuild"), "result": "running",
-                 "stage": "image", "errorCode": None}
+                 "stage": "image", "stageDetail": "选择检查镜像", "errorCode": None}
         atomic_json(CACHE, state)
         cleanup_stale_check_containers()
+
+        def progress(detail):
+            line = detail.splitlines()[-1][:200] if detail else ""
+            if line and line != state.get("stageDetail"):
+                state["stageDetail"] = line
+                try:
+                    atomic_json(CACHE, state)
+                except OSError:
+                    pass
+
         try:
             release = check_image(releases)
             tool = check_tool(release)
-            state.update({"stage": "steamcmd", "sourceImageDigest": release["imageDigest"],
-                          "checkImage": tool["image"]})
+            state.update({"stage": "steamcmd", "stageDetail": "启动 SteamCMD",
+                          "sourceImageDigest": release["imageDigest"], "checkImage": tool["image"]})
             atomic_json(CACHE, state)
-            build = run_steamcmd(tool)
+            build = run_steamcmd(tool, progress)
             checked = now()
             atomic_json(CACHE, {"schemaVersion": 1, "hostId": host, "checkedAt": checked,
                                 "startedAt": started, "lastSuccessAt": checked, "source": "steamCmd",
                                 "sourceImageDigest": release["imageDigest"], "checkImage": tool["image"],
                                 "latestBuild": build, "result": "ok", "stage": "finalize",
-                                "errorCode": None})
+                                "stageDetail": None, "errorCode": None})
         except Rejected as failure:
             atomic_json(CACHE, {"schemaVersion": 1, "hostId": host, "checkedAt": now(),
                                 "startedAt": started, "lastSuccessAt": state.get("lastSuccessAt"),
                                 "source": "steamCmd", "sourceImageDigest": state.get("sourceImageDigest"),
                                 "checkImage": state.get("checkImage"),
                                 "latestBuild": state.get("latestBuild"), "result": "failed",
-                                "stage": "finalize", "errorCode": failure.code})
+                                "stage": "finalize", "stageDetail": None,
+                                "errorCode": failure.code, "errorDetail": failure.detail})
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as cause:
+            atomic_json(CACHE, {"schemaVersion": 1, "hostId": host, "checkedAt": now(),
+                                "startedAt": started, "lastSuccessAt": state.get("lastSuccessAt"),
+                                "source": "steamCmd", "sourceImageDigest": state.get("sourceImageDigest"),
+                                "checkImage": state.get("checkImage"),
+                                "latestBuild": state.get("latestBuild"), "result": "failed",
+                                "stage": "finalize", "stageDetail": None,
+                                "errorCode": "DST_UPDATE_CHECK_FAILED",
+                                "errorDetail": str(cause)[:MAX_DETAIL]})
+            raise
     finally:
         if locked:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)

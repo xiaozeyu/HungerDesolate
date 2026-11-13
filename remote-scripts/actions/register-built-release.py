@@ -79,6 +79,7 @@ def now_iso():
 
 
 def release_entry(metadata, release_id):
+    steam_build_id = metadata.get("steamBuildId") if isinstance(metadata, dict) else None
     if (not isinstance(metadata, dict) or metadata.get("schemaVersion") != 1
             or metadata.get("releaseId") != release_id or metadata.get("platform") != "linux/amd64"
             or not isinstance(metadata.get("image"), str)
@@ -89,6 +90,9 @@ def release_entry(metadata, release_id):
             or re.fullmatch(r"sha256:[0-9a-f]{64}", metadata["artifactDigest"]) is None
             or not isinstance(metadata.get("dstBuild"), str) or not metadata["dstBuild"]
             or not isinstance(metadata.get("scriptVersion"), str) or not metadata["scriptVersion"]
+            or (steam_build_id is not None
+                and (not isinstance(steam_build_id, str)
+                     or re.fullmatch(r"[0-9]{1,20}", steam_build_id) is None))
             or not isinstance(metadata.get("commands"), dict)
             or set(metadata["commands"]) != {"master", "caves"}):
         reject("CREATE_RELEASE_METADATA_INVALID")
@@ -100,10 +104,14 @@ def release_entry(metadata, release_id):
             reject("CREATE_RELEASE_METADATA_INVALID")
     if metadata["commands"]["master"][0] != "/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64" or metadata["commands"]["caves"][0] != "/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64":
         reject("CREATE_RELEASE_METADATA_INVALID")
-    return {key: metadata[key] for key in (
+    entry = {key: metadata[key] for key in (
         "releaseId", "platform", "image", "imageDigest", "dstBuild", "artifactDigest",
         "scriptVersion", "commands"
-    )} | {"verified": True, "runtimeVerified": False}
+    )}
+    if steam_build_id is not None:
+        entry["steamBuildId"] = steam_build_id
+    entry.update({"verified": True, "runtimeVerified": False})
+    return entry
 
 
 def content_digest(root):

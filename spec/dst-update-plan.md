@@ -97,23 +97,24 @@ Release 管理页（主机级）
 
 ```text
 docker run --rm --name famine-dst-check-<uuid> --network bridge --user 1000:1000 \
-  --env HOME=/home/steam <buildBaseImage> \
+  --env HOME=/tmp/steam-home -v famine-dst-check-tool-<hash>:<toolDir> <buildBaseImage> \
   /home/steam/steamcmd.sh \
   +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
-  +login anonymous +app_info_update 1 +app_info_print 343050 +quit
+  +login anonymous +app_info_update 1 +app_info_print 343050 \
+  +app_info_print 343050 +logoff +quit
 ```
 
 要求：
 
-- 只读，不执行 `app_update`，不写实例目录，不挂宿主目录，不用 host network。
-- 优先 build-base；回退 Release 镜像时使用 `/opt/famine/steamcmd/steamcmd.sh` 和 `HOME=/home/famine`。
+- 不执行 `app_update`，不写实例目录，不挂宿主机业务目录，不用 host network；只用一个 Docker 命名卷缓存 SteamCMD bootstrap/package 状态，登录 HOME 保持在一次性容器内。
+- 优先 build-base；回退 Release 镜像时使用 `/opt/famine/steamcmd/steamcmd.sh`，工具目录持久化到命名卷，`HOME=/tmp/steam-home`；卷初始化失败时回退为不持久化。
 - Docker Engine 29.4.2 会阻断 32 位 SteamCMD，检查直接返回 `DST_UPDATE_CHECK_DOCKER_INCOMPATIBLE`。
-- 输出有上限（例如 256 KiB），SteamCMD 超时 600 秒，Rust 整体等待 720 秒；超时/退出码/格式错误分别返回固定错误码。
-- 从 VDF 的 `branches.public.buildid` 取数字 build；缺失、多个冲突或非数字都失败。
+- 输出保留最后 256 KiB，另保留最后 2 KiB 作为失败详情；SteamCMD 无输出 180 秒或总时长 900 秒后终止，Rust 整体等待 1200 秒；超时/退出码/格式错误分别返回固定错误码并携带输出尾部。
+- 从 VDF 的 `branches.public.buildid` 取数字 Steam buildid；缺失、多个冲突或非数字都失败。该值与 Release 的 `version.txt`（Klei 游戏版本 `dstBuild`）不是同一体系，候选匹配只使用 Release catalog 的 `steamBuildId`。
 - 只使用 catalog 中 verified 且 `imageDigest` 与本地 Docker 镜像一致的 Release 镜像；build-base 只用于 SteamCMD 工具容器。
 - 没有可用 Release 镜像时返回 `DST_UPDATE_CHECK_UNAVAILABLE`，不绑定任何实例。
-- 每次检查使用唯一容器名 `famine-dst-check-<uuid>`，超时或失败后 `docker rm -f`；检查开始前清理残留的同前缀容器；解析输出前做有界截断。
-- 检查失败不能覆盖上次成功的 `latestBuild`，只能写 `lastCheckError` 和 `checkedAt`。
+- 每次检查使用唯一容器名 `famine-dst-check-<uuid>`，超时或失败后 `docker rm -f`；检查开始前清理残留的同前缀容器；检查期间把最后一条 SteamCMD 进度写入缓存 `stageDetail`。
+- 检查失败不能覆盖上次成功的 `latestBuild`，只能写 `lastCheckError`（含 `detail` 输出尾部）和 `checkedAt`。
 
 ### 5.2 主机级缓存
 

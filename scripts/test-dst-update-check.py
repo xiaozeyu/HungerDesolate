@@ -26,8 +26,8 @@ class DstUpdateCheckTests(unittest.TestCase):
         (self.root / "releases").mkdir(parents=True)
         self.write(self.root / "host.json", {"schemaVersion": 1, "hostId": HOST})
         self.write(self.root / "releases" / "catalog.json", {"schemaVersion": 1, "hostId": HOST, "releases": [
-            {"releaseId": RELEASE, "dstBuild": "639491", "imageDigest": "sha256:" + "a" * 64,
-             "verified": True, "runtimeVerified": False}]})
+            {"releaseId": RELEASE, "dstBuild": "639491", "steamBuildId": "639491",
+             "imageDigest": "sha256:" + "a" * 64, "verified": True, "runtimeVerified": False}]})
         self.request = {"schemaVersion": 1, "requestId": REQUEST, "serverId": SERVER,
                         "hostId": HOST, "action": "status"}
         self.patches = [
@@ -130,6 +130,16 @@ class DstUpdateCheckTests(unittest.TestCase):
         self.assertFalse(status["checking"])
         self.assertEqual(status["lastCheckError"]["code"], "DST_UPDATE_CHECK_INTERRUPTED")
         self.assertEqual(status["lastCheckError"]["message"], "上次检查中断，请重试")
+
+    def test_candidates_require_matching_steam_build_id(self):
+        with patch.object(MODULE, "run_steamcmd", return_value="639491"):
+            data = MODULE.check(dict(self.request, action="check"))
+        self.assertEqual(len(data["candidateReleases"]), 1)
+        catalog = json.loads((self.root / "releases" / "catalog.json").read_text())
+        catalog["releases"][0]["steamBuildId"] = "999999"
+        self.write(self.root / "releases" / "catalog.json", catalog)
+        status = MODULE.status_data(HOST, MODULE.catalog_releases())
+        self.assertEqual(len(status["candidateReleases"]), 0)
 
     def test_image_selection_failure_is_persisted(self):
         with patch.object(MODULE, "check_image", side_effect=MODULE.Rejected("DST_UPDATE_CHECK_UNAVAILABLE")), \

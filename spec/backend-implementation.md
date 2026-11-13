@@ -353,7 +353,7 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 
 ### 11.1 更新
 
-check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按预览执行，不在排队后无声升级为更晚版本。主机级 DST build 检查不是任务：`updates/dst-latest.json` 保存 `running/ok/failed`、阶段和错误码，检查锁非阻塞；重复启动返回当前状态，缓存 running 但锁已释放时报告中断。检查优先使用 `dst-build-base` 的已 bootstrap SteamCMD，SteamCMD 最长 600 秒；每次使用唯一容器名，超时/失败后清理，下次检查前回收同前缀残留容器。
+check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按预览执行，不在排队后无声升级为更晚版本。主机级 DST build 检查不是任务：`updates/dst-latest.json` 保存 `running/ok/failed`、阶段、进度和错误码/输出尾部，检查锁非阻塞；重复启动返回当前状态，缓存 running 但锁已释放时报告中断。检查优先使用 `dst-build-base` 的已 bootstrap SteamCMD，并用 Docker 命名卷缓存 bootstrap/package 状态，登录 HOME 留在一次性容器；SteamCMD 无输出 180 秒或总时长 900 秒后终止，Rust 整体等待 1200 秒；每次使用唯一容器名，超时/失败后清理，下次检查前回收同前缀残留容器。检查返回的 Steam buildid 与 Release catalog 的 `steamBuildId` 匹配；`dstBuild` 仍表示 `version.txt` 的 Klei 游戏版本，不再用于候选匹配。
 
 流程：取得重任务/实例锁 → revalidate → staging 下载/校验 → 停分片 → 一致保护备份 → 切换完整部署 → 启动 → 验证实际 build、MOD、存档、容器身份与必要网络证据 → finalize。
 

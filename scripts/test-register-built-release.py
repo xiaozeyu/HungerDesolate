@@ -37,6 +37,7 @@ class RegisterBuiltReleaseTests(unittest.TestCase):
             "image": "hungerdesolate/dst-runtime",
             "imageDigest": DIGEST,
             "dstBuild": "build-1",
+            "steamBuildId": "26474880",
             "artifactDigest": DIGEST,
             "scriptVersion": "V2-test",
             "verified": False,
@@ -98,6 +99,7 @@ class RegisterBuiltReleaseTests(unittest.TestCase):
         self.assertEqual(len(catalog["releases"]), 1)
         release = catalog["releases"][0]
         self.assertEqual(release["releaseId"], RELEASE_ID)
+        self.assertEqual(release["steamBuildId"], "26474880")
         self.assertTrue(release["verified"])
         self.assertFalse(release["runtimeVerified"])
         self.assertEqual((self.root / "releases").stat().st_mode & 0o777, 0o700)

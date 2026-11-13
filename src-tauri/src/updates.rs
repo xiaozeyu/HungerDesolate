@@ -64,6 +64,8 @@ pub struct LatestBuild {
 pub struct CheckError {
     pub code: String,
     pub message: String,
+    #[serde(default)]
+    pub detail: Option<String>,
     pub at: String,
 }
 
@@ -78,6 +80,7 @@ pub struct HostDstUpdateStatus {
     pub last_check_error: Option<CheckError>,
     pub checking: bool,
     pub stage: Option<String>,
+    pub stage_detail: Option<String>,
     pub started_at: Option<String>,
 }
 
@@ -189,6 +192,8 @@ struct RemoteStatus {
     last_check_error: Option<CheckError>,
     checking: bool,
     stage: Option<String>,
+    #[serde(default)]
+    stage_detail: Option<String>,
     started_at: Option<String>,
 }
 
@@ -419,6 +424,7 @@ fn status_from(
         last_check_error: remote.last_check_error,
         checking: remote.checking,
         stage: remote.stage,
+        stage_detail: remote.stage_detail,
         started_at: remote.started_at,
     })
 }
@@ -480,7 +486,7 @@ pub fn check(database: &Path, request: HostUpdateRequest) -> CommandResult<HostD
                 &request.server_id,
                 &request.host_id,
             ),
-            Duration::from_secs(720),
+            Duration::from_secs(1200),
         )?;
         let mut status = status_from(value, &request.request_id, &request.host_id)?;
         status.target.server_id = request.server_id.clone();

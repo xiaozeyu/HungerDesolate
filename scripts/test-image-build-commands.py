@@ -75,11 +75,16 @@ elif args[:1] == ["run"]:
         binary.write_text("#!/bin/sh\n")
         binary.chmod(0o755)
         (host / "version.txt").write_text("unknown\n" if failure == "version_format" else "756039\n")
+        (host / "steamapps").mkdir(parents=True, exist_ok=True)
+        (host / "steamapps/appmanifest_343050.acf").write_text(
+            '"AppState"\n{\n\t"appid"\t\t"343050"\n\t"buildid"\t\t"26474880"\n}\n')
         (host / "data/databundles").mkdir(parents=True, exist_ok=True)
         (host / "data/databundles/scripts.zip").write_bytes(b"scripts")
     elif args[-1] == "cat /srv/dst/version.txt":
         if failure == "version_read": sys.exit(23)
         print("unknown" if failure == "version_format" else "756039")
+    elif args[-1] == "cat /srv/dst/steamapps/appmanifest_343050.acf":
+        print('"AppState"\n{\n\t"appid"\t\t"343050"\n\t"buildid"\t\t"26474880"\n}')
     elif "famine-workshop-fetch" in args[-1]:
         sys.exit(23 if failure == "capability" else 0)
     else:
@@ -126,6 +131,7 @@ class ImageBuildCommandTests(unittest.TestCase):
                     "data=json.loads(metadata.read_text())\n"
                     "assert data['imageDigest']=='sha256:'+'a'*64\n"
                     "assert data['dstBuild']=='756039'\n"
+                    "assert data['steamBuildId']=='26474880'\n"
                     "(root/'registered').write_text(sys.argv[1])\n")
         self.context = self.root / "context"
         self.context.mkdir()

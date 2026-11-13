@@ -24,6 +24,8 @@ pub struct ReleaseSummary {
     pub image: String,
     pub image_digest: String,
     pub dst_build: String,
+    #[serde(default)]
+    pub steam_build_id: Option<String>,
     pub artifact_digest: String,
     pub script_version: String,
     #[serde(default)]

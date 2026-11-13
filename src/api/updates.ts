@@ -15,9 +15,10 @@ export interface HostDstUpdateStatus {
   target: { serverId: string; hostId: string };
   latest: { build: string; checkedAt: string; source: string } | null;
   candidateReleases: CandidateRelease[];
-  lastCheckError: { code: string; message: string; at: string } | null;
+  lastCheckError: { code: string; message: string; detail: string | null; at: string } | null;
   checking: boolean;
   stage: "image" | "steamcmd" | "finalize" | null;
+  stageDetail: string | null;
   startedAt: string | null;
 }
 

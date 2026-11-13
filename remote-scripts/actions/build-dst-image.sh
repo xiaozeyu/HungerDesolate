@@ -28,7 +28,7 @@ cleanup_build_artifacts() {
     local root_dir
     root_dir=$(dirname "$BUILD_DIR")
     cd "$BUILD_DIR" 2>/dev/null || true
-    rm -rf "$BUILD_DIR/dst-runtime-build" "$DST_DOWNLOAD" "$DST_ROOT"/.staging-*
+    rm -rf "$BUILD_DIR/dst-runtime-build" "$BUILD_DIR/steamapps" "$DST_DOWNLOAD" "$DST_ROOT"/.staging-*
     docker builder prune --all -f >/dev/null 2>&1 || echo 'IMAGE_BUILD_CACHE_CLEANUP_FAILED' >&2
     find "$root_dir" -maxdepth 1 -type f -name 'build-*.log' -mtime +7 -delete 2>/dev/null || true
 }
@@ -171,8 +171,10 @@ if [ -n "$DST_BASE" ]; then
     cp -a "$DST_BASE/." "$DST_DOWNLOAD/"
     chown -R 1000:1000 "$DST_DOWNLOAD"
 fi
+mkdir -p "$BUILD_DIR/steamapps"
+chown 1000:1000 "$BUILD_DIR/steamapps"
 docker run 9>&- --rm --network bridge --user 1000:1000 --env HOME=/home/steam \
-    -v "$DST_DOWNLOAD:/dst" --env DST_DIR=/dst \
+    -v "$DST_DOWNLOAD:/dst" -v "$BUILD_DIR/steamapps:/home/steam/steamapps" --env DST_DIR=/dst \
     --env "STEAMCMD_DOWNLOAD_DEADLINE=${STEAMCMD_DOWNLOAD_DEADLINE}" \
     "$BUILD_BASE_IMAGE" /bin/bash /home/steam/install-dst.sh download
 
@@ -192,6 +194,17 @@ if ! [[ "$DST_BUILD" =~ ^[0-9]+$ ]]; then
     echo 'FAMINE_BUILD_FAILED:1' >&2
     exit 1
 fi
+STEAM_BUILD_ID=""
+APP_MANIFEST=$(find "$DST_DOWNLOAD/steamapps" "$BUILD_DIR/steamapps" \
+    -name appmanifest_343050.acf -print -quit 2>/dev/null || true)
+if [[ -n "$APP_MANIFEST" && -f "$APP_MANIFEST" ]]; then
+    STEAM_BUILD_ID=$(sed -n 's/.*"buildid"[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' "$APP_MANIFEST" | head -n 1)
+fi
+if ! [[ "$STEAM_BUILD_ID" =~ ^[0-9]+$ ]]; then
+    echo 'STEAM_BUILD_ID_MISSING: appmanifest_343050.acf has no numeric Steam buildid' >&2
+    echo 'FAMINE_BUILD_FAILED:1' >&2
+    exit 1
+fi
 DST_CONTENT_DIGEST=$(cd "$DST_DOWNLOAD" && find . -type f -print0 | LC_ALL=C sort -z \
     | xargs -0 -r sha256sum | sha256sum | cut -d' ' -f1)
 
@@ -208,6 +221,7 @@ docker run 9>&- --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
 mv "$DST_DOWNLOAD" "$DST_ROOT/$RELEASE_ID"
 DST_PUBLISHED=1
 echo "DST Build: ${DST_BUILD}"
+echo "Steam build: ${STEAM_BUILD_ID}"
 echo "DST content digest: sha256:${DST_CONTENT_DIGEST}"
 
 echo "==> 生成 release 元数据"
@@ -223,6 +237,7 @@ cat > release-metadata.json <<EOF
   "image": "${RUNTIME_IMAGE_NAME}",
   "imageDigest": "${IMAGE_DIGEST}",
   "dstBuild": "${DST_BUILD}",
+  "steamBuildId": "${STEAM_BUILD_ID}",
   "artifactDigest": "sha256:${DST_CONTENT_DIGEST}",
   "scriptVersion": "${SCRIPT_VERSION}",
   "verified": false,

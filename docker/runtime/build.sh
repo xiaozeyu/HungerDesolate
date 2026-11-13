@@ -60,10 +60,19 @@ if ! [[ "$DST_BUILD" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+STEAM_BUILD_ID=$(docker run --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
+    -ec 'cat /srv/dst/steamapps/appmanifest_343050.acf' \
+    | sed -n 's/.*"buildid"[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' | head -n 1)
+if ! [[ "$STEAM_BUILD_ID" =~ ^[0-9]+$ ]]; then
+    echo 'STEAM_BUILD_ID_MISSING: appmanifest_343050.acf has no numeric Steam buildid' >&2
+    exit 1
+fi
+
 docker run --rm --network none --entrypoint /bin/sh "$IMAGE_DIGEST" \
     -ec 'test -x /usr/local/bin/famine-workshop-fetch && grep -Fxq steamcmd-workshop-v1 /srv/capabilities/workshop-fetch'
 
 echo "    DST Build: ${DST_BUILD}"
+echo "    Steam build: ${STEAM_BUILD_ID}"
 
 # 生成 release 元数据
 SCRIPT_VERSION="V2-$(date +%Y%m%d)"
@@ -76,6 +85,7 @@ cat > release-metadata.json <<EOF
   "image": "${IMAGE_NAME}",
   "imageDigest": "${IMAGE_DIGEST}",
   "dstBuild": "${DST_BUILD}",
+  "steamBuildId": "${STEAM_BUILD_ID}",
   "artifactDigest": "${IMAGE_DIGEST}",
   "scriptVersion": "${SCRIPT_VERSION}",
   "verified": false,

@@ -40,7 +40,9 @@ def validate_release(value):
         reject("CREATE_RELEASE_INVALID")
     required = {"schemaVersion", "releaseId", "platform", "image", "imageDigest",
                 "dstBuild", "artifactDigest", "scriptVersion", "verified", "runtimeVerified", "commands"}
-    if set(value) not in (required, required | {"createdAt"}):
+    optional = {"createdAt", "steamBuildId"}
+    fields = set(value)
+    if not required.issubset(fields) or fields - required - optional:
         reject("CREATE_RELEASE_INVALID")
     if (value["schemaVersion"] != 1 or not valid_uuid(value["releaseId"])
             or value["platform"] != "linux/amd64" or not value["verified"]
@@ -48,6 +50,8 @@ def validate_release(value):
             or not safe_text(value["image"], 256)
             or re.fullmatch(r"[a-z0-9][a-z0-9./_-]*", value["image"]) is None
             or not digest(value["imageDigest"]) or not safe_text(value["dstBuild"])
+            or ("steamBuildId" in value and (not isinstance(value["steamBuildId"], str)
+                                             or not re.fullmatch(r"[0-9]{1,20}", value["steamBuildId"])))
             or not digest(value["artifactDigest"]) or not safe_text(value["scriptVersion"])
             or not isinstance(value["commands"], dict)
             or set(value["commands"]) != {"master", "caves"}

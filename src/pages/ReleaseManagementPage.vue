@@ -73,6 +73,7 @@ const cachePreview = ref<BuildCachePreview | null>(null);
 const updateStatus = ref<HostDstUpdateStatus | null>(null);
 const updateCheckBusy = ref(false);
 const updateCheckError = ref("");
+const updateCheckDetail = ref("");
 let updatePollTimer: number | undefined;
 let updatePollStartedAt = 0;
 let updateDisposed = false;
@@ -96,6 +97,17 @@ function isCurrent(target: { serverId: string; hostId: string; recordVersion: nu
 
 const updateNotifyPending = ref(false);
 
+const updateStageLabel = computed(() => {
+  if (!updateCheckBusy.value && !updateStatus.value?.checking) return "";
+  const detail = updateStatus.value?.stageDetail?.trim();
+  if (detail) return detail;
+  const stage = updateStatus.value?.stage;
+  if (stage === "image") return "正在选择检查镜像…";
+  if (stage === "steamcmd") return "正在通过 SteamCMD 查询…";
+  if (stage === "finalize") return "正在整理检查结果…";
+  return "正在检查 DST 更新…";
+});
+
 function notifyUpdateResult(status: HostDstUpdateStatus | null) {
   if (!updateNotifyPending.value) return;
   updateNotifyPending.value = false;
@@ -104,13 +116,13 @@ function notifyUpdateResult(status: HostDstUpdateStatus | null) {
     return;
   }
   if (status.lastCheckError) {
-    notification.error({ title: "DST 更新检查失败", content: status.lastCheckError.message, duration: 0, closable: true });
+    notification.error({ title: "DST 更新检查失败", content: `${status.lastCheckError.message}${status.lastCheckError.detail ? "（详细输出见页面）" : ""}`, duration: 0, closable: true });
     return;
   }
   if (status.latest) {
     notification.success({
       title: "DST 更新检查完成",
-      content: `最新 build ${status.latest.build} · 检查于 ${formatReleaseDate(status.latest.checkedAt)}${status.candidateReleases.length ? ` · 可用 Release ${status.candidateReleases.length} 个` : ""}`,
+      content: `最新 Steam build ${status.latest.build} · 检查于 ${formatReleaseDate(status.latest.checkedAt)}${status.candidateReleases.length ? ` · 可用 Release ${status.candidateReleases.length} 个` : " · 没有匹配的 Release"}`,
       duration: 5000,
       closable: true,
     });
@@ -155,7 +167,7 @@ function scheduleUpdatePoll() {
   const value = server.value;
   if (!value?.hostId) return;
   if (updatePollStartedAt === 0) updatePollStartedAt = Date.now();
-  if (Date.now() - updatePollStartedAt > 13 * 60 * 1000) {
+  if (Date.now() - updatePollStartedAt > 22 * 60 * 1000) {
     if (updateStatus.value) updateStatus.value = { ...updateStatus.value, checking: false, stage: null };
     updateCheckError.value = "检查超时，请稍后刷新或重试";
     notifyUpdateError(updateCheckError.value);
@@ -187,7 +199,8 @@ async function loadUpdateStatus() {
       || server.value.recordVersion !== expectedRecordVersion || status.requestId !== requestId
       || status.target.serverId !== value.serverId || status.target.hostId !== value.hostId) return;
     updateStatus.value = status;
-    updateCheckError.value = "";
+    updateCheckError.value = status.lastCheckError?.message ?? "";
+    updateCheckDetail.value = status.lastCheckError?.detail ?? "";
     if (status.checking || updateCheckBusy.value) scheduleUpdatePoll();
     else {
       stopUpdatePoll();
@@ -217,6 +230,7 @@ async function checkUpdates() {
   updateCheckBusy.value = true;
   updateNotifyPending.value = true;
   updateCheckError.value = "";
+  updateCheckDetail.value = "";
   scheduleUpdatePoll();
   const expectedRecordVersion = value.recordVersion;
   const requestId = crypto.randomUUID();
@@ -505,6 +519,7 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   updateStatus.value = null;
   updateCheckBusy.value = false;
   updateCheckError.value = "";
+  updateCheckDetail.value = "";
   void loadUpdateStatus();
   buildStarting.value = false;
   buildStartError.value = "";
@@ -529,6 +544,7 @@ const releaseColumns = computed<DataTableColumns<InstanceReleaseSummary>>(() => 
     render: release => h("div", { class: "release-version-cell" }, [
       h("strong", release.dstBuild),
       h("span", { class: "release-id", title: release.releaseId }, `Release ${release.releaseId.slice(0, 8)}`),
+      release.steamBuildId ? h("span", { class: "release-id" }, `Steam build ${release.steamBuildId}`) : null,
     ]),
   },
   {
@@ -601,6 +617,11 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
       </template>
     </PageHeader>
 
+    <div v-if="updateStageLabel" class="update-stage" role="status">{{ updateStageLabel }}</div>
+    <div v-if="updateCheckDetail" class="update-detail" role="alert">
+      <strong>{{ updateCheckError || "上次检查失败" }}</strong>
+      <pre>{{ updateCheckDetail }}</pre>
+    </div>
 
     <div v-if="error" class="environment-error release-feedback" role="alert">
       <strong>{{ error.message }}</strong>
@@ -648,7 +669,7 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
     <NLog v-if="buildStatus?.logTail.length" :log="buildStatus.logTail.join('\n')" :rows="8" class="build-log"/>
 </FloatingTask>
 
-    <AppDialog :open="cleanupOpen" title="清理磁盘" description="清理构建临时文件、未被引用的 Docker 镜像和可回收 Release；使用中的 Release 会跳过。" @update:open="value => { if (!value && !cleanupBusy) cleanupOpen = false; }">
+    <AppDialog :open="cleanupOpen" title="清理磁盘"  @update:open="value => { if (!value && !cleanupBusy) cleanupOpen = false; }">
       <div class="form-stack">
         <p v-if="cleanupError" class="environment-error" role="alert">{{ cleanupError }}</p>
         <section class="disk-cleanup-section">
@@ -663,7 +684,7 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
         </section>
         <section class="disk-cleanup-section">
           <strong>可回收 Release</strong>
-          <p v-if="!reclaimableReleases.length">无可回收 Release。</p>
+          <p v-if="!reclaimableReleases.length">无可回收 Release</p>
           <div v-else class="release-cleanup-list">
             <ul>
               <li v-for="release in reclaimableReleases" :key="release.releaseId">
@@ -678,11 +699,11 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
         <NButton type="error" ghost :disabled="cleanupBusy || (!reclaimableReleases.length && !cachePreview?.allowed)" @click="confirmDiskCleanup">{{ cleanupBusy ? "清理中…" : "清理" }}</NButton>
       </template>
     </AppDialog>
-    <AppDialog :open="!!deletePreview" title="删除 DST Release" description="删除 Release 登记及独占镜像；共用镜像保留。已归档专服的数据保留，但恢复时可能需要重新导入原镜像。" @update:open="closeDeleteDialog">
+    <AppDialog :open="!!deletePreview" title="删除 DST Release"  @update:open="closeDeleteDialog">
       <div v-if="deletePreview" class="form-stack">
         <dl class="environment-facts">
           <div><dt>DST 版本</dt><dd>{{ deletePreview.dstBuild }}</dd></div>
-          <div><dt>镜像摘要</dt><dd class="mono">{{ shortDigest(deletePreview.imageDigest) }}</dd></div>
+<!--          <div><dt>镜像摘要</dt><dd class="mono">{{ shortDigest(deletePreview.imageDigest) }}</dd></div>-->
           <div><dt>实例引用</dt><dd>{{ deletePreview.instanceReferences.length }}</dd></div>
           <div><dt>任务引用</dt><dd>{{ deletePreview.taskReferences.length }}</dd></div>
           <div><dt>容器引用</dt><dd>{{ deletePreview.containerReferences.length }}</dd></div>
@@ -723,6 +744,9 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
 .state-indicator.busy { background: var(--warning); animation: release-pulse 1.2s ease-in-out infinite; }
 .build-log { margin-top: 8px; }
 .release-feedback { margin-bottom: var(--space-3); }
+.update-stage { margin: -8px 0 18px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.update-detail { margin: 0 0 18px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border)); background: color-mix(in srgb, var(--danger) 4%, var(--surface)); color: var(--danger); font-size: 12px; }
+.update-detail pre { margin: 8px 0 0; max-height: 220px; overflow: auto; color: var(--text-secondary); font: 11px/1.5 "JetBrains Mono", "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .release-retention { color: var(--text-secondary); font-size: 11px; }
 .disk-cleanup-section { display: grid; gap: var(--space-2); }
 .disk-cleanup-section > strong { font-size: 12px; font-weight: 600; }

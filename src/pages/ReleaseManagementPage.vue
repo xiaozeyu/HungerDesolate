@@ -167,7 +167,7 @@ function scheduleUpdatePoll() {
   const value = server.value;
   if (!value?.hostId) return;
   if (updatePollStartedAt === 0) updatePollStartedAt = Date.now();
-  if (Date.now() - updatePollStartedAt > 22 * 60 * 1000) {
+  if (Date.now() - updatePollStartedAt > 75 * 60 * 1000) {
     if (updateStatus.value) updateStatus.value = { ...updateStatus.value, checking: false, stage: null };
     updateCheckError.value = "检查超时，请稍后刷新或重试";
     notifyUpdateError(updateCheckError.value);
@@ -350,10 +350,6 @@ function formatReleaseDate(value: string | null | undefined) {
   if (!value) return "—";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function shortDigest(value: string) {
-  return value.length > 24 ? `${value.slice(0, 19)}…` : value;
 }
 
 function closeDeleteDialog(open: boolean) {

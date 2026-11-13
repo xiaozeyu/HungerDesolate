@@ -76,7 +76,7 @@ Docker 自动安装首发目标固定为 Ubuntu 26.04 LTS (`ID=ubuntu`, `VERSION
 
 SSH/桌面中断只表示结果未知；页面重开按原连接版本和 plan 查询回执。预览有效期内无回执时保留原 operationId 重试，避免仍未接纳的旧 SSH 进程延迟执行；有效期届满且在远端锁内确认无回执后才释放本地 pending。incomplete 使用同 operationId 继续；succeeded 重新校验后完成本地对账。已有回执的重试优先于 plan 过期检查。主机断电后的文件系统持久性仍需 Linux 实机验证；不承诺后台持续执行。这里只实现初始化短操作回执，不能作为 B3 的远端任务系统。不会自动删除孤立 staging/回执或已有管理数据。
 
-2026-10-30 镜像构建命令复核：后台构建标准输入断开 SSH，Release ID 在命令拼接前校验为规范 UUID v4；每个 Release 独占 `/opt/famine-hub/scripts/image-build/<releaseId>/actions` 脚本快照目录，重复 ID 不覆盖旧脚本。远端命令与登记验证固定同一本机 Docker socket。共享构建上下文受构建文件锁保护，冲突任务不得删除活动上下文。默认 SteamCMD bootstrap 预算为 3600 秒，DST 内容阶段为 1800 秒，两条构建路线通过 Docker ARG 显式传递可覆盖的正整数时长。元数据/验证使用固定本地 image ID，版本读取失败不降级为 unknown。两条构建路线共用同一 `docker/runtime/Dockerfile`，使用 Docker daemon 自带的 BuildKit；基础镜像由 `prepare-base-image.sh` 从可达镜像源预拉取，不修改 daemon.json 或重启共享 Docker 服务；不承诺跨任务下载缓存或完整断点续传。隔离 CLI 回归通过后仍需真实 Linux amd64 联网构建验收。
+2026-10-30 镜像构建命令复核：后台构建标准输入断开 SSH，Release ID 在命令拼接前校验为规范 UUID v4；每个 Release 独占 `/opt/famine-hub/scripts/image-build/<releaseId>/actions` 脚本快照目录，重复 ID 不覆盖旧脚本。远端命令与登记验证固定同一本机 Docker socket。共享构建上下文受构建文件锁保护，冲突任务不得删除活动上下文。默认 SteamCMD bootstrap 预算为 3600 秒，DST 内容阶段为 3600 秒，两条构建路线通过 Docker ARG 显式传递可覆盖的正整数时长。元数据/验证使用固定本地 image ID，版本读取失败不降级为 unknown。两条构建路线共用同一 `docker/runtime/Dockerfile`，使用 Docker daemon 自带的 BuildKit；基础镜像由 `prepare-base-image.sh` 从可达镜像源预拉取，不修改 daemon.json 或重启共享 Docker 服务；不承诺跨任务下载缓存或完整断点续传。隔离 CLI 回归通过后仍需真实 Linux amd64 联网构建验收。
 
 ## 3. 本地持久化
 
@@ -353,7 +353,7 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 
 ### 11.1 更新
 
-check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按预览执行，不在排队后无声升级为更晚版本。主机级 DST build 检查不是任务：`updates/dst-latest.json` 保存 `running/ok/failed`、阶段、进度和错误码/输出尾部，检查锁非阻塞；重复启动返回当前状态，缓存 running 但锁已释放时报告中断。检查优先使用 `dst-build-base` 的已 bootstrap SteamCMD，并用 Docker 命名卷缓存 bootstrap/package 状态，登录 HOME 留在一次性容器；SteamCMD 无输出 180 秒或总时长 900 秒后终止，Rust 整体等待 1200 秒；每次使用唯一容器名，超时/失败后清理，下次检查前回收同前缀残留容器。检查返回的 Steam buildid 与 Release catalog 的 `steamBuildId` 匹配；`dstBuild` 仍表示 `version.txt` 的 Klei 游戏版本，不再用于候选匹配。
+check 采集可用信息；preview 固定目标 build 和 MOD 摘要；run 按预览执行，不在排队后无声升级为更晚版本。主机级 DST build 检查不是任务：`updates/dst-latest.json` 保存 `running/ok/failed`、阶段、进度和错误码/输出尾部，检查锁非阻塞；重复启动返回当前状态，缓存 running 但锁已释放时报告中断。检查优先使用 `dst-build-base` 的已 bootstrap SteamCMD，并用 Docker 命名卷同时缓存工具与 HOME（bootstrap/package/appcache），检查后清理 Steam config/ssfn 登录状态；SteamCMD 无输出 180 秒或总时长 3600 秒后终止，Rust 整体等待 4000 秒；每次使用唯一容器名，超时/失败后清理，下次检查前回收同前缀残留容器。检查返回的 Steam buildid 与 Release catalog 的 `steamBuildId` 匹配；`dstBuild` 仍表示 `version.txt` 的 Klei 游戏版本，不再用于候选匹配。
 
 流程：取得重任务/实例锁 → revalidate → staging 下载/校验 → 停分片 → 一致保护备份 → 切换完整部署 → 启动 → 验证实际 build、MOD、存档、容器身份与必要网络证据 → finalize。
 

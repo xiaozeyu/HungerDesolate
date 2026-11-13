@@ -8,7 +8,7 @@ RELEASE_ID="${RELEASE_ID:-$(uuidgen | tr '[:upper:]' '[:lower:]')}"
 BUILD_TAG="${BUILD_TAG:-release-${RELEASE_ID}}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 STEAMCMD_BOOTSTRAP_DEADLINE="${STEAMCMD_BOOTSTRAP_DEADLINE:-3600s}"
-STEAMCMD_DOWNLOAD_DEADLINE="${STEAMCMD_DOWNLOAD_DEADLINE:-1800s}"
+STEAMCMD_DOWNLOAD_DEADLINE="${STEAMCMD_DOWNLOAD_DEADLINE:-3600s}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # Docker Engine 29.4.2 的默认 seccomp profile 会阻断 SteamCMD 使用的 32 位 socketcall。

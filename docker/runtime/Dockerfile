@@ -36,7 +36,7 @@ COPY --chown=steam:steam install-dst.sh /home/steam/install-dst.sh
 # 下载 DST Dedicated Server (App ID: 343050)
 USER steam
 ARG STEAMCMD_BOOTSTRAP_DEADLINE=3600s
-ARG STEAMCMD_DOWNLOAD_DEADLINE=1800s
+ARG STEAMCMD_DOWNLOAD_DEADLINE=3600s
 RUN bash ./install-dst.sh bootstrap
 RUN bash ./install-dst.sh download
 

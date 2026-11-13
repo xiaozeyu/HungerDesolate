@@ -486,7 +486,7 @@ pub fn check(database: &Path, request: HostUpdateRequest) -> CommandResult<HostD
                 &request.server_id,
                 &request.host_id,
             ),
-            Duration::from_secs(1200),
+            Duration::from_secs(4000),
         )?;
         let mut status = status_from(value, &request.request_id, &request.host_id)?;
         status.target.server_id = request.server_id.clone();

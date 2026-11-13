@@ -106,10 +106,10 @@ docker run --rm --name famine-dst-check-<uuid> --network bridge --user 1000:1000
 
 要求：
 
-- 不执行 `app_update`，不写实例目录，不挂宿主机业务目录，不用 host network；只用一个 Docker 命名卷缓存 SteamCMD bootstrap/package 状态，登录 HOME 保持在一次性容器内。
+- 不执行 `app_update`，不写实例目录，不挂宿主机业务目录，不用 host network；用一个 Docker 命名卷同时缓存 SteamCMD 工具与 HOME（bootstrap/package/appcache），检查结束后删除 Steam config、ssfn 等登录状态，避免重复下载并避免持久化登录凭据。
 - 优先 build-base；回退 Release 镜像时使用 `/opt/famine/steamcmd/steamcmd.sh`，工具目录持久化到命名卷，`HOME=/tmp/steam-home`；卷初始化失败时回退为不持久化。
 - Docker Engine 29.4.2 会阻断 32 位 SteamCMD，检查直接返回 `DST_UPDATE_CHECK_DOCKER_INCOMPATIBLE`。
-- 输出保留最后 256 KiB，另保留最后 2 KiB 作为失败详情；SteamCMD 无输出 180 秒或总时长 900 秒后终止，Rust 整体等待 1200 秒；超时/退出码/格式错误分别返回固定错误码并携带输出尾部。
+- 输出保留最后 256 KiB，另保留最后 2 KiB 作为失败详情；SteamCMD 无输出 180 秒或总时长 3600 秒后终止，Rust 整体等待 4000 秒；超时/退出码/格式错误分别返回固定错误码并携带输出尾部。
 - 从 VDF 的 `branches.public.buildid` 取数字 Steam buildid；缺失、多个冲突或非数字都失败。该值与 Release 的 `version.txt`（Klei 游戏版本 `dstBuild`）不是同一体系，候选匹配只使用 Release catalog 的 `steamBuildId`。
 - 只使用 catalog 中 verified 且 `imageDigest` 与本地 Docker 镜像一致的 Release 镜像；build-base 只用于 SteamCMD 工具容器。
 - 没有可用 Release 镜像时返回 `DST_UPDATE_CHECK_UNAVAILABLE`，不绑定任何实例。

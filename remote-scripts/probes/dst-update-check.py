@@ -22,7 +22,7 @@ MAX_DETAIL = 2048
 STEAMCMD = "/opt/famine/steamcmd/steamcmd.sh"
 BUILD_BASE = "hungerdesolate/dst-build-base:"
 CHECK_CONTAINER_PREFIX = "famine-dst-check-"
-STEAM_TOTAL_TIMEOUT = 900
+STEAM_TOTAL_TIMEOUT = 3600
 STEAM_STALL_TIMEOUT = 180
 TOOL_VOLUME_PREFIX = "famine-dst-check-tool-"
 ERROR_MESSAGES = {
@@ -269,6 +269,20 @@ def ensure_tool_volume(tool):
     return volume
 
 
+def cleanup_tool_state(tool):
+    volume = tool_volume(tool)
+    inspected = docker_command(["volume", "inspect", volume], timeout=10)
+    if inspected is None or inspected.returncode != 0:
+        return
+    mount_path, _ = tool_mount(tool)
+    docker_command(
+        ["run", "--rm", "--user", "0:0", "-v", volume + ":" + mount_path,
+         "--entrypoint", "/bin/sh", tool["image"], "-ec",
+         "rm -rf " + mount_path + "/Steam/config " + mount_path + "/Steam/ssfn* "
+         + mount_path + "/.steam/registry.vdf " + mount_path + "/.steam/loginusers.vdf"],
+        timeout=30)
+
+
 def run_steamcmd(tool, progress=None):
     version = docker_server_version()
     if version and (version == "29.4.2" or version.startswith(("29.4.2-", "29.4.2+"))):
@@ -276,9 +290,9 @@ def run_steamcmd(tool, progress=None):
     name = CHECK_CONTAINER_PREFIX + uuid.uuid4().hex
     mount_path, _ = tool_mount(tool)
     volume = ensure_tool_volume(tool)
-    # Keep the persistent volume for SteamCMD bootstrap/package state only; the
-    # login/home directory stays inside the disposable container.
-    home = "/tmp/steam-home" if volume else tool["home"]
+    # Persist the SteamCMD tool and its home cache together so the client
+    # self-update is not repeated; login config files are removed afterwards.
+    home = mount_path if volume else tool["home"]
     command = ["docker", "run", "--rm", "--name", name, "--network", "bridge",
                "--user", "1000:1000", "--env", "HOME=" + home]
     if volume:
@@ -463,6 +477,7 @@ def check(request):
                 except OSError:
                     pass
 
+        tool = None
         try:
             release = check_image(releases)
             tool = check_tool(release)
@@ -494,6 +509,9 @@ def check(request):
                                 "errorCode": "DST_UPDATE_CHECK_FAILED",
                                 "errorDetail": str(cause)[:MAX_DETAIL]})
             raise
+        finally:
+            if tool is not None:
+                cleanup_tool_state(tool)
     finally:
         if locked:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)

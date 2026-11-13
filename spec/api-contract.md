@@ -299,7 +299,7 @@ Docker 仓库只读检查一次请求产生一次快照，不在弹窗静置时�
 
 Docker 安装确认提交期间显示“提交中…”并禁用重复提交；独立状态查询不能覆盖正在进行的接纳请求。接纳失败后重查任务时保留原错误，不因空任务结果清除失败原因。首次发布的任务 `sequence=1`，后续更新单调增加；前端继续拒绝 `sequence=0`。测试入口 `node --test scripts/test-docker-install-ui.mjs` 覆盖重复点击、错误保留、响应丢失后对账和切换主机后的迟到响应。
 
-镜像构建与构建状态查询在远端命令/日志路径拼接前校验 Release ID 为规范 UUID v4；非法标识返回 `INPUT_INVALID`，不建立 SSH 会话。构建命令通过 Docker build args 显式传递 SteamCMD bootstrap/DST 两阶段的有限预算，默认 3600/1800 秒。并发构建在修改共享构建上下文前返回 `IMAGE_BUILD_ALREADY_RUNNING` 并写入失败终态。上述改动不改变公开请求/响应 DTO。
+镜像构建与构建状态查询在远端命令/日志路径拼接前校验 Release ID 为规范 UUID v4；非法标识返回 `INPUT_INVALID`，不建立 SSH 会话。构建命令通过 Docker build args 显式传递 SteamCMD bootstrap/DST 两阶段的有限预算，默认 3600/3600 秒。并发构建在修改共享构建上下文前返回 `IMAGE_BUILD_ALREADY_RUNNING` 并写入失败终态。上述改动不改变公开请求/响应 DTO。
 
 构建使用 Docker daemon 自带的 BuildKit，不再下载独立 BuildKit 镜像。基础镜像准备失败使用日志标记 `BASE_IMAGE_UNAVAILABLE` 并写入 `FAMINE_BUILD_FAILED:1`，不执行 Dockerfile、不登记 Release。构建进度在 SteamCMD 阶段之前单独报告“准备 Debian 基础镜像”，只有本地存在 linux/amd64 的 `debian:12-slim` 后才进入“正在构建镜像”。
 

@@ -10,7 +10,7 @@ phase=${1:-}
 case "$phase" in
     # SteamCMD bootstrap 需要下载客户端更新，为慢速 CDN 保留有界等待时间。
     bootstrap) deadline="${STEAMCMD_BOOTSTRAP_DEADLINE:-3600s}"; failure_code=STEAMCMD_BOOTSTRAP_FAILED ;;
-    download) deadline="${STEAMCMD_DOWNLOAD_DEADLINE:-1800s}"; failure_code=STEAMCMD_DOWNLOAD_FAILED ;;
+    download) deadline="${STEAMCMD_DOWNLOAD_DEADLINE:-3600s}"; failure_code=STEAMCMD_DOWNLOAD_FAILED ;;
     *) echo 'Usage: install-dst.sh bootstrap|download' >&2; exit 2 ;;
 esac
 if ! [[ "$deadline" =~ ^[1-9][0-9]*[smh]$ ]]; then

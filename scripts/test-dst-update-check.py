@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -130,6 +131,17 @@ class DstUpdateCheckTests(unittest.TestCase):
         self.assertFalse(status["checking"])
         self.assertEqual(status["lastCheckError"]["code"], "DST_UPDATE_CHECK_INTERRUPTED")
         self.assertEqual(status["lastCheckError"]["message"], "上次检查中断，请重试")
+
+    def test_cleanup_removes_login_state_but_keeps_tool_cache(self):
+        tool = {"image": "sha256:" + "b" * 64, "steamcmd": MODULE.STEAMCMD, "home": "/home/famine"}
+        with patch.object(MODULE, "docker_command", side_effect=[
+            SimpleNamespace(returncode=0), SimpleNamespace(returncode=0)]) as command:
+            MODULE.cleanup_tool_state(tool)
+        self.assertEqual(command.call_count, 2)
+        cleanup = " ".join(command.call_args_list[1].args[0])
+        self.assertIn("/opt/famine/Steam/config", cleanup)
+        self.assertIn(".steam/loginusers.vdf", cleanup)
+        self.assertNotIn("steamcmd.sh", cleanup)
 
     def test_candidates_require_matching_steam_build_id(self):
         with patch.object(MODULE, "run_steamcmd", return_value="639491"):

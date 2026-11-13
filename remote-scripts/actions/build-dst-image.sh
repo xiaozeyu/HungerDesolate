@@ -10,7 +10,7 @@ BUILD_DIR="/var/lib/famine-hub/image-build"
 STAGING_DIR="/var/lib/famine-hub/staging"
 RELEASE_ID="${1:-}"
 STEAMCMD_BOOTSTRAP_DEADLINE="${STEAMCMD_BOOTSTRAP_DEADLINE:-3600s}"
-STEAMCMD_DOWNLOAD_DEADLINE="${STEAMCMD_DOWNLOAD_DEADLINE:-1800s}"
+STEAMCMD_DOWNLOAD_DEADLINE="${STEAMCMD_DOWNLOAD_DEADLINE:-3600s}"
 SCRIPT_VERSION="V3-$(cat "${SCRIPT_DIR}/actions/Dockerfile.build-base" \
     "${SCRIPT_DIR}/actions/Dockerfile.runtime-base" \
     "${SCRIPT_DIR}/actions/install-dst.sh" \

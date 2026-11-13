@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowUpCircle, Play, Square, RotateCw } from "@lucide/vue";
+import { NButton, NDataTable, NSelect, type DataTableColumns } from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
 import AppDialog from "../components/AppDialog.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import SummaryBar from "../components/SummaryBar.vue";
+import LoadingState from "../components/LoadingState.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import TaskPanel from "../components/TaskPanel.vue";
 import { useInstanceOverview } from "../composables/useInstanceOverview";
@@ -153,11 +154,6 @@ async function confirmUpdate() {
     updateBusy.value = false;
   }
 }
-const summaryItems = computed(() => [
-  { label: "运行状态", value: status.value, tone: runtimeStatus.value === "running" ? "success" as const : runtimeStatus.value === "degraded" || runtimeStatus.value === "failed" ? "danger" as const : runtimeStatus.value === "starting" || runtimeStatus.value === "stopping" ? "warning" as const : "default" as const },
-  { label: "分片就绪", value: `${readyShards.value}/${shards.value.length}`, tone: shards.value.length && readyShards.value === shards.value.length ? "success" as const : readyShards.value ? "warning" as const : "default" as const },
-  { label: "UDP 端口", value: ports.value.length },
-]);
 const shardName = (shard: "master" | "caves") => shard === "master" ? "主世界 · Master" : "洞穴 · Caves";
 const purposeName = (purpose: "game" | "steamMaster" | "steamAuth" | "shard") => ({
   game: "游戏", steamMaster: "Steam 查询", steamAuth: "Steam 认证", shard: "分片通信",
@@ -179,10 +175,6 @@ const shardStateLabel = (shard: (typeof shards.value)[number]) =>
   shard.ready ? "就绪" : shard.processRunning === false ? "进程未运行" : shard.processRunning === true ? "端口未就绪" : containerLabel(shard.containerStatus);
 const shardPortLabel = (shard: (typeof shards.value)[number]) =>
   shard.ready ? "端口就绪" : shard.missingPorts.length ? `缺少 ${shard.missingPorts.length} 个端口` : "未就绪";
-const status = computed(() => runtimeStatus.value === "running" ? "运行中"
-  : runtimeStatus.value === "stopped" ? "已停止" : runtimeStatus.value === "degraded" ? "部分异常"
-  : runtimeStatus.value === "starting" ? "启动中" : runtimeStatus.value === "stopping" ? "停止中"
-  : runtimeStatus.value === "failed" ? "启动失败" : "未知");
 const canStart = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
   && !workspace.preview.value && !loading.value && !runtimeAction.value && runtimeStatus.value !== "running");
 const canStop = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
@@ -238,32 +230,37 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
   }
   await refresh();
 }
+
+type RuntimePort = (typeof ports.value)[number];
+const portColumns = computed<DataTableColumns<RuntimePort>>(() => [
+  { title: "分片", key: "shard", render: port => shardName(port.shard) },
+  { title: "用途", key: "purpose", render: port => purposeName(port.purpose) },
+  { title: "宿主机端口", key: "hostPort", render: port => h("span", { class: "mono" }, `UDP ${port.hostPort}`) },
+  { title: "容器监听", key: "listening", render: port => port.listening === true ? "已监听" : port.listening === false ? "未监听" : "未知" },
+  { title: "Docker 发布", key: "published", render: port => port.published === true ? "已发布" : port.published === false ? "未发布" : "未知" },
+]);
+const portRowKey = (port: RuntimePort) => `${port.shard}:${port.purpose}`;
+const updateOptions = computed(() => updateCandidates.value.map(release => ({
+  label: `build ${release.dstBuild} · ${release.releaseId.slice(0, 8)}`,
+  value: release.releaseId,
+})));
 </script>
 
 <template>
   <div class="page">
     <PageHeader :eyebrow="name" title="专服概览">
       <template #actions>
-        <button class="button" :disabled="loading || !!runtimeAction" @click="openUpdateDialog">
-          <ArrowUpCircle :size="16"/>
-          切换 DST 版本
-        </button>
-        <button class="button" :disabled="loading || !!runtimeAction" @click="refresh">
-          <RotateCw :size="16"/>
-          刷新
-        </button>
-        <button v-if="runtimeStatus==='running'" class="button" :disabled="!canRestart" :aria-busy="runtimeAction==='restart'" @click="operateRuntime('restart')">
-          <RotateCw :size="16"/>
-          {{runtimeAction==='restart'?'重启并验证中…':'重启'}}
-        </button>
-        <button v-if="canStop || runtimeAction==='stop'" class="button" :disabled="!canStop" :aria-busy="runtimeAction==='stop'" @click="operateRuntime('stop')">
-          <Square :size="16"/>
-          {{runtimeAction==='stop'?'停止中…':'停止'}}
-        </button>
-        <button class="button primary" :disabled="!canStart" :aria-busy="runtimeAction==='start'" @click="operateRuntime('start')">
-          <Play :size="16"/>
-          {{runtimeAction==='start' ? '启动并验证中…' : '启动专服'}}
-        </button>
+        <NButton size="small" :disabled="loading || !!runtimeAction" @click="openUpdateDialog"><template #icon><ArrowUpCircle :size="16"/></template>切换 DST 版本</NButton>
+        <NButton size="small" :disabled="loading || !!runtimeAction" @click="refresh"><template #icon><RotateCw :size="16"/></template>刷新</NButton>
+        <NButton v-if="runtimeStatus==='running'" size="small" :disabled="!canRestart" :loading="runtimeAction==='restart'" @click="operateRuntime('restart')">
+          <template #icon><RotateCw :size="16"/></template>{{runtimeAction==='restart'?'重启并验证中…':'重启'}}
+        </NButton>
+        <NButton v-if="canStop || runtimeAction==='stop'" size="small" :disabled="!canStop" :loading="runtimeAction==='stop'" @click="operateRuntime('stop')">
+          <template #icon><Square :size="16"/></template>{{runtimeAction==='stop'?'停止中…':'停止'}}
+        </NButton>
+        <NButton size="small" type="primary" :disabled="!canStart" :loading="runtimeAction==='start'" @click="operateRuntime('start')">
+          <template #icon><Play :size="16"/></template>{{runtimeAction==='start' ? '启动并验证中…' : '启动专服'}}
+        </NButton>
       </template>
     </PageHeader>
     <PreviewNotice/>
@@ -272,11 +269,7 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
       <ul v-if="startError.recoverySteps.length"><li v-for="step in startError.recoverySteps" :key="step">{{step}}</li></ul>
     </div>
 
-    <div v-if="loading && !data" class="empty-state" aria-live="polite">
-      <p>
-        读取当前专服…
-      </p>
-    </div>
+    <LoadingState v-if="loading && !data" description="读取当前专服…"/>
     <div v-else-if="error && !data" class="error-strip" role="alert">
       {{error}}
     </div>
@@ -284,7 +277,6 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
       <div v-if="error && stale" class="error-strip" role="status">
         运行状态刷新失败，当前显示上次采集结果：{{error}}
       </div>
-      <SummaryBar :items="summaryItems" label="运行摘要"/>
       <section class="section-block shard-section">
         <div class="section-heading">
           <div><h2>分片状态</h2><p class="muted-text">容器、进程与 UDP 端口就绪情况</p></div>
@@ -312,18 +304,7 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
           <div><h2>UDP 端口</h2></div>
         </div>
         <div v-if="ports.length" class="table-wrap">
-          <table>
-            <thead><tr><th>分片</th><th>用途</th><th>宿主机端口</th><th>容器监听</th><th>Docker 发布</th></tr></thead>
-            <tbody>
-              <tr v-for="port in ports" :key="`${port.shard}:${port.purpose}`">
-                <td>{{shardName(port.shard)}}</td>
-                <td>{{purposeName(port.purpose)}}</td>
-                <td class="mono">UDP {{port.hostPort}}</td>
-                <td>{{port.listening===true?'已监听':port.listening===false?'未监听':'未知'}}</td>
-                <td>{{port.published===true?'已发布':port.published===false?'未发布':'未知'}}</td>
-              </tr>
-            </tbody>
-          </table>
+          <NDataTable :columns="portColumns" :data="ports" :bordered="false" :single-line="true" size="medium" :row-key="portRowKey"/>
         </div>
         <p v-else class="muted-text">端口信息尚未采集</p>
       </section>
@@ -331,18 +312,14 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
     <TaskPanel v-if="visibleTask" :title="taskOperationLabel(visibleTask.operation)" :status-label="taskStatusText"
       :stage-label="stageLabel(visibleTask.stage)" :tone="taskTone" :queue-position="visibleTask.queuePosition"
       :error="visibleTask.error">
-      <template #actions><button class="text-button" type="button" @click="openTaskDrawer">任务记录</button></template>
+      <template #actions><NButton text size="small" @click="openTaskDrawer">任务记录</NButton></template>
     </TaskPanel>
 </FloatingTask>
 <AppDialog :open="updateOpen" title="切换 DST 版本" @update:open="value => { if (!value && !updateBusy) { updateOpen = false; updatePreview = null; updateError = ''; } }">
   <div class="update-dialog">
     <p v-if="!updateCandidates.length" class="muted-text">没有更高 build 的已验证 Release。请先在 Release 管理页检查并构建。</p>
     <label v-else>目标版本
-      <select v-model="updateSelected" :disabled="updateBusy" @change="updatePreview = null">
-        <option v-for="release in updateCandidates" :key="release.releaseId" :value="release.releaseId">
-          build {{ release.dstBuild }} · {{ release.releaseId.slice(0, 8) }}
-        </option>
-      </select>
+      <NSelect v-model:value="updateSelected" :options="updateOptions" :disabled="updateBusy" @update:value="updatePreview = null"/>
     </label>
     <div v-if="updateError" class="environment-error" role="alert">{{ updateError }}</div>
     <div v-if="updatePreview" class="update-preview">
@@ -353,13 +330,13 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
     </div>
   </div>
   <template #footer>
-    <button class="button" :disabled="updateBusy" @click="updateOpen = false">取消</button>
-    <button v-if="!updatePreview" class="button primary" :disabled="updateBusy || !updateSelected || !updateCandidates.length || revision === null" @click="previewUpdate">
+    <NButton :disabled="updateBusy" @click="updateOpen = false">取消</NButton>
+    <NButton v-if="!updatePreview" type="primary" :disabled="updateBusy || !updateSelected || !updateCandidates.length || revision === null" @click="previewUpdate">
       {{ updateBusy ? "检测中…" : "预览切换" }}
-    </button>
-    <button v-else class="button primary" :disabled="updateBusy || revision === null" @click="confirmUpdate">
+    </NButton>
+    <NButton v-else type="primary" :disabled="updateBusy || revision === null" @click="confirmUpdate">
       {{ updateBusy ? "创建备份…" : "创建备份并切换" }}
-    </button>
+    </NButton>
   </template>
 </AppDialog>
     </template>

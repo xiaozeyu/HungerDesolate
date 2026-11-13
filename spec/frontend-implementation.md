@@ -2,7 +2,7 @@
 
 - 日期：2026-10-14
 - 状态：实施设计；UI 风格沿用旧产品，导航与数据所有权重建
-- 技术：Vue 3 / TypeScript / Vite / Vue Router / Tauri 2、自有组件与 CSS Token、Reka UI、`@lucide/vue`
+- 技术：Vue 3 / TypeScript / Vite / Vue Router / Tauri 2、Naive UI、自有 CSS Token、`@lucide/vue`
 - 契约：[共享接口契约](api-contract.md)
 
 ## 1. 交付目标与目录
@@ -100,7 +100,7 @@ selection grant 是产品导航约束，后端仍根据 target 做权限校验�
 
 主内容与 Dialog body 各自正确滚动，底部操作栏和 Dialog footer 不被长表单推走。长实例名/路径用受控截断与 Tooltip，不压缩操作列。表格文字左对齐、数字右对齐、操作右对齐，关键操作始终可见。
 
-Dialog/Select/Menu/Tooltip 使用自有封装 + Reka UI 行为；表单逐项可见 label，错误紧贴字段。图标统一 16/18px、Lucide 1.75px 描边；图标按钮有 aria-label 和 Tooltip。状态同时使用文字/图标，不单靠红绿颜色。
+Dialog/Select/Menu/Tooltip/Table 使用 Naive UI；主题映射在 `src/naive/theme.ts`，结构覆盖在 `src/naive/overrides.css`。表单逐项可见 label，错误紧贴字段。图标统一 16/18px、Lucide 1.75px 描边；图标按钮有 aria-label 和 Tooltip。状态同时使用文字/图标，不单靠红绿颜色。
 
 危险确认显示真实主机/专服名、影响、保护备份与恢复限制；简单确认不堆大卡片。键盘支持 Tab/方向键/Escape、弹层外部关闭、焦点锁定与关闭后回触发器。失效任务错误/现场保留时关闭 Dialog 只关闭观察，不取消业务任务。
 

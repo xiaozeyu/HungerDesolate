@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, h, onUnmounted, ref, watch } from "vue";
 import { AlertCircle, CheckCircle, Hammer, Package, RefreshCw, Trash2 } from "@lucide/vue";
 import { useRoute } from "vue-router";
+import { NAlert, NButton, NDataTable, NInput, NLog, NProgress, NSpin, type DataTableColumns } from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import IconButton from "../components/IconButton.vue";
 import AppDialog from "../components/AppDialog.vue";
 import FingerprintTrustDialog from "../components/FingerprintTrustDialog.vue";
+import { notification, notifySuccess } from "../naive/notify";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useReleaseList } from "../composables/useReleaseList";
 import { useBuildTasks } from "../composables/useBuildTasks";
@@ -62,7 +65,6 @@ const dockerNotice = computed(() => {
 const pendingReleaseId = ref("");
 const pendingStage = ref<"base" | "delete" | "" >("");
 const actionError = ref<{ releaseId: string; message: string } | null>(null);
-const actionMessage = ref<{ releaseId: string; message: string } | null>(null);
 const deletePreview = ref<InstanceReleaseDeletePreview|null>(null);
 const deleteTypedName = ref("");
 const deleteBusy = ref(false);
@@ -78,7 +80,6 @@ const reclaimableReleases = computed(() => releases.value.filter(release => rele
 const cleanupOpen = ref(false);
 const cleanupBusy = ref(false);
 const cleanupError = ref("");
-const cleanupResult = ref("");
 let actionSequence = 0;
 
 function targetSnapshot() {
@@ -93,12 +94,52 @@ function isCurrent(target: { serverId: string; hostId: string; recordVersion: nu
     && value.recordVersion === target.recordVersion && (sequence === undefined || actionSequence === sequence);
 }
 
-const updateStageLabel = computed(() => {
-  const stage = updateStatus.value?.stage;
-  if (stage === "image") return "正在准备检查镜像…";
-  if (stage === "steamcmd") return "正在通过 SteamCMD 查询最新 build…";
-  if (stage === "finalize") return "正在整理检查结果…";
-  return "正在检查最新 DST build…";
+const updateNotifyPending = ref(false);
+
+function notifyUpdateResult(status: HostDstUpdateStatus | null) {
+  if (!updateNotifyPending.value) return;
+  updateNotifyPending.value = false;
+  if (!status) {
+    notification.error({ title: "DST 更新检查失败", content: "未能读取检查结果", duration: 0, closable: true });
+    return;
+  }
+  if (status.lastCheckError) {
+    notification.error({ title: "DST 更新检查失败", content: status.lastCheckError.message, duration: 0, closable: true });
+    return;
+  }
+  if (status.latest) {
+    notification.success({
+      title: "DST 更新检查完成",
+      content: `最新 build ${status.latest.build} · 检查于 ${formatReleaseDate(status.latest.checkedAt)}${status.candidateReleases.length ? ` · 可用 Release ${status.candidateReleases.length} 个` : ""}`,
+      duration: 5000,
+      closable: true,
+    });
+    return;
+  }
+  notification.info({ title: "DST 更新检查完成", content: "未发现可用 Release", duration: 5000, closable: true });
+}
+
+function notifyUpdateError(message: string) {
+  if (!updateNotifyPending.value) return;
+  updateNotifyPending.value = false;
+  notification.error({ title: "DST 更新检查失败", content: message, duration: 0, closable: true });
+}
+
+const buildAlert = computed(() => {
+  if (building.value) {
+    return {
+      type: "info" as const,
+      title: buildStatus.value?.progress?.currentStep || "正在构建 DST 镜像…",
+      content: buildObservationError.value || "",
+    };
+  }
+  if (buildError.value) {
+    return { type: "error" as const, title: "构建失败", content: buildError.value };
+  }
+  if (buildMessage.value) {
+    return { type: "success" as const, title: buildMessage.value, content: "" };
+  }
+  return { type: "default" as const, title: "镜像构建", content: "" };
 });
 
 function stopUpdatePoll() {
@@ -117,6 +158,7 @@ function scheduleUpdatePoll() {
   if (Date.now() - updatePollStartedAt > 13 * 60 * 1000) {
     if (updateStatus.value) updateStatus.value = { ...updateStatus.value, checking: false, stage: null };
     updateCheckError.value = "检查超时，请稍后刷新或重试";
+    notifyUpdateError(updateCheckError.value);
     stopUpdatePoll();
     return;
   }
@@ -147,10 +189,14 @@ async function loadUpdateStatus() {
     updateStatus.value = status;
     updateCheckError.value = "";
     if (status.checking || updateCheckBusy.value) scheduleUpdatePoll();
-    else stopUpdatePoll();
+    else {
+      stopUpdatePoll();
+      notifyUpdateResult(status);
+    }
   } catch (cause) {
     if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
       updateCheckError.value = describeError(cause).message;
+      notifyUpdateError(updateCheckError.value);
       if (updateStatus.value?.checking || updateCheckBusy.value) scheduleUpdatePoll();
       else {
         updateStatus.value = null;
@@ -164,10 +210,12 @@ async function checkUpdates() {
   const value = server.value;
   if (!value?.hostId || updateCheckBusy.value) return;
   if (updateStatus.value?.checking) {
+    updateNotifyPending.value = true;
     scheduleUpdatePoll();
     return;
   }
   updateCheckBusy.value = true;
+  updateNotifyPending.value = true;
   updateCheckError.value = "";
   scheduleUpdatePoll();
   const expectedRecordVersion = value.recordVersion;
@@ -180,10 +228,14 @@ async function checkUpdates() {
       || status.target.serverId !== value.serverId || status.target.hostId !== value.hostId) return;
     updateStatus.value = status;
     if (status.checking) scheduleUpdatePoll();
-    else stopUpdatePoll();
+    else {
+      stopUpdatePoll();
+      notifyUpdateResult(status);
+    }
   } catch (cause) {
     if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
       updateCheckError.value = describeError(cause).message;
+      notifyUpdateError(updateCheckError.value);
       await loadUpdateStatus();
     }
   } finally {
@@ -196,7 +248,6 @@ async function openDiskCleanup() {
   if (!target || cleanupBusy.value) return;
   cleanupOpen.value = true;
   cleanupError.value = "";
-  cleanupResult.value = "";
   cachePreview.value = null;
   cleanupBusy.value = true;
   const sequence = ++actionSequence;
@@ -218,7 +269,6 @@ async function confirmDiskCleanup() {
   if (!target || cleanupBusy.value) return;
   cleanupBusy.value = true;
   cleanupError.value = "";
-  cleanupResult.value = "";
   let deleted = 0;
   let skipped = 0;
   let cacheCleaned = false;
@@ -266,7 +316,7 @@ async function confirmDiskCleanup() {
       else cacheCleaned = true;
     }
     if (!cleanupError.value) {
-      cleanupResult.value = `已清理 ${deleted} 个 Release${skipped ? `，跳过 ${skipped} 个` : ""}${cacheCleaned ? "，构建缓存已清理" : ""}`;
+      notifySuccess("磁盘清理完成", `已清理 ${deleted} 个 Release${skipped ? `，跳过 ${skipped} 个` : ""}${cacheCleaned ? "，构建缓存已清理" : ""}`);
       cleanupOpen.value = false;
     }
     await refresh();
@@ -349,10 +399,9 @@ async function confirmDeleteRelease() {
     if (!isCurrent(target, sequence)) return;
     deletePreview.value = null;
     deleteTypedName.value = "";
-    actionMessage.value = { releaseId: result.releaseId,
-      message: !result.stagingRemoved || !result.dstRemoved ? "Release 已删除，但文件清理未完成"
-        : result.imageShared ? "Release 已删除，共用镜像仍被其他 Release 使用"
-          : result.imageRemoved ? "Release 与镜像已删除" : "Release 已删除，镜像本已不存在" };
+    notifySuccess("Release 已删除", !result.stagingRemoved || !result.dstRemoved ? "文件清理未完成"
+      : result.imageShared ? "共用镜像仍被其他 Release 使用"
+        : result.imageRemoved ? "Release 与镜像已删除" : "镜像本已不存在");
     await refresh();
   } catch (cause) {
     if (isCurrent(target, sequence)) {
@@ -375,7 +424,6 @@ async function verifyBase(release: InstanceReleaseSummary) {
   pendingReleaseId.value = release.releaseId;
   pendingStage.value = "base";
   actionError.value = null;
-  actionMessage.value = null;
   try {
     await verifyInstanceReleaseBase({
       schemaVersion: 1,
@@ -385,7 +433,7 @@ async function verifyBase(release: InstanceReleaseSummary) {
       releaseId: release.releaseId,
     });
     if (!isCurrent(target, sequence)) return;
-    actionMessage.value = { releaseId: release.releaseId, message: "镜像验证通过" };
+    notifySuccess("镜像验证通过", release.dstBuild);
     await refresh();
   } catch (cause) {
     if (isCurrent(target, sequence)) actionError.value = { releaseId: release.releaseId, message: describeError(cause).message };
@@ -446,7 +494,6 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   pendingReleaseId.value = "";
   pendingStage.value = "";
   actionError.value = null;
-  actionMessage.value = null;
   deletePreview.value = null;
   deleteTypedName.value = "";
   deleteBusy.value = false;
@@ -455,7 +502,6 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   cleanupOpen.value = false;
   cleanupBusy.value = false;
   cleanupError.value = "";
-  cleanupResult.value = "";
   updateStatus.value = null;
   updateCheckBusy.value = false;
   updateCheckError.value = "";
@@ -468,37 +514,93 @@ onUnmounted(() => {
   updateDisposed = true;
   stopUpdatePoll();
   actionSequence++;
-});</script>
+});
+
+const releaseColumns = computed<DataTableColumns<InstanceReleaseSummary>>(() => {
+  void pendingReleaseId.value;
+  void pendingStage.value;
+  void actionError.value;
+  void building.value;
+  void stale.value;
+  return [
+  {
+    title: "版本",
+    key: "dstBuild",
+    render: release => h("div", { class: "release-version-cell" }, [
+      h("strong", release.dstBuild),
+      h("span", { class: "release-id", title: release.releaseId }, `Release ${release.releaseId.slice(0, 8)}`),
+    ]),
+  },
+  {
+    title: "状态",
+    key: "status",
+    render: release => h("div", { class: "release-status-cell" }, [
+      h(StatusLabel, { tone: statusTone(release), label: statusLabel(release) }),
+      release.inUse ? h("span", { class: "release-retention" }, "使用中")
+        : release.reclaimable ? h("span", { class: "release-retention" }, "可回收") : null,
+    ]),
+  },
+  {
+    title: "镜像",
+    key: "image",
+    render: release => h("div", { class: "release-digest-cell" }, [
+      h("span", { class: "mono", title: release.image }, release.image),
+      h("span", null, release.imageSize != null ? formatBytes(release.imageSize) : "镜像大小未知"),
+    ]),
+  },
+  { title: "创建时间", key: "createdAt", render: release => formatReleaseDate(release.createdAt) },
+  {
+    title: "",
+    key: "actions",
+    align: "center",
+    render: release => {
+      const pending = pendingReleaseId.value === release.releaseId;
+      const actions = [];
+      if (pending) {
+        actions.push(h("span", { class: "release-action-progress", role: "status" }, [
+          h("span", { class: "state-indicator busy", "aria-hidden": "true" }),
+          pendingStage.value === "base" ? "检查镜像…" : "核对/删除 Release…",
+        ]));
+      } else if (!release.verified) {
+        actions.push(h(IconButton, {
+          label: "验证镜像",
+          disabled: !!pendingReleaseId.value || building.value,
+          onClick: () => void verifyBase(release),
+        }, () => h(CheckCircle, { size: 15 })));
+      }
+      if (actionError.value?.releaseId === release.releaseId) {
+        actions.push(h("small", { class: "release-action-error", role: "alert" }, actionError.value.message));
+      }
+      actions.push(h(IconButton, {
+        label: "删除 DST Release",
+        disabled: !!pendingReleaseId.value || building.value || stale.value,
+        tone: "danger",
+        onClick: () => void previewDeleteRelease(release),
+      }, () => h(Trash2, { size: 15 })));
+      return h("div", { class: "row-actions" }, actions);
+    },
+  },
+  ];
+});
+const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</script>
 
 <template>
   <div class="page release-page">
     <PageHeader :eyebrow="server?.displayName" title="DST Release 管理">
       <template #actions>
-        <button class="button" :disabled="loading || !server || updateCheckBusy || updateStatus?.checking || building" @click="checkUpdates">
-          <RefreshCw :size="16" />{{ updateCheckBusy || updateStatus?.checking ? "检查中…" : "检查 DST 更新" }}
-        </button>
-        <button class="button" :disabled="loading || !server || cleanupBusy || building" @click="openDiskCleanup">
-          <Trash2 :size="16" />{{ cleanupBusy ? "清理中…" : "清理磁盘" }}
-        </button>
-        <button class="button" :disabled="building || !server || !!dockerNotice || hostConnection.busyServerId.value === server?.serverId" @click="startBuild">
-          <Hammer :size="16" />{{ hostConnection.busyServerId.value === server?.serverId ? "连接中…" : building ? "构建中…" : "构建镜像" }}
-        </button>
-        <button class="icon-button" type="button" aria-label="刷新 Release" title="刷新 Release" :disabled="loading || !server" @click="refresh">
-          <RefreshCw :size="16" />
-        </button>
+        <NButton :disabled="loading || !server || updateCheckBusy || updateStatus?.checking || building" @click="checkUpdates">
+          <template #icon><RefreshCw :size="16"/></template>{{ updateCheckBusy || updateStatus?.checking ? "检查中…" : "检查 DST 更新" }}
+        </NButton>
+        <NButton :disabled="loading || !server || cleanupBusy || building" @click="openDiskCleanup">
+          <template #icon><Trash2 :size="16"/></template>{{ cleanupBusy ? "清理中…" : "清理磁盘" }}
+        </NButton>
+        <NButton :disabled="building || !server || !!dockerNotice || hostConnection.busyServerId.value === server?.serverId" @click="startBuild">
+          <template #icon><Hammer :size="16"/></template>{{ hostConnection.busyServerId.value === server?.serverId ? "连接中…" : building ? "构建中…" : "构建镜像" }}
+        </NButton>
+        <IconButton label="刷新 Release" :disabled="loading || !server" @click="refresh"><RefreshCw :size="16"/></IconButton>
       </template>
     </PageHeader>
 
-    <div class="release-update-status" role="status">
-      <span v-if="updateCheckBusy || updateStatus?.checking">{{ updateStatus?.checking ? updateStageLabel : "正在启动检查…" }}</span>
-      <span v-else-if="updateStatus?.latest">最新 DST build {{ updateStatus.latest.build }} · 检查于 {{ formatReleaseDate(updateStatus.latest.checkedAt) }}</span>
-      <span v-else-if="updateStatus?.lastCheckError">尚未成功检查 DST 更新</span>
-      <span v-else>尚未检查 DST 更新</span>
-      <span v-if="updateStatus?.candidateReleases.length">可用 Release {{ updateStatus.candidateReleases.length }} 个</span>
-      <span v-if="updateStatus?.lastCheckError">{{ updateStatus.lastCheckError.message }}</span>
-      <span v-if="updateCheckError">{{ updateCheckError }}</span>
-      <span v-if="cleanupResult">{{ cleanupResult }}</span>
-    </div>
 
     <div v-if="error" class="environment-error release-feedback" role="alert">
       <strong>{{ error.message }}</strong>
@@ -513,78 +615,37 @@ onUnmounted(() => {
       <ul><li v-for="step in dockerNotice.steps" :key="step">{{ step }}</li></ul>
     </div>
 
-    <div v-if="loading && !data" class="empty-state" role="status">读取 Release…</div>
-    <template v-else-if="data">
+    <template v-if="loading || data">
       <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
 
-      <div v-if="!releases.length" class="release-empty">
+      <div v-if="data && !releases.length" class="release-empty">
         <Package :size="20" />
         <div><strong>暂无 DST Release</strong></div>
       </div>
 
-      <div v-else class="release-table-wrap">
-        <div class="release-table release-table-head" aria-hidden="true">
-          <span>版本</span><span>状态</span><span>镜像</span><span>创建时间</span><span>操作</span>
-        </div>
-        <article v-for="release in releases" :key="release.releaseId" class="release-table release-row">
-          <div class="release-version-cell">
-            <strong>{{ release.dstBuild }}</strong>
-            <span class="release-id" :title="release.releaseId">Release {{ release.releaseId.slice(0, 8) }}</span>
-          </div>
-          <div class="release-status-cell">
-            <StatusLabel :tone="statusTone(release)" :label="statusLabel(release)" />
-            <span v-if="release.inUse" class="release-retention">使用中</span>
-            <span v-else-if="release.reclaimable" class="release-retention">可回收</span>
-          </div>
-          <div class="release-digest-cell">
-            <span class="mono" :title="release.image">{{ release.image }}</span>
-            <span>{{ release.imageSize != null ? formatBytes(release.imageSize) : "镜像大小未知" }}</span>
-          </div>
-          <div class="release-created-cell">{{ formatReleaseDate(release.createdAt) }}</div>
-          <div class="release-actions">
-            <div class="release-actions-main">
-            <template v-if="pendingReleaseId === release.releaseId">
-              <span class="release-action-progress" role="status"><span class="state-indicator busy" aria-hidden="true" />{{ pendingStage === "base" ? "检查镜像…" : "核对/删除 Release…" }}</span>
-            </template>
-            <template v-else-if="!release.verified">
-              <button class="button button-compact" :disabled="!!pendingReleaseId || building" @click="verifyBase(release)"><CheckCircle :size="15" />验证镜像</button>
-            </template>
-            <small v-if="actionError?.releaseId === release.releaseId" class="release-action-error" role="alert">{{ actionError.message }}</small>
-            <small v-if="actionMessage?.releaseId === release.releaseId" class="release-action-success" role="status">{{ actionMessage.message }}</small>
-            </div>
-            <button class="icon-button release-delete" type="button" aria-label="删除 DST Release" title="删除 DST Release" :disabled="!!pendingReleaseId || building || stale" @click="previewDeleteRelease(release)"><Trash2 :size="15"/></button>
-          </div>
-        </article>
+      <div v-else class="table-wrap">
+        <NDataTable :columns="releaseColumns" :data="releases" :bordered="false" :single-line="true" size="medium" :row-key="releaseRowKey" :loading="loading"/>
       </div>
     </template>
     <div v-else-if="!error" class="empty-state">尚未读取 Release</div>
 <FloatingTask v-if="building || buildStatus?.status === 'failed' || buildMessage || buildError" label="镜像构建">
-    <div v-if="building || buildStatus?.status === 'failed' || buildMessage || buildError" class="build-state" role="status">
-      <div class="build-state-main">
-        <span v-if="building" class="state-indicator busy" aria-hidden="true" />
-        <CheckCircle v-else-if="buildMessage && !buildError" :size="16" class="state-success-icon" />
-        <AlertCircle v-else :size="16" class="state-error-icon" />
-        <div class="build-state-copy">
-          <strong v-if="building">{{ buildStatus?.progress?.currentStep || "正在构建 DST 镜像…" }}</strong>
-          <strong v-else-if="buildMessage && !buildError">{{ buildMessage }}</strong>
-          <strong v-else>构建失败</strong>
-          <span v-if="building && buildObservationError">{{ buildObservationError }}</span>
-          <span v-else-if="buildError">{{ buildError }}</span>
-        </div>
+    <NAlert :type="buildAlert.type" :title="buildAlert.title" :bordered="false" :show-icon="true" class="build-alert">
+      <template #icon>
+        <NSpin v-if="building" size="small"/>
+        <CheckCircle v-else-if="buildMessage && !buildError" :size="16" class="state-success-icon"/>
+        <AlertCircle v-else :size="16" class="state-error-icon"/>
+      </template>
+      <span v-if="buildAlert.content">{{ buildAlert.content }}</span>
+    </NAlert>
+    <div v-if="building && buildPercent != null" class="build-progress">
+      <div class="build-progress-head"><span>构建阶段</span><span>{{ buildPercent }}%</span></div>
+      <NProgress type="line" :percentage="buildPercent" :show-indicator="false" :height="6" status="success"/>
+      <div v-if="buildStepPercent != null" class="build-progress-detail">
+        <div class="build-progress-head"><span>当前步骤下载</span><span>{{ buildStepPercent }}%</span></div>
+        <NProgress type="line" :percentage="buildStepPercent" :show-indicator="false" :height="4" status="info"/>
       </div>
-      <div v-if="building && buildPercent != null" class="build-progress">
-        <div class="build-progress-head"><span>构建阶段</span><span>{{ buildPercent }}%</span></div>
-        <div class="build-progress-track" role="progressbar" aria-label="构建阶段" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="buildPercent"><div class="build-progress-fill stage" :style="{ width: `${buildPercent}%` }"></div></div>
-        <div v-if="buildStepPercent != null" class="build-progress-detail">
-          <div class="build-progress-head"><span>当前步骤下载</span><span>{{ buildStepPercent }}%</span></div>
-          <div class="build-progress-track thin" role="progressbar" aria-label="当前步骤下载" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="buildStepPercent"><div class="build-progress-fill download" :style="{ width: `${buildStepPercent}%` }"></div></div>
-        </div>
-      </div>
-      <details v-if="buildStatus?.logTail.length" class="build-log">
-        <summary>构建日志</summary>
-        <pre>{{ buildStatus.logTail.join("\n") }}</pre>
-      </details>
     </div>
+    <NLog v-if="buildStatus?.logTail.length" :log="buildStatus.logTail.join('\n')" :rows="8" class="build-log"/>
 </FloatingTask>
 
     <AppDialog :open="cleanupOpen" title="清理磁盘" description="清理构建临时文件、未被引用的 Docker 镜像和可回收 Release；使用中的 Release 会跳过。" @update:open="value => { if (!value && !cleanupBusy) cleanupOpen = false; }">
@@ -613,8 +674,8 @@ onUnmounted(() => {
         </section>
       </div>
       <template #footer>
-        <button class="button" :disabled="cleanupBusy" @click="cleanupOpen = false">取消</button>
-        <button class="button danger" :disabled="cleanupBusy || (!reclaimableReleases.length && !cachePreview?.allowed)" @click="confirmDiskCleanup">{{ cleanupBusy ? "清理中…" : "清理" }}</button>
+        <NButton :disabled="cleanupBusy" @click="cleanupOpen = false">取消</NButton>
+        <NButton type="error" ghost :disabled="cleanupBusy || (!reclaimableReleases.length && !cachePreview?.allowed)" @click="confirmDiskCleanup">{{ cleanupBusy ? "清理中…" : "清理" }}</NButton>
       </template>
     </AppDialog>
     <AppDialog :open="!!deletePreview" title="删除 DST Release" description="删除 Release 登记及独占镜像；共用镜像保留。已归档专服的数据保留，但恢复时可能需要重新导入原镜像。" @update:open="closeDeleteDialog">
@@ -638,12 +699,12 @@ onUnmounted(() => {
             </template>
           </ul>
         </div>
-        <label v-else>输入 DST 版本确认<input v-model="deleteTypedName" autocomplete="off" :disabled="deleteBusy"/></label>
+        <label v-else>输入 DST 版本确认<NInput v-model:value="deleteTypedName" placeholder="" :input-props="{ autocomplete: 'off' }" :disabled="deleteBusy"/></label>
         <div v-if="deleteError" class="environment-error" role="alert">{{ deleteError }}</div>
       </div>
       <template #footer>
-        <button class="button" :disabled="deleteBusy" @click="closeDeleteDialog(false)">取消</button>
-        <button class="button danger" :disabled="deleteBusy || !deletePreview?.allowed || deleteTypedName!==deletePreview?.dstBuild" @click="confirmDeleteRelease">{{ deleteBusy ? "正在删除…" : "删除 Release" }}</button>
+        <NButton :disabled="deleteBusy" @click="closeDeleteDialog(false)">取消</NButton>
+        <NButton type="error" ghost :disabled="deleteBusy || !deletePreview?.allowed || deleteTypedName!==deletePreview?.dstBuild" @click="confirmDeleteRelease">{{ deleteBusy ? "正在删除…" : "删除 Release" }}</NButton>
       </template>
     </AppDialog>
     <FingerprintTrustDialog :open="hostConnection.trustOpen.value" :display-name="hostConnection.challengeServer.value?.displayName ?? ''" :host="hostConnection.challengeServer.value?.host ?? ''" :ssh-port="hostConnection.challengeServer.value?.sshPort ?? 22" :challenge="hostConnection.challenge.value" :busy="hostConnection.busyServerId.value === hostConnection.challengeServer.value?.serverId" :error="hostConnection.trustError.value" @update:open="value => { if (!value) hostConnection.closeTrust() }" @confirm="hostConnection.confirmTrust"/>
@@ -652,28 +713,16 @@ onUnmounted(() => {
 
 <style scoped>
 .release-page { min-width: 0; }
-.build-state { margin-bottom: var(--space-4); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
-.build-state-main { display: flex; align-items: center; gap: var(--space-3); min-height: 32px; }
-.build-state-copy { display: flex; flex: 1; min-width: 0; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; }
-.build-state-copy strong { font-size: 13px; font-weight: 600; }
-.build-state-copy span { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
-.build-progress { display: grid; gap: 8px; margin: 8px 0 0 24px; }
+.build-alert { margin-bottom: 8px; }
+.build-progress { display: grid; gap: 8px; margin: 8px 0 0; }
 .build-progress-detail { display: grid; gap: 6px; margin-top: 2px; }
 .build-progress-head { display: flex; justify-content: space-between; gap: 12px; color: var(--text-secondary); font-size: 11px; }
-.build-progress-track { height: 8px; overflow: hidden; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-muted); }
-.build-progress-track.thin { height: 5px; }
-.build-progress-fill { height: 100%; border-radius: inherit; background-color: var(--success); background-image: linear-gradient(45deg, rgba(255, 255, 255, .22) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, .22) 50%, rgba(255, 255, 255, .22) 75%, transparent 75%, transparent); background-size: 12px 12px; animation: build-stripes 1s linear infinite; transition: width 240ms ease; }
-.build-progress-fill.download { background-color: var(--accent); }
-@keyframes build-stripes { from { background-position: 0 0; } to { background-position: 12px 0; } }
 .state-success-icon { color: var(--success); }
 .state-error-icon { color: var(--danger); }
 .state-indicator { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
 .state-indicator.busy { background: var(--warning); animation: release-pulse 1.2s ease-in-out infinite; }
-.build-log { margin: var(--space-2) 0 0 24px; color: var(--text-secondary); font-size: 12px; }
-.build-log summary { width: fit-content; cursor: pointer; }
-.build-log pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: var(--space-3); border: 1px solid var(--border); background: var(--surface-muted); }
+.build-log { margin-top: 8px; }
 .release-feedback { margin-bottom: var(--space-3); }
-.release-update-status { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); color: var(--text-secondary); font-size: 12px; }
 .release-retention { color: var(--text-secondary); font-size: 11px; }
 .disk-cleanup-section { display: grid; gap: var(--space-2); }
 .disk-cleanup-section > strong { font-size: 12px; font-weight: 600; }

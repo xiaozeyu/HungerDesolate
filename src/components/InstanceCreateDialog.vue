@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, toRef } from "vue";
 import { useRouter } from "vue-router";
+import { NButton, NCheckbox, NInput } from "naive-ui";
 import AppDialog from "./AppDialog.vue";
 import AppSelect from "./AppSelect.vue";
 import StatusLabel from "./StatusLabel.vue";
@@ -27,7 +28,7 @@ function goRelease(){if(!props.server)return;emit("update:open",false);void rout
     <form v-if="!task" id="instance-create-form" class="creation-form" @submit.prevent="create">
       <div class="creation-form-heading"><span class="eyebrow">专服设置</span><h3>配置基础运行方式</h3></div>
       <div class="creation-settings-grid">
-        <label class="creation-field creation-field-wide">专服名称<input v-model="fields.displayName" autocomplete="off" placeholder="生存一服" required maxlength="128" :disabled="loading"/></label>
+        <label class="creation-field creation-field-wide">专服名称<NInput v-model:value="fields.displayName" placeholder="生存一服" maxlength="128" :input-props="{ autocomplete: 'off' }" :disabled="loading"/></label>
         <div class="creation-field creation-field-wide">
           <div class="creation-release-heading"><span>DST Release</span><button class="text-button" type="button" :disabled="releaseLoading || loading" @click="refreshReleaseCatalog">{{releaseLoading?'读取中…':'刷新 Release'}}</button></div>
           <AppSelect v-model="selectedReleaseId" :options="availableReleases" label="DST Release" :placeholder="releaseLoading?'读取 Release…':'选择 Release'" :disabled="releaseLoading || loading || !availableReleases.length"/>
@@ -35,8 +36,8 @@ function goRelease(){if(!props.server)return;emit("update:open",false);void rout
           <p v-if="releaseError" class="creation-release-error" role="alert">{{releaseError.message}}</p>
           <p v-else-if="!releaseLoading && !availableReleases.length" class="muted-text" role="status">暂无通过基础验证的 Release。<button class="text-button" type="button" @click="goRelease">前往 Release 管理构建</button></p>
         </div>
-        <fieldset class="creation-option-group"><legend>启动策略</legend><label class="creation-switch"><input v-model="fields.autostart" type="checkbox" :disabled="loading"/>主机启动时自动拉起容器</label></fieldset>
-        <fieldset class="creation-option-group"><legend>是否启用洞穴</legend><label class="creation-switch"><input v-model="fields.cavesEnabled" type="checkbox" :disabled="loading"/>启用 Caves 分片</label></fieldset>
+        <fieldset class="creation-option-group"><legend>启动策略</legend><NCheckbox v-model:checked="fields.autostart" :disabled="loading" class="creation-switch">主机启动时自动拉起容器</NCheckbox></fieldset>
+        <fieldset class="creation-option-group"><legend>是否启用洞穴</legend><NCheckbox v-model:checked="fields.cavesEnabled" :disabled="loading" class="creation-switch">启用 Caves 分片</NCheckbox></fieldset>
       </div>
     </form>
     <template v-else>
@@ -64,8 +65,8 @@ function goRelease(){if(!props.server)return;emit("update:open",false);void rout
       <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul>
     </div>
     <template #footer>
-      <button class="button" @click="emit('update:open',false)">关闭</button>
-      <button v-if="!task" class="button primary" type="submit" form="instance-create-form" :disabled="loading || creating || !releaseReady()" :aria-busy="loading || creating">{{loading?'检查并创建中…':'创建专服'}}</button>
+      <NButton @click="emit('update:open',false)">关闭</NButton>
+      <NButton v-if="!task" attr-type="submit" form="instance-create-form" type="primary" :disabled="loading || creating || !releaseReady()" :loading="loading || creating">{{loading?'检查并创建中…':'创建专服'}}</NButton>
     </template>
   </AppDialog>
 </template>

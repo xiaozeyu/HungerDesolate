@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onBeforeUnmount } from "vue";
 import { FolderOpen } from "@lucide/vue";
+import { NButton, NInput } from "naive-ui";
 import AppSelect from "./AppSelect.vue";
 import { pickPrivateKeyFile } from "../api/ssh";
 import { describeError } from "../lib/commandError";
@@ -38,18 +39,18 @@ async function chooseFile() {
 <template>
   <fieldset class="server-form-fields credential-form" :disabled="disabled">
     <label v-if="authKind === 'password'" :for="`${idPrefix}-password`">SSH 密码
-      <input :id="`${idPrefix}-password`" :value="modelValue.password" @input="update('password',($event.target as HTMLInputElement).value)" type="password" autocomplete="off" maxlength="8192" :aria-invalid="!!error" :aria-describedby="error ? `${idPrefix}-error` : undefined"/>
+      <NInput :value="modelValue.password" type="password" placeholder="" maxlength="8192" :input-props="{ id: `${idPrefix}-password`, autocomplete: 'off', 'aria-invalid': !!error, 'aria-describedby': error ? `${idPrefix}-error` : undefined }" @update:value="value => update('password', value)"/>
     </label>
     <template v-else>
       <div v-if="allowPaste" class="form-field"><span>私钥来源</span><AppSelect :model-value="modelValue.keySource" :options="[{label:'本机私钥文件',value:'file'},{label:'粘贴私钥内容',value:'text'}]" label="私钥来源" :disabled="disabled" @update:model-value="changeSource"/></div>
       <div v-if="modelValue.keySource === 'file'" class="form-field">
         <label :for="`${idPrefix}-path`">SSH 私钥文件路径</label>
-        <div class="file-path-control"><input :id="`${idPrefix}-path`" :value="modelValue.privateKeyPath" @input="update('privateKeyPath',($event.target as HTMLInputElement).value)" class="mono" autocomplete="off" spellcheck="false" placeholder="~/.ssh/id_ed25519" :aria-invalid="!!error" :aria-describedby="error ? `${idPrefix}-error` : undefined"/><button class="button" type="button" :disabled="disabled || picking" @click="chooseFile"><FolderOpen :size="16"/>{{picking ? '选择中…' : '选择文件'}}</button></div>
+        <div class="file-path-control"><NInput :value="modelValue.privateKeyPath" placeholder="~/.ssh/id_ed25519" :input-props="{ id: `${idPrefix}-path`, autocomplete: 'off', spellcheck: 'false', class: 'mono', 'aria-invalid': !!error, 'aria-describedby': error ? `${idPrefix}-error` : undefined }" @update:value="value => update('privateKeyPath', value)"/><NButton size="small" :disabled="disabled || picking" @click="chooseFile"><template #icon><FolderOpen :size="16"/></template>{{picking ? '选择中…' : '选择文件'}}</NButton></div>
       </div>
       <label v-else :for="`${idPrefix}-key`">SSH 私钥
-        <textarea :id="`${idPrefix}-key`" :value="modelValue.privateKey" @input="update('privateKey',($event.target as HTMLTextAreaElement).value)" rows="6" autocomplete="off" spellcheck="false" maxlength="65536" placeholder="PEM / OpenSSH" :aria-invalid="!!error" :aria-describedby="error ? `${idPrefix}-error` : undefined"/>
+        <NInput :value="modelValue.privateKey" type="textarea" :autosize="{ minRows: 6 }" maxlength="65536" placeholder="PEM / OpenSSH" :input-props="{ id: `${idPrefix}-key`, autocomplete: 'off', spellcheck: 'false', 'aria-invalid': !!error, 'aria-describedby': error ? `${idPrefix}-error` : undefined }" @update:value="value => update('privateKey', value)"/>
       </label>
-      <label :for="`${idPrefix}-passphrase`">私钥口令（可选）<input :id="`${idPrefix}-passphrase`" :value="modelValue.passphrase" @input="update('passphrase',($event.target as HTMLInputElement).value)" type="password" autocomplete="off" maxlength="8192"/></label>
+      <label :for="`${idPrefix}-passphrase`">私钥口令（可选）<NInput :value="modelValue.passphrase" type="password" placeholder="" maxlength="8192" :input-props="{ id: `${idPrefix}-passphrase`, autocomplete: 'off' }" @update:value="value => update('passphrase', value)"/></label>
     </template>
     <p v-if="error" :id="`${idPrefix}-error`" class="field-error" role="alert">{{error}}</p>
     <p v-if="pickerError" class="field-error" role="alert">{{pickerError}}</p>

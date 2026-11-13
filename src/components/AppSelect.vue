@@ -1,47 +1,26 @@
 <script setup lang="ts">
-import { Check, ChevronDown } from "@lucide/vue";
-import { SelectRoot, SelectTrigger, SelectValue, SelectIcon, SelectPortal, SelectContent, SelectViewport, SelectItem, SelectItemText, SelectItemIndicator } from "reka-ui";
-defineProps<{
-    modelValue: string;
-    options: readonly {
-        label: string;
-        value: string;
-    }[];
+import { computed } from "vue";
+import { NSelect, type SelectOption } from "naive-ui";
+
+const props = defineProps<{
+  modelValue: string;
+  options: readonly {
     label: string;
-    placeholder?: string;
-    disabled?: boolean;
+    value: string;
+  }[];
+  label: string;
+  placeholder?: string;
+  disabled?: boolean;
 }>();
-const emit = defineEmits<{
-    "update:modelValue": [
-        value: string
-    ];
-}>();
-function update(value: unknown) { if (typeof value === 'string')
-    emit('update:modelValue', value); }
+const emit = defineEmits<{ "update:modelValue": [value: string] }>();
+
+const selectOptions = computed<SelectOption[]>(() => props.options.map(option => ({ label: option.label, value: option.value })));
+function update(value: string | number | null) {
+  emit("update:modelValue", value == null ? "" : String(value));
+}
 </script>
 
 <template>
-  <SelectRoot :model-value="modelValue || undefined" :disabled="disabled" @update:model-value="update">
-    <SelectTrigger class="app-select-trigger" :aria-label="label">
-      <slot name="icon"/>
-      <SelectValue :placeholder="placeholder ?? '请选择'"/>
-      <SelectIcon>
-        <ChevronDown :size="16"/>
-      </SelectIcon>
-    </SelectTrigger>
-    <SelectPortal>
-      <SelectContent class="app-select-content" position="popper" :side-offset="4">
-        <SelectViewport>
-          <SelectItem v-for="option in options" :key="option.value" :value="option.value" class="app-select-item">
-            <SelectItemText>
-              {{option.label}}
-            </SelectItemText>
-            <SelectItemIndicator>
-              <Check :size="15"/>
-            </SelectItemIndicator>
-          </SelectItem>
-        </SelectViewport>
-      </SelectContent>
-    </SelectPortal>
-  </SelectRoot>
+  <NSelect :value="modelValue || null" :options="selectOptions" :placeholder="placeholder ?? '请选择'" :disabled="disabled"
+    :input-props="{ 'aria-label': label }" @update:value="update"/>
 </template>

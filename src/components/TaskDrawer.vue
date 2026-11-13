@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RefreshCw, Trash2, X } from "@lucide/vue";
+import { NDrawer, NDrawerContent, NEmpty, NTabPane, NTabs } from "naive-ui";
 import TaskRow from "./TaskRow.vue";
+import IconButton from "./IconButton.vue";
 import { useOperations } from "../composables/useOperations";
 import { useTasks } from "../composables/useTasks";
 import { useBuildTasks } from "../composables/useBuildTasks";
@@ -20,6 +22,7 @@ const taskStore = useTasks();
 const buildTasks = useBuildTasks();
 const workspace = useWorkspace();
 const now = ref(Date.now());
+const activeTab = ref("active");
 const refreshing = ref(false);
 const cleaning = ref(false);
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -128,86 +131,75 @@ async function cleanupStaleTasks() {
     cleaning.value = false;
   }
 }
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape" && drawer.open.value) close();
-}
 watch(() => drawer.open.value, open => {
   if (open) { now.value = Date.now(); void refresh(); }
 });
 onMounted(() => {
   timer = setInterval(() => { now.value = Date.now(); }, 1000);
-  window.addEventListener("keydown", onKeydown);
 });
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer);
-  window.removeEventListener("keydown", onKeydown);
 });
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition name="drawer">
-      <div v-if="drawer.open.value" class="task-drawer-layer">
-        <button class="task-drawer-backdrop" type="button" aria-label="关闭任务记录" @click="close"/>
-        <aside class="task-drawer" role="dialog" aria-modal="true" aria-label="任务记录">
-          <header class="task-drawer-header">
-            <div><span class="eyebrow">本次会话</span><h2>任务记录</h2></div>
-            <div class="task-drawer-actions">
-              <button class="icon-button" type="button" title="刷新任务" :disabled="refreshing" @click="refresh"><RefreshCw :size="16" :class="{ spinning: refreshing }"/></button>
-              <button class="icon-button" type="button" title="清理失效的本地任务记录" :disabled="cleaning" @click="cleanupStaleTasks"><Trash2 :size="16"/></button>
-              <button class="icon-button" type="button" aria-label="关闭任务记录" @click="close"><X :size="18"/></button>
-            </div>
-          </header>
-          <div class="task-drawer-body">
-            <section class="task-drawer-section">
-              <div class="task-drawer-section-head"><h3>进行中</h3><span>{{ activeRows.length }}</span></div>
-              <div v-if="activeRows.length" class="task-list">
-                <TaskRow v-for="row in activeRows" :key="row.id" :title="row.title" :target="row.target" :stage="row.stage"
-                  :status-label="statusLabel(row.status)" :tone="statusTone(row.status) === 'danger' ? 'danger' : 'warning'"
-                  :elapsed="elapsed(row)" :error="row.error">
-                  <template #actions>
-                    <RouterLink v-if="row.route" class="text-button" :to="row.route" @click="close">查看</RouterLink>
-                    <button v-else-if="row.operation" class="icon-button" type="button" title="关闭记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
-                  </template>
-                </TaskRow>
-              </div>
-            </section>
-            <section class="task-drawer-section">
-              <div class="task-drawer-section-head"><h3>最近完成</h3><span>{{ finishedRows.length }}</span></div>
-              <div v-if="finishedRows.length" class="task-list">
-                <TaskRow v-for="row in finishedRows" :key="row.id" :title="row.title" :target="row.target" :stage="row.stage"
-                  :status-label="statusLabel(row.status)" :tone="statusTone(row.status)" :elapsed="elapsed(row)" :error="row.error">
-                  <template #actions>
-                    <RouterLink v-if="row.route" class="text-button" :to="row.route" @click="close">查看</RouterLink>
-                    <button v-if="row.operation" class="icon-button" type="button" title="移除记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
-                  </template>
-                </TaskRow>
-              </div>
-            </section>
+  <NDrawer :show="drawer.open.value" placement="right" :width="440" @update:show="value => { if (!value) close(); }">
+    <NDrawerContent :closable="false" title="任务记录">
+      <template #header>
+        <header class="task-drawer-header">
+          <div><span class="eyebrow">本次会话</span><h2>任务记录</h2></div>
+          <div class="task-drawer-actions">
+            <IconButton label="刷新任务" :disabled="refreshing" @click="refresh"><RefreshCw :size="16" :class="{ spinning: refreshing }"/></IconButton>
+            <IconButton label="清理失效的本地任务记录" :disabled="cleaning" @click="cleanupStaleTasks"><Trash2 :size="16"/></IconButton>
+            <IconButton label="关闭任务记录" @click="close"><X :size="18"/></IconButton>
           </div>
-        </aside>
+        </header>
+      </template>
+      <div class="task-drawer-body">
+        <NTabs v-model:value="activeTab" type="line" size="small" animated class="task-tabs">
+          <NTabPane name="active" :tab="`进行中${activeRows.length ? ` · ${activeRows.length}` : ''}`">
+            <TransitionGroup v-if="activeRows.length" name="task-list" tag="div" class="task-list">
+              <TaskRow v-for="row in activeRows" :key="row.id" :title="row.title" :target="row.target" :stage="row.stage"
+                :status-label="statusLabel(row.status)" :tone="statusTone(row.status) === 'danger' ? 'danger' : 'warning'"
+                :elapsed="elapsed(row)" :error="row.error" :running="row.status === 'running' || row.status === 'queued'">
+                <template #actions>
+                  <RouterLink v-if="row.route" class="text-button" :to="row.route" @click="close">查看</RouterLink>
+                  <button v-else-if="row.operation" class="icon-button" type="button" title="关闭记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
+                </template>
+              </TaskRow>
+            </TransitionGroup>
+            <NEmpty v-else size="small" description="没有进行中的任务"/>
+          </NTabPane>
+          <NTabPane name="finished" :tab="`最近完成${finishedRows.length ? ` · ${finishedRows.length}` : ''}`">
+            <TransitionGroup v-if="finishedRows.length" name="task-list" tag="div" class="task-list">
+              <TaskRow v-for="row in finishedRows" :key="row.id" :title="row.title" :target="row.target" :stage="row.stage"
+                :status-label="statusLabel(row.status)" :tone="statusTone(row.status)" :elapsed="elapsed(row)" :error="row.error">
+                <template #actions>
+                  <RouterLink v-if="row.route" class="text-button" :to="row.route" @click="close">查看</RouterLink>
+                  <button v-if="row.operation" class="icon-button" type="button" title="移除记录" @click="operations.dismiss(row.operation.id)"><X :size="15"/></button>
+                </template>
+              </TaskRow>
+            </TransitionGroup>
+            <NEmpty v-else size="small" description="本次会话还没有完成的任务"/>
+          </NTabPane>
+        </NTabs>
       </div>
-    </Transition>
-  </Teleport>
+    </NDrawerContent>
+  </NDrawer>
 </template>
 
 <style scoped>
-.task-drawer-layer { position: fixed; inset: 0; z-index: 105; }
-.task-drawer-backdrop { position: absolute; inset: 0; width: 100%; border: 0; background: rgba(22, 19, 15, .28); }
-.task-drawer { position: absolute; top: 0; right: 0; bottom: 0; display: flex; width: min(440px, 100vw); flex-direction: column; border-left: 1px solid var(--border-strong); background: var(--surface); box-shadow: -18px 0 50px rgba(25, 21, 15, .12); }
-.task-drawer-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 24px 24px 18px; border-bottom: 1px solid var(--border); }
+.task-drawer-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .task-drawer-header h2 { margin: 0; font-size: 21px; font-weight: 500; letter-spacing: -.02em; }
 .task-drawer-actions { display: flex; gap: 2px; }
-.task-drawer-body { flex: 1; overflow: auto; padding: 22px 24px 32px; }
-.task-drawer-section + .task-drawer-section { margin-top: 32px; }
-.task-drawer-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
-.task-drawer-section-head h3 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
-.task-drawer-section-head span { color: var(--text-tertiary); font-size: 10px; }
-.drawer-enter-active, .drawer-leave-active { transition: opacity 180ms ease; }
-.drawer-enter-active .task-drawer, .drawer-leave-active .task-drawer { transition: transform 220ms ease; }
-.drawer-enter-from, .drawer-leave-to { opacity: 0; }
-.drawer-enter-from .task-drawer, .drawer-leave-to .task-drawer { transform: translateX(100%); }
+.task-drawer-body { min-height: 0; }
+.task-tabs { margin-top: -6px; }
+.task-tabs :deep(.n-tab-pane) { padding-top: 12px; }
+.task-tabs :deep(.n-empty) { padding: 28px 0; }
+.task-list-enter-active, .task-list-leave-active { transition: opacity 160ms ease, transform 160ms ease; }
+.task-list-enter-from, .task-list-leave-to { opacity: 0; transform: translateY(-4px); }
+.task-list-move { transition: transform 180ms ease; }
 .spinning { animation: spin 800ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@media (max-width: 760px) { .task-drawer { width: 100vw; } }
+@media (max-width: 760px) { :deep(.n-drawer) { width: 100vw !important; } }
 </style>

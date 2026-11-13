@@ -18,7 +18,7 @@ import {
 import { ArrowRight, ServerCog, Trash2 } from "@lucide/vue";
 import AppDialog from "../../../src/components/AppDialog.vue";
 import StatusLabel from "../../../src/components/StatusLabel.vue";
-import { buildThemeOverrides } from "./theme";
+import { buildThemeOverrides } from "../../../src/naive/theme";
 
 type Tone = "success" | "warning" | "danger" | "muted";
 

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { NSpin } from "naive-ui";
+
 withDefaults(defineProps<{
   title: string;
   target: string;
@@ -7,7 +9,8 @@ withDefaults(defineProps<{
   tone?: "success" | "warning" | "danger" | "muted";
   elapsed: string;
   error?: string | null;
-}>(), { tone: "muted", error: null });
+  running?: boolean;
+}>(), { tone: "muted", error: null, running: false });
 </script>
 
 <template>
@@ -20,7 +23,7 @@ withDefaults(defineProps<{
       <small v-if="error">{{ error }}</small>
     </div>
     <div class="task-row-meta">
-      <span class="task-row-status">{{ statusLabel }}</span>
+      <span class="task-row-status"><NSpin v-if="running" size="small"/>{{ statusLabel }}</span>
       <span class="task-row-time mono">{{ elapsed }}</span>
       <slot name="actions"/>
     </div>

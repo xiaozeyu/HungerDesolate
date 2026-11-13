@@ -1,27 +1,32 @@
 <script setup lang="ts">
-import { DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogDescription, DialogClose } from "reka-ui";
-import { X } from "@lucide/vue";
-withDefaults(defineProps<{
+import { computed } from "vue";
+import { NModal } from "naive-ui";
+
+const props = withDefaults(defineProps<{
   open: boolean;
   title: string;
   description?: string;
   size?: "sm" | "md" | "lg";
   eyebrow?: string;
 }>(), { size: "md" });
-const emit = defineEmits<{"update:open": [value: boolean]}>();
+const emit = defineEmits<{ "update:open": [value: boolean] }>();
+
+const width = computed(() => props.size === "sm"
+  ? "min(440px, calc(100vw - 48px))"
+  : props.size === "lg"
+    ? "min(920px, calc(100vw - 48px))"
+    : "min(680px, calc(100vw - 48px))");
 </script>
+
 <template>
-  <DialogRoot :open="open" @update:open="emit('update:open', $event)">
-    <DialogPortal>
-      <DialogOverlay class="dialog-overlay"/>
-      <DialogContent class="dialog-content" :class="`dialog-size-${size}`" v-bind="description ? {} : { 'aria-describedby': undefined }" @keydown.esc="emit('update:open', false)">
-        <header class="dialog-header">
-          <div><div v-if="eyebrow" class="eyebrow">{{ eyebrow }}</div><DialogTitle class="dialog-title">{{title}}</DialogTitle><DialogDescription v-if="description" class="dialog-description">{{description}}</DialogDescription></div>
-          <DialogClose as-child><button class="icon-button dialog-close-button" type="button" aria-label="关闭"><X :size="18"/></button></DialogClose>
-        </header>
-        <div class="dialog-body"><slot/></div>
-        <footer v-if="$slots.footer" class="dialog-footer"><slot name="footer"/></footer>
-      </DialogContent>
-    </DialogPortal>
-  </DialogRoot>
+  <NModal :show="open" preset="card" :bordered="false" :closable="true" :aria-label="title" :style="{ width }"
+    @update:show="emit('update:open', $event)">
+    <template #header>
+      <div v-if="eyebrow" class="eyebrow">{{ eyebrow }}</div>
+      <div class="dialog-title">{{ title }}</div>
+      <p v-if="description" class="dialog-description">{{ description }}</p>
+    </template>
+    <slot/>
+    <template v-if="$slots.footer" #footer><slot name="footer"/></template>
+  </NModal>
 </template>

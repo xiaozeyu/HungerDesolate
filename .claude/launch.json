@@ -2,6 +2,18 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "app-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 1421
+    },
+    {
+      "name": "app-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "1422", "--strictPort"],
+      "port": 1422
+    },
+    {
       "name": "naive-poc",
       "runtimeExecutable": "npx",
       "runtimeArgs": ["vite", "--config", "poc/naive-ui/vite.config.ts"],

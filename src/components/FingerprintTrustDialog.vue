@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { NButton, NCheckbox } from "naive-ui";
 import AppDialog from "./AppDialog.vue";
 import type { FingerprintChallenge } from "../types/contracts";
 
@@ -33,17 +34,14 @@ function confirm() {
         <dt>新指纹 · {{ challenge.algorithm }}</dt>
         <dd class="mono">{{ challenge.fingerprint }}</dd>
       </dl>
-      <label class="trust-acknowledgement">
-        <input v-model="acknowledged" type="checkbox" :disabled="busy"/>
-        我已通过可信渠道核对上述主机指纹
-      </label>
+      <NCheckbox v-model:checked="acknowledged" :disabled="busy" class="trust-acknowledgement">我已通过可信渠道核对上述主机指纹</NCheckbox>
       <p class="form-hint">有效至 {{ new Date(challenge.expiresAtUnixSeconds * 1000).toLocaleTimeString() }}</p>
     </template>
     <p v-else class="form-hint">主机指纹尚未读取</p>
     <p v-if="error" class="error-strip" role="alert">{{ error }}</p>
     <template #footer>
-      <button class="button" type="button" @click="emit('update:open', false)">关闭</button>
-      <button class="button primary" type="button" :disabled="!acknowledged || busy" @click="confirm">{{ busy ? "处理中…" : "确认指纹" }}</button>
+      <NButton @click="emit('update:open', false)">关闭</NButton>
+      <NButton type="primary" :disabled="!acknowledged || busy" @click="confirm">{{ busy ? "处理中…" : "确认指纹" }}</NButton>
     </template>
   </AppDialog>
 </template>

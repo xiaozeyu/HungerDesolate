@@ -2,10 +2,12 @@
 import { computed, nextTick, ref } from "vue";
 import { useRoute } from "vue-router";
 import { RefreshCw, CheckCircle2, AlertTriangle, CircleX, ChevronDown } from "@lucide/vue";
+import { NButton } from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import LoadingState from "../components/LoadingState.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useHostEnvironment } from "../composables/useHostEnvironment";
@@ -19,13 +21,13 @@ const {data,loading,error,stale,refresh,plan,planOpen,initializing,outcomeUnknow
 const blockers = computed(() => data.value?.checks.filter(check => check.level === "blocker").length ?? 0);
 const engineLabels = {notInstalled:"未安装",permissionDenied:"权限不足",unavailable:"不可访问",available:"可访问"};
 const checks = computed(() => [...(data.value?.checks ?? [])].sort((a,b)=>({blocker:0,warning:1,passed:2}[a.level]-{blocker:0,warning:1,passed:2}[b.level])));
-const refreshButton = ref<HTMLButtonElement | null>(null);
+const refreshButton = ref<HTMLSpanElement | null>(null);
 const dockerPlanInvalid = computed(() => ["PLAN_STALE","PLAN_EXPIRED","INSTALL_HOST_CHANGED","INSTALL_SNAPSHOT_CHANGED","INSTALL_PREFLIGHT_BLOCKED"].includes(dockerTaskError.value?.code ?? ""));
 async function confirm() {
   const target = server.value;
   await confirmInitialization();
   await nextTick();
-  if (!planOpen.value && target?.serverId === server.value?.serverId && target?.recordVersion === server.value?.recordVersion) refreshButton.value?.focus();
+  if (!planOpen.value && target?.serverId === server.value?.serverId && target?.recordVersion === server.value?.recordVersion) refreshButton.value?.querySelector("button")?.focus();
 }
 async function retryDockerInstall() {
   clearDockerTask();
@@ -34,12 +36,19 @@ async function retryDockerInstall() {
 </script>
 <template>
   <div class="page">
-    <PageHeader :eyebrow="server?.displayName" title="主机环境"><template #status><StatusLabel v-if="data" :tone="stale ? 'warning' : blockers ? 'danger' : 'success'" :label="stale ? '结果已过期' : blockers ? `${blockers} 项阻断` : '检查通过'"/></template><template #actions><button v-if="!workspace.preview.value && data?.hostId && (data.docker.engineState === 'notInstalled' || data.docker.clientVersion && (data.docker.engineState !== 'available' || !data.docker.composeVersion))" class="button" :disabled="loading || initializing || stale || dockerPreviewLoading || dockerTaskLoading || dockerTask?.status === 'queued' || dockerTask?.status === 'running'" @click="previewDockerInstall">{{dockerTask?.status === 'queued' || dockerTask?.status === 'running' ? '安装中…' : dockerPreviewLoading ? '检查中…' : data.docker.engineState === 'available' ? '修复 Compose' : data.docker.engineState === 'unavailable' ? '修复 Docker' : '安装 Docker'}}</button><button v-if="!workspace.preview.value && data && (!data.hostId || plan?.status === 'incomplete')" class="button" :disabled="loading || initializing || stale || outcomeUnknown || !canInitializeHost(data)" @click="prepareInitialization">{{initializing ? '处理中…' : plan?.status === 'incomplete' ? '查看初始化' : '初始化'}}</button><button ref="refreshButton" class="button primary" :disabled="!server || loading || initializing" @click="refresh"><RefreshCw :size="16"/>{{loading ? '检查中…' : outcomeUnknown ? '重查原操作' : '重新检查'}}</button></template></PageHeader>
+    <PageHeader :eyebrow="server?.displayName" title="主机环境">
+      <template #status><StatusLabel v-if="data" :tone="stale ? 'warning' : blockers ? 'danger' : 'success'" :label="stale ? '结果已过期' : blockers ? `${blockers} 项阻断` : '检查通过'"/></template>
+      <template #actions>
+        <NButton v-if="!workspace.preview.value && data?.hostId && (data.docker.engineState === 'notInstalled' || data.docker.clientVersion && (data.docker.engineState !== 'available' || !data.docker.composeVersion))" :disabled="loading || initializing || stale || dockerPreviewLoading || dockerTaskLoading || dockerTask?.status === 'queued' || dockerTask?.status === 'running'" @click="previewDockerInstall">{{dockerTask?.status === 'queued' || dockerTask?.status === 'running' ? '安装中…' : dockerPreviewLoading ? '检查中…' : data.docker.engineState === 'available' ? '修复 Compose' : data.docker.engineState === 'unavailable' ? '修复 Docker' : '安装 Docker'}}</NButton>
+        <NButton v-if="!workspace.preview.value && data && (!data.hostId || plan?.status === 'incomplete')" :disabled="loading || initializing || stale || outcomeUnknown || !canInitializeHost(data)" @click="prepareInitialization">{{initializing ? '处理中…' : plan?.status === 'incomplete' ? '查看初始化' : '初始化'}}</NButton>
+        <span ref="refreshButton"><NButton type="primary" :disabled="!server || loading || initializing" @click="refresh"><template #icon><RefreshCw :size="16"/></template>{{loading ? '检查中…' : outcomeUnknown ? '重查原操作' : '重新检查'}}</NButton></span>
+      </template>
+    </PageHeader>
     <PreviewNotice/>
-    <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul><button v-if="server" class="text-button" type="button" @click="openConnection(server.serverId)">连接设置</button></div>
+    <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul><NButton v-if="server" text size="small" @click="openConnection(server.serverId)">连接设置</NButton></div>
     <div v-if="dockerPreviewError" class="environment-error" role="alert">{{dockerPreviewError.message}}</div>
     <div v-if="dockerTaskError" class="environment-error" role="alert">{{dockerTaskError.message}}</div>
-    <div v-if="loading && !data" class="empty-state" role="status">检查中…</div>
+    <LoadingState v-if="loading && !data" description="检查中…"/>
     <template v-else-if="data">
       <section class="section-block environment-panel">
         <div class="section-heading"><div><h2>系统与资源</h2><p class="muted-text">主机身份、内存与磁盘</p></div></div>
@@ -64,7 +73,7 @@ async function retryDockerInstall() {
         <ul class="initialization-paths"><li v-for="path in plan.paths" :key="path" class="mono">{{path}}</li></ul>
         <div v-if="error" role="alert" class="form-error">{{error.message}}</div>
       </template>
-      <template #footer><button class="button" @click="planOpen = false">关闭</button><button v-if="outcomeUnknown" class="button primary" :disabled="loading || initializing" @click="planOpen = false; refresh()">重查原操作</button><button v-else class="button primary" :disabled="!plan || initializing || loading" @click="confirm">{{initializing ? '初始化中…' : plan?.status === 'incomplete' ? '继续初始化' : '确认初始化'}}</button></template>
+      <template #footer><NButton @click="planOpen = false">关闭</NButton><NButton v-if="outcomeUnknown" type="primary" :disabled="loading || initializing" @click="planOpen = false; refresh()">重查原操作</NButton><NButton v-else type="primary" :disabled="!plan || initializing || loading" @click="confirm">{{initializing ? '初始化中…' : plan?.status === 'incomplete' ? '继续初始化' : '确认初始化'}}</NButton></template>
     </AppDialog>
     <AppDialog :open="dockerPreviewOpen" title="Docker 安装" @update:open="dockerPreviewOpen=$event">
       <template v-if="dockerPreview">
@@ -77,7 +86,7 @@ async function retryDockerInstall() {
         <p v-else-if="!dockerTask" class="form-hint">将配置 Docker 官方 APT 源、更新索引、安装所列软件包并启动服务。Docker daemon 拥有 root 级主机权限；容器发布端口可能绕过 UFW 规则。<span v-if="Object.keys(dockerPreview.preview.installedDockerPackages).length">已安装：{{Object.keys(dockerPreview.preview.installedDockerPackages).join('、')}}</span></p>
       </template>
       <p v-if="dockerPreviewError" class="environment-error" role="alert">{{dockerPreviewError.message}}</p>
-      <template #footer><button class="button" @click="dockerPreviewOpen=false">关闭</button><button v-if="dockerPreview?.preview.status==='ready' && !dockerTask && !dockerPlanInvalid" class="button primary" :disabled="dockerStarting || dockerTaskLoading || dockerPreviewLoading || initializing || loading" :aria-busy="dockerStarting || dockerTaskLoading" @click="startDockerInstall">{{dockerStarting ? '提交中…' : dockerTaskLoading ? '核对中…' : '确认安装 Docker'}}</button><button v-if="dockerPlanInvalid || dockerPreview?.preview.status==='ready' && dockerTask && ['failed','interrupted'].includes(dockerTask.status)" class="button primary" :disabled="dockerPreviewLoading || dockerTaskLoading" @click="retryDockerInstall">重新检查</button></template>
+      <template #footer><NButton @click="dockerPreviewOpen=false">关闭</NButton><NButton v-if="dockerPreview?.preview.status==='ready' && !dockerTask && !dockerPlanInvalid" type="primary" :disabled="dockerStarting || dockerTaskLoading || dockerPreviewLoading || initializing || loading" :loading="dockerStarting || dockerTaskLoading" @click="startDockerInstall">{{dockerStarting ? '提交中…' : dockerTaskLoading ? '核对中…' : '确认安装 Docker'}}</NButton><NButton v-if="dockerPlanInvalid || dockerPreview?.preview.status==='ready' && dockerTask && ['failed','interrupted'].includes(dockerTask.status)" type="primary" :disabled="dockerPreviewLoading || dockerTaskLoading" @click="retryDockerInstall">重新检查</NButton></template>
     </AppDialog>
   </div>
 </template>

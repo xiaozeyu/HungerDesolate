@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { NButton } from "naive-ui";
 export interface TaskPanelError {
   message?: string;
   code?: string;
@@ -45,9 +46,9 @@ defineEmits<{ cancel: [] }>();
     <div class="task-panel-side">
       <span class="task-panel-status">{{ props.statusLabel }}</span>
       <span v-if="props.progress" class="task-panel-progress mono">{{ props.progress }}</span>
-      <button v-if="props.cancellable" class="button subtle" type="button" :disabled="props.busy" @click="$emit('cancel')">
+      <NButton v-if="props.cancellable" size="small" :disabled="props.busy" @click="$emit('cancel')">
         {{ props.busy ? "提交中…" : props.cancelLabel }}
-      </button>
+      </NButton>
       <slot name="actions"/>
     </div>
   </section>

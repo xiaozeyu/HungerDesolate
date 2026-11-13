@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { Package, Plus, RefreshCw } from "@lucide/vue";
+import { computed, h, ref, watch } from "vue";
+import { ArrowLeftRight, DownloadCloud, Package, Plus, RefreshCw, Trash2 } from "@lucide/vue";
 import { useRoute } from "vue-router";
+import { NButton, NDataTable, NInput, type DataTableColumns } from "naive-ui";
+import IconButton from "../components/IconButton.vue";
+import { notifyBottomError, notifyBottomInfo, notifyBottomSuccess } from "../naive/notify";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import SummaryBar from "../components/SummaryBar.vue";
+import LoadingState from "../components/LoadingState.vue";
 import TaskPanel from "../components/TaskPanel.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
@@ -53,8 +56,6 @@ const libraryQuery = useQuery(key, async () => {
   return response;
 });
 const items = computed(() => libraryQuery.data.value?.items ?? []);
-const totalSize = computed(() => items.value.reduce((total, item) => total + (item.sizeBytes ?? 0), 0));
-const usedCount = computed(() => items.value.filter(item => item.usedBy.length > 0).length);
 const taskTone = computed<"running"|"success"|"danger"|"warning"|"muted">(() => {
   const status = task.value?.status;
   return status === "succeeded" ? "success" : status === "failed" ? "danger" : status === "interrupted" ? "warning" : status === "cancelled" ? "muted" : "running";
@@ -63,13 +64,6 @@ const taskStatusLabel = computed(() => {
   const status = task.value?.status;
   return status === "succeeded" ? "已加入主机库" : status === "failed" ? "准备失败" : status === "interrupted" ? "准备中断" : status === "cancelled" ? "已取消" : status === "queued" ? "排队中" : "准备 MOD";
 });
-const taskActive = computed(() => !!task.value && ["queued", "running"].includes(task.value.status));
-const modLibrarySummary = computed(() => [
-  { label: "内容版本", value: items.value.length },
-  { label: "使用或备份引用", value: usedCount.value },
-  { label: "占用空间", value: formatBytes(totalSize.value) },
-  { label: "任务", value: taskActive.value ? "进行中" : "空闲", tone: taskActive.value ? "warning" as const : "default" as const },
-]);
 const loading = libraryQuery.loading;
 const error = libraryQuery.error;
 const mutationError = ref("");
@@ -84,6 +78,8 @@ const collectionTitle = ref("");
 const collectionSelection = ref<Set<string>>(new Set());
 const queryBusy = ref(false);
 const queryError = ref("");
+let queryGeneration = 0;
+function invalidateQuery() { queryGeneration += 1; queryBusy.value = false; }
 const candidates = ref<WorkshopItem[]>([]);
 const isHostModPresent = (item: WorkshopItem) => items.value.some(entry => entry.workshopId === item.workshopId);
 const versionedPreview = (url: string | null, digest: string | null) => {
@@ -110,7 +106,13 @@ const outdatedCandidates = computed(() => {
   }
   return [...result.values()];
 });
-const checkLabel = (status: UpdateCheckStatus) => status === "latest" ? "已是最新" : status === "outdated" ? "可更新" : status === "failed" ? "检查失败" : "检查中";
+function versionTone(item: HostModItem) {
+  const status = updateChecks.value[item.workshopId]?.status;
+  return status === "latest" ? "latest" : status === "outdated" ? "outdated" : "neutral";
+}
+function isChecking(item: HostModItem) {
+  return updateChecks.value[item.workshopId]?.status === "checking";
+}
 
 async function checkUpdates(targets: HostModItem[]) {
   const connection = server.value;
@@ -151,6 +153,20 @@ async function checkUpdates(targets: HostModItem[]) {
       }
       updateChecks.value = next;
     }
+    const statuses = ids.map(id => updateChecks.value[id]?.status);
+    const latestCount = statuses.filter(status => status === "latest").length;
+    const outdatedCount = statuses.filter(status => status === "outdated").length;
+    const failedCount = statuses.filter(status => status === "failed").length;
+    if (ids.length === 1) {
+      const name = latest.get(ids[0])?.name ?? ids[0];
+      if (statuses[0] === "outdated") notifyBottomInfo("发现新版本", name);
+      else if (statuses[0] === "latest") notifyBottomSuccess("已是最新版本", name);
+      else notifyBottomError("更新检查失败", updateChecks.value[ids[0]]?.message || name);
+    } else {
+      const summary = `${latestCount} 个已是最新${outdatedCount ? `，${outdatedCount} 个可更新` : ""}${failedCount ? `，${failedCount} 个检查失败` : ""}`;
+      if (failedCount) notifyBottomError("更新检查完成", summary);
+      else notifyBottomSuccess("更新检查完成", summary);
+    }
   } catch (cause) {
     const failure = describeError(cause);
     for (const id of ids) {
@@ -159,6 +175,7 @@ async function checkUpdates(targets: HostModItem[]) {
       }
     }
     operations.recordFailure({ kind: "hostModCheck", target: hostTarget, title: "检查主机 MOD 更新", stage: "查询 Workshop", error: failure });
+    notifyBottomError("更新检查失败", failure.message);
   } finally {
     checkingUpdates.value = false;
   }
@@ -176,8 +193,10 @@ async function startBatchUpdate() {
   const connection = server.value;
   const hostTarget = target.value;
   if (!connection || !hostTarget || !outdatedCandidates.value.length) return;
+  const count = outdatedCandidates.value.length;
   await hostModBatch.start({ serverId: connection.serverId, hostId: hostTarget.hostId, recordVersion: connection.recordVersion }, outdatedCandidates.value);
   updateChecks.value = {};
+  notifyBottomSuccess("已提交批量更新", `${count} 个 MOD`);
 }
 
 async function refreshLibrary() {
@@ -220,6 +239,7 @@ async function query() {
   if (!connection || !hostTarget || queryBusy.value) return;
   const parsed = normalizeWorkshopIds(workshopInput.value);
   if (parsed.error) { queryError.value = parsed.error; return; }
+  const generation = ++queryGeneration;
   queryBusy.value = true;
   queryError.value = "";
   candidates.value = [];
@@ -227,17 +247,19 @@ async function query() {
     const requestId = crypto.randomUUID();
     const response = await getWorkshopMetadata({ schemaVersion: 1, requestId,
       serverId: connection.serverId, expectedRecordVersion: connection.recordVersion, workshopIds: parsed.ids });
+    if (generation !== queryGeneration) return;
     if (response.requestId !== requestId || response.serverId !== connection.serverId
         || response.recordVersion !== connection.recordVersion) throw new Error("Workshop 查询响应身份不匹配");
     candidates.value = response.items;
   } catch (cause) {
-    queryError.value = describeError(cause).message;
+    if (generation === queryGeneration) queryError.value = describeError(cause).message;
   } finally {
-    queryBusy.value = false;
+    if (generation === queryGeneration) queryBusy.value = false;
   }
 }
 
 function setAddMode(mode: "manual" | "collection") {
+  invalidateQuery();
   addMode.value = mode;
   candidates.value = [];
   queryError.value = "";
@@ -252,6 +274,7 @@ async function loadCollection() {
   const parsed = normalizeWorkshopCollection(collectionInput.value);
   if (parsed.error || !parsed.id) { queryError.value = parsed.error ?? "请输入 Steam 合集链接"; return; }
   const collectionId = parsed.id;
+  const generation = ++queryGeneration;
   queryBusy.value = true;
   queryError.value = "";
   candidates.value = [];
@@ -277,6 +300,7 @@ async function loadCollection() {
           || server.value.recordVersion !== connection.recordVersion) throw new Error("主机连接已变化，已停止查询合集");
       for (const item of response.items) fetched.set(item.workshopId, item);
     }
+    if (generation !== queryGeneration) return;
     collectionTitle.value = fetched.get(collectionId)?.title ?? `合集 ${collectionId}`;
     const childIds = ids.filter(id => id !== collectionId);
     if (!childIds.length) throw new Error("合集里没有可导入的 MOD");
@@ -286,9 +310,9 @@ async function loadCollection() {
       timeUpdated: null, fileSize: null, previewUrl: null, contentHandle: null,
     });
   } catch (cause) {
-    queryError.value = describeError(cause).message;
+    if (generation === queryGeneration) queryError.value = describeError(cause).message;
   } finally {
-    queryBusy.value = false;
+    if (generation === queryGeneration) queryBusy.value = false;
   }
 }
 
@@ -333,8 +357,11 @@ async function importCollection() {
     addOpen.value = false;
     candidates.value = [];
     collectionSelection.value = new Set();
+    notifyBottomSuccess("已提交合集导入", `${selected.length} 个 MOD`);
   } catch (cause) {
-    queryError.value = describeError(cause).message;
+    const failure = describeError(cause);
+    queryError.value = failure.message;
+    notifyBottomError("合集导入失败", failure.message);
   } finally {
     importingCollection.value = false;
   }
@@ -357,8 +384,11 @@ async function addCandidate(item: WorkshopItem) {
     taskStore.receive(response.task);
     addOpen.value = false;
     candidates.value = [];
+    notifyBottomSuccess("已提交添加到主机库", item.title ?? item.workshopId);
   } catch (cause) {
-    queryError.value = describeError(cause).message;
+    const failure = describeError(cause);
+    queryError.value = failure.message;
+    notifyBottomError("添加主机 MOD 失败", failure.message);
   } finally {
     addingWorkshopId.value = null;
   }
@@ -385,6 +415,7 @@ async function updateHostMod(item: HostModItem) {
       updateChecks.value = { ...updateChecks.value, [item.workshopId]: { status: "latest", message: "", candidate } };
       operations.succeed(operationId);
       operations.dismiss(operationId);
+      notifyBottomInfo("已是最新版本", item.name ?? item.workshopId);
       return;
     }
     operations.setStage(operationId, "启动更新任务");
@@ -397,10 +428,12 @@ async function updateHostMod(item: HostModItem) {
     taskStore.receive(response.task);
     operations.succeed(operationId);
     operations.dismiss(operationId);
+    notifyBottomSuccess("已提交 MOD 更新", item.name ?? item.workshopId);
   } catch (cause) {
     const failure = describeError(cause);
     updateChecks.value = { ...updateChecks.value, [item.workshopId]: { status: "failed", message: failure.message, candidate: null } };
     operations.fail(operationId, failure);
+    notifyBottomError("MOD 更新失败", failure.message);
   } finally {
     addingWorkshopId.value = null;
   }
@@ -497,6 +530,8 @@ async function confirmSync() {
     syncBusy.value = false;
     syncProgress.value = "";
   }
+  if (syncErrors.value.length) notifyBottomError("同步未全部完成", `${done}/${entries.length} 个专服已同步`);
+  else notifyBottomSuccess("期望版本已同步", `${done} 个专服`);
 }
 
 async function cancelPrepare() {
@@ -509,8 +544,11 @@ async function cancelPrepare() {
       target: hostTarget, expectedRecordVersion: connection.recordVersion, operationId: current.operationId });
     taskStore.receive(response.task);
     cancelMessage.value = "取消请求已提交，等待任务安全结束。";
+    notifyBottomInfo("已提交取消请求");
   } catch (cause) {
-    mutationError.value = describeError(cause).message;
+    const failure = describeError(cause);
+    mutationError.value = failure.message;
+    notifyBottomError("取消任务失败", failure.message);
   } finally {
     cancelBusy.value = false;
   }
@@ -530,8 +568,11 @@ async function remove() {
     if (response.requestId !== requestId) throw new Error("主机 MOD 删除响应身份不匹配");
     deleteTarget.value = null;
     await refresh();
+    notifyBottomSuccess("主机 MOD 版本已删除", item.name ?? item.workshopId);
   } catch (cause) {
-    mutationError.value = describeError(cause).message;
+    const failure = describeError(cause);
+    mutationError.value = failure.message;
+    notifyBottomError("删除主机 MOD 失败", failure.message);
   } finally {
     deleteBusy.value = false;
   }
@@ -539,15 +580,25 @@ async function remove() {
 
 watch(task, async (next, previous) => {
   if (!next || next.status === "queued" || next.status === "running") return;
-  if (next.status !== "succeeded") return;
   if (previous?.taskId === next.taskId && previous.status === next.status) return;
+  if (next.status === "failed" || next.status === "interrupted") {
+    notifyBottomError("主机 MOD 任务未完成", next.error?.message ?? "任务未完成");
+    return;
+  }
+  if (next.status === "cancelled") {
+    notifyBottomInfo("主机 MOD 任务已取消");
+    return;
+  }
+  if (next.status !== "succeeded") return;
   addOpen.value = false;
   candidates.value = [];
   updateChecks.value = {};
+  notifyBottomSuccess("主机 MOD 操作完成");
   await refresh();
 }, { flush: "sync" });
 
 function openAdd() {
+  invalidateQuery();
   workshopInput.value = "";
   collectionInput.value = "";
   addMode.value = "manual";
@@ -563,74 +614,127 @@ watch([() => server.value?.serverId, () => server.value?.recordVersion, () => wo
   cancelMessage.value = "";
   deleteTarget.value = null;
 }, { immediate: true });
-watch(workshopInput, () => { if (addMode.value === 'manual') { candidates.value = []; queryError.value = ""; } });
-watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.value = []; collectionTitle.value = ""; collectionSelection.value = new Set(); queryError.value = ""; } });
+watch(workshopInput, () => { invalidateQuery(); if (addMode.value === 'manual') { candidates.value = []; queryError.value = ""; } });
+watch(collectionInput, () => { invalidateQuery(); if (addMode.value === 'collection') { candidates.value = []; collectionTitle.value = ""; collectionSelection.value = new Set(); queryError.value = ""; } });
+
+const candidateColumns = computed<DataTableColumns<WorkshopItem>>(() => {
+  void items.value;
+  void collectionSelection.value;
+  void addingWorkshopId.value;
+  void workspace.preview.value;
+  const collection = addMode.value === "collection";
+  const columns: DataTableColumns<WorkshopItem> = [];
+  if (collection) {
+    columns.push({
+      title: "",
+      key: "select",
+      width: 34,
+      render: item => h("input", {
+        type: "checkbox",
+        checked: collectionSelection.value.has(item.workshopId),
+        disabled: item.result !== 1 || isHostModPresent(item),
+        onChange: () => toggleCollectionItem(item.workshopId),
+      }),
+    });
+  }
+  columns.push(
+    {
+      title: "图片",
+      key: "preview",
+      render: item => item.previewUrl
+        ? h("img", { class: "workshop-thumbnail", src: item.previewUrl, alt: item.title ?? item.workshopId, loading: "lazy" })
+        : h("span", { class: "muted-text" }, "无图"),
+    },
+    {
+      title: "条目",
+      key: "title",
+      render: item => h("div", null, [
+        h("strong", item.title ?? item.workshopId),
+        h("small", { class: "table-sub mono" }, item.workshopId),
+      ]),
+    },
+    { title: "作者", key: "author", render: item => item.author ?? item.creatorSteamId ?? "未知" },
+  );
+  if (collection) {
+    columns.push({ title: "大小", key: "size", render: item => item.fileSize === null ? "未知" : formatBytes(item.fileSize) });
+  }
+  columns.push({
+    title: "状态",
+    key: "status",
+    render: item => h(StatusLabel, {
+      tone: item.result !== 1 ? "danger" : isHostModPresent(item) ? "muted" : "success",
+      label: item.result !== 1 ? "不可用" : isHostModPresent(item) ? "已在主机库" : collection ? "可导入" : "可添加",
+    }),
+  });
+  if (!collection) {
+    columns.push({
+      title: "",
+      key: "actions",
+      align: "center",
+      render: item => h(IconButton, {
+        label: isHostModPresent(item) ? "已在主机库" : addingWorkshopId.value === item.workshopId ? "添加中…" : "添加到主机库",
+        disabled: addingWorkshopId.value !== null || item.result !== 1 || isHostModPresent(item),
+        onClick: () => void addCandidate(item),
+      }, () => h(Plus, { size: 15 })),
+    });
+  }
+  return columns;
+});
+const candidateRowKey = (item: WorkshopItem) => item.workshopId;
+
+const syncColumns = computed<DataTableColumns<SyncEntry>>(() => [
+  { title: "专服", key: "displayName", render: entry => entry.displayName },
+  { title: "当前期望版本", key: "currentDigest", render: entry => h("span", { class: "mono" }, entry.currentDigest ? entry.currentDigest.slice(0, 12) : "未固定版本") },
+]);
+const syncRowKey = (entry: SyncEntry) => entry.instanceId;
 </script>
 
 <template>
   <div class="page">
     <PageHeader eyebrow="主机公共资源" title="MOD 库">
       <template #actions>
-        <button class="button" :disabled="!items.length || checkingUpdates || hostModBatch.state.running || workspace.preview.value" @click="checkAllUpdates">
-          <RefreshCw :size="15" :class="{ spinning: checkingUpdates }"/>{{ checkingUpdates ? "检查中…" : "批量检查更新" }}
-        </button>
-        <button class="button" :disabled="loading || hostModBatch.state.running" @click="refreshLibrary">
-          <RefreshCw :size="15" :class="{ spinning: loading }"/>刷新
-        </button>
-        <button v-if="outdatedCandidates.length || hostModBatch.state.running" class="button primary" :disabled="hostModBatch.state.running || !outdatedCandidates.length" @click="startBatchUpdate">
+        <NButton :disabled="!items.length || checkingUpdates || hostModBatch.state.running || workspace.preview.value" @click="checkAllUpdates">
+          <template #icon><RefreshCw :size="15" :class="{ spinning: checkingUpdates }"/></template>{{ checkingUpdates ? "检查中…" : "批量检查更新" }}
+        </NButton>
+        <NButton :disabled="loading || hostModBatch.state.running" @click="refreshLibrary">
+          <template #icon><RefreshCw :size="15" :class="{ spinning: loading }"/></template>刷新
+        </NButton>
+        <NButton v-if="outdatedCandidates.length || hostModBatch.state.running" type="primary" :disabled="hostModBatch.state.running || !outdatedCandidates.length" @click="startBatchUpdate">
           {{ hostModBatch.state.running ? `更新中 ${hostModBatch.state.accepted}/${hostModBatch.state.total}` : `批量更新 (${outdatedCandidates.length})` }}
-        </button>
-        <button class="button primary" :disabled="!target || workspace.preview.value" @click="openAdd"><Plus :size="16"/>添加 MOD</button>
+        </NButton>
+        <NButton type="primary" :disabled="!target || workspace.preview.value" @click="openAdd"><template #icon><Plus :size="16"/></template>添加 MOD</NButton>
       </template>
     </PageHeader>
-    <SummaryBar v-if="items.length" :items="modLibrarySummary" label="主机 MOD 摘要"/>
     <div v-if="error" class="environment-error" role="alert">
       <strong>{{ error.message }}</strong>
       <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
     </div>
     <div v-if="mutationError" class="environment-error" role="alert"><strong>{{ mutationError }}</strong></div>
 
-    <div v-if="loading && !items.length" class="empty-state" role="status"><h2>正在读取主机 MOD 库</h2></div>
+    <LoadingState v-if="loading && !items.length" description="正在读取主机 MOD 库"/>
     <div v-else-if="!items.length" class="empty-state">
       <h2>主机 MOD 库为空</h2>
       <p class="muted-text">统一管理MOD，通过Workshop ID或合集链接添加</p>
     </div>
-    <div v-else class="table-wrap">
-      <table>
-        <thead><tr><th>MOD</th><th>作者</th><th>大小</th><th>版本</th><th class="table-action">操作</th></tr></thead>
-        <tbody>
-          <tr v-for="item in items" :key="`${item.workshopId}:${item.contentDigest}`">
-            <td>
-              <div class="host-mod-main">
-                <img v-if="item.previewUrl" class="host-mod-thumb" :src="versionedPreview(item.previewUrl, item.contentDigest)" :alt="item.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
-                <span v-else class="host-mod-thumb host-mod-placeholder"><Package :size="17"/></span>
-                <span class="host-mod-copy">
-                  <strong>{{ item.name ?? item.workshopId }}</strong>
-                  <small class="mono">{{ item.workshopId }}</small>
-                </span>
-              </div>
-            </td>
-            <td>{{ item.author ?? "未知" }}</td>
-            <td>{{ item.sizeBytes === null ? "未知" : formatBytes(item.sizeBytes) }}</td>
-            <td>
-              <span class="mono">{{ item.version ?? "—" }}</span>
-              <small v-if="updateChecks[item.workshopId]" class="table-sub" :class="`update-${updateChecks[item.workshopId]!.status}`">{{ checkLabel(updateChecks[item.workshopId]!.status) }}</small>
-            </td>
-            <td class="table-action">
-              <div class="host-mod-actions">
-                <button class="text-button" type="button" title="检查此 MOD 的最新版本" :disabled="workspace.preview.value || checkingUpdates || hostModBatch.state.running || addingWorkshopId !== null || deleteBusy"
-                  @click="checkOneUpdate(item)">检查</button>
-                <button class="text-button" type="button" title="同步该版本到使用此 MOD 的专服" :disabled="workspace.preview.value || syncLoading || addingWorkshopId !== null || deleteBusy"
-                  @click="previewSync(item)">同步</button>
-                <button class="text-button" type="button" title="更新到 Workshop 最新版本" :disabled="workspace.preview.value || addingWorkshopId !== null || deleteBusy || updateChecks[item.workshopId]?.status === 'latest' || hostModBatch.state.running"
-                  @click="updateHostMod(item)">{{ updateChecks[item.workshopId]?.status === 'latest' ? "已是最新" : addingWorkshopId === item.workshopId ? "更新中…" : "更新" }}</button>
-                <button class="text-button host-mod-delete" type="button" title="删除该版本" :disabled="workspace.preview.value || deleteBusy || addingWorkshopId !== null"
-                  @click="deleteTarget = item">删除</button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+    <div v-else class="host-mod-grid">
+      <article v-for="item in items" :key="`${item.workshopId}:${item.contentDigest}`" class="host-mod-card" :class="{ checking: isChecking(item) }">
+        <div class="host-mod-cover">
+          <img v-if="item.previewUrl" class="host-mod-cover-image" :src="versionedPreview(item.previewUrl, item.contentDigest)" :alt="item.name ?? item.workshopId" loading="lazy"/>
+          <div v-else class="host-mod-cover-placeholder"><Package :size="28"/></div>
+          <span class="host-mod-version" :class="`tone-${versionTone(item)}`">{{ item.version ?? "—" }}</span>
+        </div>
+        <div class="host-mod-card-info">
+          <strong class="host-mod-card-title">{{ item.name ?? item.workshopId }}</strong>
+          <span class="host-mod-card-id mono">{{ item.workshopId }}</span>
+          <span class="host-mod-card-author">{{ item.author ?? "未知作者" }}</span>
+        </div>
+        <div class="host-mod-card-actions">
+          <IconButton label="检查此 MOD 的最新版本" :disabled="workspace.preview.value || checkingUpdates || hostModBatch.state.running || addingWorkshopId !== null || deleteBusy" @click="checkOneUpdate(item)"><RefreshCw :size="15"/></IconButton>
+          <IconButton label="同步该版本到使用此 MOD 的专服" :disabled="workspace.preview.value || syncLoading || addingWorkshopId !== null || deleteBusy" @click="previewSync(item)"><ArrowLeftRight :size="15"/></IconButton>
+          <IconButton :label="updateChecks[item.workshopId]?.status === 'latest' ? '已是最新' : addingWorkshopId === item.workshopId ? '更新中…' : '更新到 Workshop 最新版本'" :disabled="workspace.preview.value || addingWorkshopId !== null || deleteBusy || updateChecks[item.workshopId]?.status === 'latest' || hostModBatch.state.running" @click="updateHostMod(item)"><DownloadCloud :size="15"/></IconButton>
+          <IconButton label="删除该版本" tone="danger" :disabled="workspace.preview.value || deleteBusy || addingWorkshopId !== null" @click="deleteTarget = item"><Trash2 :size="15"/></IconButton>
+        </div>
+      </article>
     </div>
 <FloatingTask v-if="task" label="主机 MOD">
     <TaskPanel v-if="task" title="准备主机 MOD" :status-label="taskStatusLabel" :stage-label="stageLabel(task.stage)" :tone="taskTone"
@@ -649,11 +753,11 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
       </div>
       <div v-if="addMode === 'manual'" class="form-field">
         <label for="host-mod-input">Workshop ID 或链接</label>
-        <textarea id="host-mod-input" v-model="workshopInput" rows="3" placeholder="每行一个 ID 或链接" @keydown.ctrl.enter="query" />
+        <NInput v-model:value="workshopInput" type="textarea" :autosize="{ minRows: 3 }" placeholder="每行一个 ID 或链接" :input-props="{ id: 'host-mod-input' }" @keydown.ctrl.enter="query"/>
       </div>
       <div v-else class="form-field">
         <label for="host-mod-collection">Steam 合集链接或 ID</label>
-        <input id="host-mod-collection" v-model="collectionInput" type="text" placeholder="https://steamcommunity.com/sharedfiles/filedetails/?id=..." @keydown.enter="loadCollection"/>
+        <NInput v-model:value="collectionInput" placeholder="https://steamcommunity.com/sharedfiles/filedetails/?id=..." :input-props="{ id: 'host-mod-collection' }" @keydown.enter="loadCollection"/>
       </div>
       <div v-if="queryError" class="error-strip" role="alert">{{ queryError }}</div>
       <div v-if="queryBusy" class="muted-text" role="status">{{ addMode === 'collection' ? "正在读取合集…" : "正在查询 Workshop…" }}</div>
@@ -661,37 +765,20 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
         <div v-if="addMode === 'collection'" class="collection-toolbar">
           <div><strong>{{ collectionTitle }}</strong><span class="muted-text">{{ candidates.length }} 项</span></div>
           <div class="collection-selection">
-            <button class="text-button" type="button" :disabled="!selectableCandidates.length" @click="toggleAllCollectionItems">{{ allCandidatesSelected ? "取消全选" : "全选可导入" }}</button>
+            <NButton text size="small" :disabled="!selectableCandidates.length" @click="toggleAllCollectionItems">{{ allCandidatesSelected ? "取消全选" : "全选可导入" }}</NButton>
             <span class="muted-text">已选 {{ collectionSelection.size }} / 50</span>
           </div>
         </div>
         <div class="table-wrap">
-          <table>
-            <thead><tr><th v-if="addMode === 'collection'" class="collection-check"/><th>图片</th><th>条目</th><th>作者</th><th v-if="addMode === 'collection'">大小</th><th>状态</th><th v-if="addMode === 'manual'" class="table-action">操作</th></tr></thead>
-            <tbody>
-              <tr v-for="item in candidates" :key="item.workshopId">
-                <td v-if="addMode === 'collection'" class="collection-check"><input type="checkbox" :checked="collectionSelection.has(item.workshopId)" :disabled="item.result !== 1 || isHostModPresent(item)" @change="toggleCollectionItem(item.workshopId)"/></td>
-                <td><img v-if="item.previewUrl" class="workshop-thumbnail" :src="item.previewUrl" :alt="item.title ?? item.workshopId" loading="lazy" /><span v-else class="muted-text">无图</span></td>
-                <td><strong>{{ item.title ?? item.workshopId }}</strong><small class="table-sub mono">{{ item.workshopId }}</small></td>
-                <td>{{ item.author ?? item.creatorSteamId ?? "未知" }}</td>
-                <td v-if="addMode === 'collection'">{{ item.fileSize === null ? "未知" : formatBytes(item.fileSize) }}</td>
-                <td><StatusLabel :tone="item.result !== 1 ? 'danger' : isHostModPresent(item) ? 'muted' : 'success'" :label="item.result !== 1 ? '不可用' : isHostModPresent(item) ? '已在主机库' : addMode === 'collection' ? '可导入' : '可添加'" /></td>
-                <td v-if="addMode === 'manual'" class="table-action">
-                  <button class="button button-compact primary" :disabled="addingWorkshopId !== null || item.result !== 1 || isHostModPresent(item)" @click="addCandidate(item)">
-                    {{ isHostModPresent(item) ? "已在主机库" : addingWorkshopId === item.workshopId ? "添加中…" : "添加到主机库" }}
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <NDataTable :columns="candidateColumns" :data="candidates" :bordered="false" :single-line="true" size="medium" :row-key="candidateRowKey"/>
         </div>
       </template>
 
       <template #footer>
-        <button class="button" type="button" @click="addOpen = false">关闭</button>
-        <button v-if="addMode === 'manual'" class="button primary" type="button" :disabled="queryBusy" @click="query">{{ queryBusy ? "查询中…" : "查询" }}</button>
-        <button v-else class="button" type="button" :disabled="queryBusy" @click="loadCollection">{{ queryBusy ? "读取中…" : "读取合集" }}</button>
-        <button v-if="addMode === 'collection'" class="button primary" type="button" :disabled="queryBusy || importingCollection || !selectedCollectionItems.length" @click="importCollection">{{ importingCollection ? "导入中…" : `导入所选${selectedCollectionItems.length ? ` (${selectedCollectionItems.length})` : ""}` }}</button>
+        <NButton @click="addOpen = false">关闭</NButton>
+        <NButton v-if="addMode === 'manual'" type="primary" :disabled="queryBusy" @click="query">{{ queryBusy ? "查询中…" : "查询" }}</NButton>
+        <NButton v-else :disabled="queryBusy" @click="loadCollection">{{ queryBusy ? "读取中…" : "读取合集" }}</NButton>
+        <NButton v-if="addMode === 'collection'" type="primary" :disabled="queryBusy || importingCollection || !selectedCollectionItems.length" @click="importCollection">{{ importingCollection ? "导入中…" : `导入所选${selectedCollectionItems.length ? ` (${selectedCollectionItems.length})` : ""}` }}</NButton>
       </template>
     </AppDialog>
     <AppDialog :open="!!syncTarget" title="同步到专服" @update:open="value => { if (!value && !syncBusy) syncTarget = null }">
@@ -700,10 +787,7 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
         <p>将把 <strong>{{ syncTarget.name ?? syncTarget.workshopId }}</strong> <span class="mono">{{ syncTarget.version ?? "" }}</span> 的期望版本同步到 {{ syncEntries.length }} 个专服。</p>
         <p class="form-hint">只更新期望 MOD 版本，不会自动应用或重启专服。</p>
         <div v-if="syncEntries.length" class="table-wrap">
-          <table>
-            <thead><tr><th>专服</th><th>当前期望版本</th></tr></thead>
-            <tbody><tr v-for="entry in syncEntries" :key="entry.instanceId"><td>{{ entry.displayName }}</td><td class="mono">{{ entry.currentDigest ? entry.currentDigest.slice(0, 12) : "未固定版本" }}</td></tr></tbody>
-          </table>
+          <NDataTable :columns="syncColumns" :data="syncEntries" :bordered="false" :single-line="true" size="medium" :row-key="syncRowKey"/>
         </div>
         <p v-else-if="!syncErrors.length" class="muted-text">没有使用此 MOD 的专服需要同步。</p>
         <div v-if="syncErrors.length" class="environment-error" role="alert">
@@ -713,51 +797,24 @@ watch(collectionInput, () => { if (addMode.value === 'collection') { candidates.
         <p v-if="syncProgress" class="muted-text" role="status">{{ syncProgress }}</p>
       </template>
       <template #footer>
-        <button class="button" type="button" :disabled="syncBusy" @click="syncTarget = null">取消</button>
-        <button class="button primary" type="button" :disabled="syncBusy || syncLoading || !syncEntries.length || syncErrors.length > 0" @click="confirmSync">
+        <NButton :disabled="syncBusy" @click="syncTarget = null">取消</NButton>
+        <NButton type="primary" :disabled="syncBusy || syncLoading || !syncEntries.length || syncErrors.length > 0" @click="confirmSync">
           {{ syncBusy ? "同步中…" : "同步期望版本" }}
-        </button>
+        </NButton>
       </template>
     </AppDialog>
     <AppDialog :open="!!deleteTarget" title="删除主机 MOD" @update:open="value => { if (!value && !deleteBusy) deleteTarget = null }">
       <p>删除后，新专服将无法选择该版本。仍被实例引用的版本不会被删除；引用该版本的备份可能无法完整恢复。</p>
       <p class="mono">{{ deleteTarget?.workshopId }} · {{ deleteTarget?.contentDigest.slice(0, 12) }}</p>
       <template #footer>
-        <button class="button" :disabled="deleteBusy" @click="deleteTarget = null">取消</button>
-        <button class="button danger" :disabled="deleteBusy" @click="remove">{{ deleteBusy ? "删除中…" : "确认删除" }}</button>
+        <NButton :disabled="deleteBusy" @click="deleteTarget = null">取消</NButton>
+        <NButton type="error" ghost :disabled="deleteBusy" @click="remove">{{ deleteBusy ? "删除中…" : "确认删除" }}</NButton>
       </template>
     </AppDialog>
   </div>
 </template>
 
 <style scoped>
-.host-mod-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.host-mod-thumb {
-  display: block;
-  width: 40px;
-  height: 40px;
-  min-width: 40px;
-  max-width: 40px;
-  min-height: 40px;
-  max-height: 40px;
-  flex: 0 0 40px;
-  object-fit: cover;
-  border: 1px solid var(--border);
-  border-radius: 2px;
-  background: var(--surface-muted);
-}
-.host-mod-placeholder { display: grid; place-items: center; color: var(--text-tertiary); }
-.host-mod-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
-.host-mod-copy strong { font-weight: 500; overflow-wrap: anywhere; }
-.host-mod-copy small { color: var(--text-tertiary); font-size: 10px; }
-.host-mod-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; }
-.update-latest { color: var(--success); }
-.update-outdated { color: var(--warning); }
-.update-failed { color: var(--danger); }
-.update-checking { color: var(--text-tertiary); }
-
-.host-mod-delete { color: var(--danger); }
-
 .add-mod-tabs { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--border); }
 .add-mod-tabs button { padding: 8px 0; margin-right: 20px; border-bottom: 1px solid transparent; color: var(--text-tertiary); font-size: 12px; }
 .add-mod-tabs button.active { border-bottom-color: var(--text); color: var(--text); }

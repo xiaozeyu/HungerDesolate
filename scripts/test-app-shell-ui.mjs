@@ -61,13 +61,16 @@ test('app shell exposes a global task center and operation bar without the updat
   assert.match(hostMods, /hostModUpdate/);
   assert.doesNotMatch(hostMods, /pendingUpdateSync/);
   assert.doesNotMatch(hostMods, /previewSync\(updated\)/);
-  assert.match(hostMods, /@click="previewSync\(item\)"/);
+  assert.match(hostMods, /previewSync\(item\)/);
+  assert.match(hostMods, /function invalidateQuery/);
+  assert.match(hostMods, /if \(generation === queryGeneration\) queryBusy\.value = false/);
   assert.doesNotMatch(creation, /getInstanceCreateStatus|stopPolling/);
   assert.match(creation, /taskStore\.tasks\.value/);
   assert.doesNotMatch(backups, /scheduleRestorePoll|scheduleTaskPoll|getInstanceBackupTask|getInstanceRestoreTask/);
   assert.match(backups, /watch\(activeTask/);
   assert.match(backups, /const pageLoading = computed/);
-  assert.match(backups, /v-if="pageLoading"/);
+  assert.match(backups, /v-if="pageLoading \|\| items\.length"/);
+  assert.match(backups, /:loading="pageLoading"/);
   assert.doesNotMatch(backups, /useInstanceOverview|overview\.refresh/);
   assert.match(backups, /listInstances/);
   assert.doesNotMatch(backups, /确认后会先检查归属、校验和、版本产物及空间/);

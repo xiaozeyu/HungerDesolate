@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch, onBeforeUnmount } from "vue";
+import { NButton, NInput } from "naive-ui";
 import { isTauri } from "@tauri-apps/api/core";
 import AppSelect from "./AppSelect.vue";
 import CredentialFields from "./CredentialFields.vue";
@@ -102,14 +103,14 @@ defineExpose({testConnection});
     <div v-if="failure" class="error-strip" role="alert"><strong>{{failure.message}}</strong><p v-for="step in failure.recoverySteps" :key="step">{{step}}</p></div>
     <fieldset :disabled="busy || readonly || !!progress" class="server-form-fields">
       <div class="form-grid">
-        <label :for="`${formId}-name`">显示名称<input :id="`${formId}-name`" v-model="fields.displayName" maxlength="64" autocomplete="off" :aria-invalid="!!errors.displayName" :aria-describedby="errors.displayName ? `${formId}-name-error` : undefined"/><span v-if="errors.displayName" :id="`${formId}-name-error`" class="field-error">{{errors.displayName}}</span></label>
-        <label :for="`${formId}-host`">主机地址<input :id="`${formId}-host`" v-model="fields.host" placeholder="192.0.2.24" autocomplete="off" spellcheck="false" class="mono" :aria-invalid="!!errors.host" :aria-describedby="errors.host ? `${formId}-host-error` : undefined"/><span v-if="errors.host" :id="`${formId}-host-error`" class="field-error">{{errors.host}}</span></label>
-        <label :for="`${formId}-port`">SSH 端口<input :id="`${formId}-port`" v-model="fields.sshPort" type="number" min="1" max="65535" step="1" :aria-invalid="!!errors.sshPort" :aria-describedby="errors.sshPort ? `${formId}-port-error` : undefined"/><span v-if="errors.sshPort" :id="`${formId}-port-error`" class="field-error">{{errors.sshPort}}</span></label>
-        <label :for="`${formId}-user`">用户名<input :id="`${formId}-user`" v-model="fields.username" maxlength="64" autocomplete="off" :aria-invalid="!!errors.username" :aria-describedby="errors.username ? `${formId}-user-error` : undefined"/><span v-if="errors.username" :id="`${formId}-user-error`" class="field-error">{{errors.username}}</span></label>
+        <label :for="`${formId}-name`">显示名称<NInput v-model:value="fields.displayName" placeholder="" maxlength="64" :input-props="{ id: `${formId}-name`, autocomplete: 'off', 'aria-invalid': !!errors.displayName, 'aria-describedby': errors.displayName ? `${formId}-name-error` : undefined }"/><span v-if="errors.displayName" :id="`${formId}-name-error`" class="field-error">{{errors.displayName}}</span></label>
+        <label :for="`${formId}-host`">主机地址<NInput v-model:value="fields.host" placeholder="192.0.2.24" :input-props="{ id: `${formId}-host`, autocomplete: 'off', spellcheck: 'false', class: 'mono', 'aria-invalid': !!errors.host, 'aria-describedby': errors.host ? `${formId}-host-error` : undefined }"/><span v-if="errors.host" :id="`${formId}-host-error`" class="field-error">{{errors.host}}</span></label>
+        <label :for="`${formId}-port`">SSH 端口<NInput v-model:value="fields.sshPort" placeholder="" :input-props="{ id: `${formId}-port`, inputmode: 'numeric', 'aria-invalid': !!errors.sshPort, 'aria-describedby': errors.sshPort ? `${formId}-port-error` : undefined }"/><span v-if="errors.sshPort" :id="`${formId}-port-error`" class="field-error">{{errors.sshPort}}</span></label>
+        <label :for="`${formId}-user`">用户名<NInput v-model:value="fields.username" placeholder="" maxlength="64" :input-props="{ id: `${formId}-user`, autocomplete: 'off', 'aria-invalid': !!errors.username, 'aria-describedby': errors.username ? `${formId}-user-error` : undefined }"/><span v-if="errors.username" :id="`${formId}-user-error`" class="field-error">{{errors.username}}</span></label>
         <div class="form-field"><span>认证方式</span><AppSelect :model-value="fields.authKind" :options="authOptions" label="认证方式" :disabled="busy || readonly || !!progress" @update:model-value="authChanged"/></div>
       </div>
     </fieldset>
     <CredentialFields v-if="!server" :model-value="credentials" :auth-kind="fields.authKind" :id-prefix="`${formId}-credential`" :disabled="busy || readonly" :error="credentialFailure" :allow-paste="false" @update:model-value="editCredentials"/>
-    <div class="form-actions"><button v-if="props.server" type="button" class="button" :disabled="busy || readonly" @click="reset">放弃输入并载入最新记录</button><slot name="actions" :busy="busy"/></div>
+    <div class="form-actions"><NButton v-if="props.server" :disabled="busy || readonly" @click="reset">放弃输入并载入最新记录</NButton><slot name="actions" :busy="busy"/></div>
   </form>
 </template>

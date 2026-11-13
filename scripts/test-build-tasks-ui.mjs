@@ -34,10 +34,9 @@ test('build progress separates stage and download bars',async()=>{
   const page=await readFile(resolve(process.cwd(),'src/pages/ReleaseManagementPage.vue'),'utf8');
   const app=await readFile(resolve(process.cwd(),'src/App.vue'),'utf8');
   const api=await readFile(resolve(process.cwd(),'src/api/instances.ts'),'utf8');
-  assert.match(page,/build-progress-fill stage/);
-  assert.match(page,/build-progress-fill download/);
+  assert.match(page,/NProgress[^>]*:percentage="buildPercent"[^>]*status="success"/s);
+  assert.match(page,/NProgress[^>]*:percentage="buildStepPercent"[^>]*status="info"/s);
   assert.match(page,/当前步骤下载/);
-  assert.match(page,/build-stripes/);
   assert.match(page,/buildStepPercent/);
   assert.match(app,/runningBuildStage/);
   assert.match(api,/stepPercent/);

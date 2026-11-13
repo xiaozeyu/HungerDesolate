@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, h, ref, watch } from "vue";
 import { Plus, RefreshCw, ArrowRight, ServerCog, Trash2, AlertTriangle } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
+import { NButton, NDataTable, NInput, NModal, type DataTableColumns } from "naive-ui";
 import InstanceCreateDialog from "../components/InstanceCreateDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import SummaryBar from "../components/SummaryBar.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
-import AppDialog from "../components/AppDialog.vue";
+import IconButton from "../components/IconButton.vue";
+import { notifySuccessAction } from "../naive/notify";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useOperations } from "../composables/useOperations";
 import { useInstanceList } from "../composables/useInstanceList";
@@ -20,21 +21,21 @@ const route=useRoute(), router=useRouter(), workspace=useWorkspace(), operations
 const server=computed(()=>workspace.servers.value.find(item=>item.serverId===route.params.serverId) ?? null);
 const {data,error,loading,stale,refresh}=useInstanceList(server,workspace.preview);
 const createOpen=ref(false);
-const createdTarget=ref<{serverId:string;hostId:string;instanceId:string}|null>(null);
 const deleteTarget=ref<InstanceSummary|null>(null), deletePlan=ref<InstanceDeletePreview|null>(null), deleteName=ref(""), deleteOperationId=ref(""), deleteBusy=ref(false), deletePreviewBusy=ref(false), deleteError=ref("");
 const deleteDiagnostics=ref<UserError|null>(null);
-watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.recordVersion,()=>data.value?.registryRevision,()=>workspace.preview.value],()=>{createOpen.value=false;deleteTarget.value=null;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deleteBusy.value=false;deletePreviewBusy.value=false;deleteError.value="";deleteDiagnostics.value=null;createdTarget.value=null;});
+watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.recordVersion,()=>data.value?.registryRevision,()=>workspace.preview.value],()=>{createOpen.value=false;deleteTarget.value=null;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deleteBusy.value=false;deletePreviewBusy.value=false;deleteError.value="";deleteDiagnostics.value=null;});
 const instances=computed(()=>data.value?.instances ?? []);
-const running=computed(()=>instances.value.filter(item=>item.runtimeStatus==='running').length);
-const unknown=computed(()=>instances.value.filter(item=>item.runtimeStatus==='unknown').length);
-const summaryItems=computed(()=>[
-  {label:"专服",value:instances.value.length},
-  {label:"运行中",value:running.value,tone:"success" as const},
-  {label:"未核实",value:unknown.value,tone:unknown.value?"warning" as const:"default" as const},
-]);
+const rowKey = (item: InstanceSummary) => item.instanceId;
+function playersLabel(item: InstanceSummary) {
+  return item.runtimeStatus === "stopped" ? "—"
+    : item.players === null ? (item.maxPlayers === null ? "未知" : `未知 / ${item.maxPlayers}`)
+    : `${item.players} / ${item.maxPlayers ?? "未知"}`;
+}
 async function creationSucceeded(created:{serverId:string;hostId:string;instanceId:string}){
   await refresh();
-  createdTarget.value=created;
+  const instance=data.value?.instances.find(item=>item.instanceId===created.instanceId);
+  notifySuccessAction("专服已创建", instance?.displayName, "进入世界配置",
+    () => { void router.push(`/hosts/${created.serverId}/instances/${created.instanceId}/world`); });
 }
 function enter(instance:InstanceSummary){
   if (!server.value || stale.value || !canInspectInstance(instance)) return;
@@ -91,23 +92,90 @@ async function deleteSelectedInstance(){
   deleteTarget.value=null;deletePlan.value=null;deleteName.value="";await refresh();
 }
 function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACTIVE_TASK:"实例仍有未结束任务",TASK_STATUS_MISSING:"任务状态缺失，结果待核实",CONTAINER_RUNNING:"容器尚未全部停止",TASK_STATUS_UNKNOWN:"无法核对任务状态",RESOURCE_IDENTITY_INVALID:"Docker 资源归属不匹配",DATA_UNSAFE:"实例目录权限或文件类型不安全",DATA_CONFLICT:"归档目标已存在"};return labels[code]??"删除条件未满足";}
+function openDeletePreviewForPilot() {
+  const item = instances.value[0];
+  if (!item) return;
+  deleteTarget.value = item;
+  deletePlan.value = {
+    schemaVersion: 1, requestId: crypto.randomUUID(),
+    target: { serverId: server.value?.serverId ?? "", hostId: item.hostId, instanceId: item.instanceId },
+    recordVersion: server.value?.recordVersion ?? 0, registryRevision: data.value?.registryRevision ?? 0,
+    displayName: item.displayName, lifecycle: item.lifecycle,
+    containers: [], networks: [], dataPresent: true, worldData: true, archived: false,
+    blockers: ["CONTAINER_RUNNING"], allowed: true, planId: "pilot-plan",
+  };
+  deleteName.value = "";
+  deleteDiagnostics.value = null;
+  deleteError.value = "";
+  deletePreviewBusy.value = false;
+}
+const columns = computed<DataTableColumns<InstanceSummary>>(() => {
+  void stale.value;
+  void loading.value;
+  void workspace.preview.value;
+  return [
+  {
+    title: "名称",
+    key: "displayName",
+    render: item => {
+      const children = [h("div", { class: "table-primary" }, [h(ServerCog, { size: 17 }), h("strong", item.displayName)])];
+      if (!item.manifestAvailable) children.push(h("small", { class: "table-sub" }, "配置未完成"));
+      return h("div", null, children);
+    },
+  },
+  { title: "模式", key: "gameMode", render: item => gameModeLabel(item.gameMode) },
+  { title: "洞穴", key: "caves", render: item => item.cavesEnabled === null ? "未知" : item.cavesEnabled ? "启用" : "关闭" },
+  {
+    title: "状态",
+    key: "status",
+    render: item => {
+      const state = instanceState(item);
+      return h(StatusLabel, { tone: state.tone, label: state.label });
+    },
+  },
+  { title: "玩家", key: "players", render: item => playersLabel(item) },
+  { title: "版本", key: "build", render: item => h("span", { class: "mono" }, item.installedBuild ?? "未知") },
+  { title: "最近运行采集", key: "lastSyncedAt", render: item => h("span", { class: "muted-text" }, formatBeijingDateTime(item.lastSyncedAt)) },
+  {
+    title: "",
+    key: "actions",
+    align: "center",
+    render: item => h("div", { class: "row-actions" }, [
+      h(IconButton, {
+        label: canDeleteInstance(item) ? "预览删除专服" : "当前状态不可删除",
+        disabled: !canDeleteInstance(item),
+        tone: "danger",
+        onClick: () => void openDelete(item),
+      }, () => h(Trash2, { size: 15 })),
+      h(IconButton, {
+        label: "进入专服",
+        disabled: stale.value || !canInspectInstance(item),
+        onClick: () => enter(item),
+      }, () => h(ArrowRight, { size: 15 })),
+    ]),
+  },
+  ];
+});
 </script>
 <template>
   <div class="page">
-    <PageHeader :eyebrow="server?.displayName" title="专服列表"><template #actions><button class="button" :disabled="loading || !server" @click="refresh"><RefreshCw :size="16"/>{{loading?'读取中…':'刷新'}}</button><button class="button primary" :disabled="workspace.preview.value || !server?.hostId || !data || loading || stale || !!error" @click="createOpen=true"><Plus :size="16"/>新建专服</button></template></PageHeader>
+    <PageHeader :eyebrow="server?.displayName" title="专服列表">
+      <template #actions>
+        <NButton v-if="workspace.preview.value" size="small" @click="openDeletePreviewForPilot">预览删除弹窗</NButton>
+        <NButton size="small" :disabled="loading || !server" @click="refresh"><template #icon><RefreshCw :size="16"/></template>{{loading?'读取中…':'刷新'}}</NButton>
+        <NButton size="small" type="primary" :disabled="workspace.preview.value || !server?.hostId || !data || loading || stale || !!error" @click="createOpen=true"><template #icon><Plus :size="16"/></template>新建专服</NButton>
+      </template>
+    </PageHeader>
     <PreviewNotice/>
-    <p v-if="createdTarget" class="success-message" role="status">专服已创建<button class="text-button" @click="router.push(`/hosts/${createdTarget.serverId}/instances/${createdTarget.instanceId}/world`)">进入世界配置</button></p>
     <InstanceCreateDialog v-model:open="createOpen" :server="server" :registry-revision="data?.registryRevision ?? 0" @creation-succeeded="creationSucceeded"/>
     <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul></div>
-    <div v-if="loading && !data" class="empty-state" role="status">读取专服列表…</div>
-    <template v-else-if="data">
-      <SummaryBar :items="summaryItems" label="专服摘要"/>
+    <template v-if="loading || data">
       <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
-      <div v-if="!instances.length" class="empty-state"><ServerCog :size="28"/><h2>暂无专服</h2></div>
-      <div v-else class="table-wrap"><table><thead><tr><th>名称</th><th>模式</th><th>洞穴</th><th>状态</th><th>玩家</th><th>版本</th><th>最近运行采集</th><th/></tr></thead><tbody><tr v-for="item in instances" :key="item.instanceId"><td><div class="table-primary"><ServerCog :size="17"/><strong>{{item.displayName}}</strong></div><small v-if="!item.manifestAvailable" class="table-sub">配置未完成</small></td><td>{{gameModeLabel(item.gameMode)}}</td><td>{{item.cavesEnabled === null ? '未知' : item.cavesEnabled ? '启用' : '关闭'}}</td><td><StatusLabel :tone="instanceState(item).tone" :label="instanceState(item).label"/></td><td>{{item.runtimeStatus==='stopped'?'—':item.players===null?(item.maxPlayers===null?'未知':`未知 / ${item.maxPlayers}`):`${item.players} / ${item.maxPlayers ?? '未知'}`}}</td><td class="mono">{{item.installedBuild ?? '未知'}}</td><td class="muted-text">{{formatBeijingDateTime(item.lastSyncedAt)}}</td><td class="table-action"><div class="row-actions"><button class="icon-button" type="button" :aria-label="`预览删除专服 ${item.displayName}`" :title="canDeleteInstance(item) ? '预览删除专服' : '当前状态不可删除'" :disabled="!canDeleteInstance(item)" @click="openDelete(item)"><Trash2 :size="15"/></button><button class="text-button" :disabled="stale || !canInspectInstance(item)" @click="enter(item)">进入 <ArrowRight :size="15"/></button></div></td></tr></tbody></table></div>
+      <div v-if="data && !instances.length" class="empty-state"><ServerCog :size="28"/><h2>暂无专服</h2></div>
+      <div v-else class="table-wrap"><NDataTable :columns="columns" :data="instances" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="loading"/></div>
     </template>
     <div v-else-if="!error" class="empty-state"><ServerCog :size="28"/><h2>尚未读取专服</h2></div>
-    <AppDialog :open="!!deleteTarget" title="删除专服" @update:open="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
+    <NModal :show="!!deleteTarget" preset="card" :bordered="false" :closable="!deleteBusy" :mask-closable="!deleteBusy" :close-on-esc="!deleteBusy" title="删除专服" aria-label="删除专服" :style="{ width: 'min(680px, calc(100vw - 48px))' }" @update:show="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
       <div v-if="deleteTarget" class="form-stack">
         <p>专服：<strong>{{deleteTarget.displayName}}</strong></p>
         <p v-if="deletePreviewBusy" role="status">正在检查删除条件…</p>
@@ -117,7 +185,7 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
             <div class="delete-error-head"><AlertTriangle :size="16"/><strong>暂不能删除</strong></div>
             <ul><li v-for="blocker in deletePlan.blockers" :key="blocker">{{deleteBlockerLabel(blocker)}}</li></ul>
           </div>
-          <label v-if="deletePlan.allowed">输入专服名称确认<input v-model="deleteName" autocomplete="off" :disabled="deleteBusy"/></label>
+          <label v-if="deletePlan.allowed">输入专服名称确认<NInput v-model:value="deleteName" placeholder="" :input-props="{ autocomplete: 'off' }" :disabled="deleteBusy"/></label>
         </template>
         <div v-if="deleteError" class="delete-error" role="alert">
           <div class="delete-error-head"><AlertTriangle :size="16"/><strong>删除未完成</strong></div>
@@ -134,14 +202,13 @@ function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACT
           </div>
         </div>
       </div>
-      <template #footer><button class="button" :disabled="deleteBusy" @click="deleteTarget=null;deletePlan=null">取消</button><button v-if="deletePlan?.allowed" class="button danger" :disabled="deleteBusy || deleteName!==deleteTarget?.displayName" @click="deleteSelectedInstance">{{deleteBusy?'正在删除…':'确认并归档删除'}}</button></template>
-    </AppDialog>
+      <template #footer><div class="dialog-footer-actions"><NButton :disabled="deleteBusy" @click="deleteTarget=null;deletePlan=null">取消</NButton><NButton v-if="deletePlan?.allowed" type="error" ghost :disabled="deleteBusy || deleteName!==deleteTarget?.displayName" @click="deleteSelectedInstance">{{deleteBusy?'正在删除…':'确认并归档删除'}}</NButton></div></template>
+    </NModal>
   </div>
 </template>
 
 
 <style scoped>
-.row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 28px; }
 .delete-blockers, .delete-error { border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border)); background: color-mix(in srgb, var(--danger) 4%, var(--surface)); padding: 14px 16px; }
 .delete-error { display: grid; gap: 10px; }
 .delete-error-head { display: flex; align-items: center; gap: 8px; color: var(--danger); font-size: 12px; }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
+import { NButton } from "naive-ui";
 import { isTauri } from "@tauri-apps/api/core";
 import { useWorkspace } from "../composables/useWorkspace";
 import { cleanupCredentials, getCleanupStatus } from "../api/ssh";
@@ -21,4 +22,4 @@ async function cleanup() {
   finally { if (context === epoch) busy.value = false; }
 }
 </script>
-<template><div v-if="count || error" class="credential-cleanup" role="status"><div><p v-if="count">{{count}} 项凭据待清理</p><p v-if="error" class="field-error">{{error}}</p></div><button class="button" :disabled="busy" @click="cleanup">{{busy ? '清理中…' : '清理旧凭据'}}</button></div></template>
+<template><div v-if="count || error" class="credential-cleanup" role="status"><div><p v-if="count">{{count}} 项凭据待清理</p><p v-if="error" class="field-error">{{error}}</p></div><NButton size="small" :disabled="busy" @click="cleanup">{{busy ? '清理中…' : '清理旧凭据'}}</NButton></div></template>

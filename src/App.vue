@@ -4,7 +4,9 @@ import { RouterView, useRoute, useRouter } from "vue-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ArrowLeft, Cpu, FileText, Gauge, Globe2, HardDrive, List, Moon, Package, Server, Settings, Sun, TerminalSquare, Wrench } from "@lucide/vue";
+import { NButton, NConfigProvider, NLayout, NLayoutContent, NLayoutFooter, NLayoutHeader, NLayoutSider, darkTheme, lightTheme, zhCN } from "naive-ui";
 import { useWorkspace } from "./composables/useWorkspace";
+import { buildThemeOverrides } from "./naive/theme";
 import { useTheme } from "./composables/useTheme";
 import { useTasks } from "./composables/useTasks";
 import { useOperations } from "./composables/useOperations";
@@ -26,6 +28,8 @@ const operations = useOperations();
 const buildTasks = useBuildTasks();
 const { openDrawer: openTaskDrawer } = useTaskDrawer();
 const { theme, toggleTheme } = useTheme();
+const naiveTheme = computed(() => theme.value === "dark" ? darkTheme : lightTheme);
+const themeOverrides = computed(() => buildThemeOverrides(theme.value === "dark"));
 const appVersion = ref(__APP_VERSION__);
 const settingsReturnPath = ref("/hosts");
 watch(() => route.fullPath, (path, previous) => {
@@ -36,7 +40,6 @@ const activeServerId = computed(() => String(contextRoute.value.params.serverId 
 const activeInstanceId = computed(() => String(contextRoute.value.params.instanceId ?? ""));
 const activeServer = computed(() => workspace.servers.value.find(server => server.serverId === activeServerId.value));
 const activeInstance = computed(() => activeServer.value?.hostId ? workspace.instances(activeServer.value.hostId).find(instance => instance.instanceId === activeInstanceId.value) : undefined);
-const breadcrumb = computed(() => [activeServer.value?.displayName, activeInstance.value?.displayName, route.path === "/settings" ? "应用设置" : String(route.meta.title ?? "主机")].filter(Boolean).join(" / "));
 const instancePages = [
     { name: "overview", label: "概览", icon: Gauge }, { name: "world", label: "世界", icon: Globe2 },
     { name: "mods", label: "MOD", icon: Wrench }, { name: "backups", label: "备份", icon: HardDrive },
@@ -115,8 +118,9 @@ onUnmounted(() => {
 
 
 <template>
-  <div class="app-shell">
-    <aside class="app-sidebar">
+  <NConfigProvider :theme="naiveTheme" :theme-overrides="themeOverrides" :locale="zhCN">
+  <NLayout class="app-shell naive-app" has-sider style="height:100dvh">
+    <NLayoutSider class="app-sidebar" :width="216" :native-scrollbar="true" content-style="display:flex;flex-direction:column;height:100%;gap:30px;padding:28px 20px 18px;box-sizing:border-box;">
       <div class="brand-row">
         <div class="brand-mark">
           荒
@@ -187,46 +191,42 @@ onUnmounted(() => {
           </span>
         </div>
       </div>
-    </aside>
-    <main class="app-main">
-      <header class="app-topbar">
+    </NLayoutSider>
+    <NLayout class="app-main">
+      <NLayoutHeader class="app-topbar">
         <div class="topbar-leading">
           <IconButton v-if="route.path==='/settings'" label="返回上一页" @click="router.push(settingsReturnPath)">
             <ArrowLeft :size="17"/>
           </IconButton>
-          <span class="breadcrumb">
-            {{breadcrumb}}
-          </span>
         </div>
         <IconButton :label="theme==='light'?'切换暗色主题':'切换亮色主题'" @click="toggleTheme">
           <Moon v-if="theme==='light'" :size="17"/>
           <Sun v-else :size="17"/>
         </IconButton>
-      </header>
-      <section class="route-scroll">
-        <RouterView/>
-      </section>
-      <footer class="operation-bar" aria-live="polite">
+      </NLayoutHeader>
+      <NLayoutContent class="route-content">
+        <section class="route-scroll">
+          <RouterView/>
+        </section>
+      </NLayoutContent>
+      <NLayoutFooter class="operation-bar" aria-live="polite">
         <div class="operation-leading">
-          <span class="status-dot" :class="runningOperation || runningTask || runningBuild ? 'warning' : 'success'"></span>
           <template v-if="runningOperation || runningTask || runningBuild">
+            <span class="status-dot warning"></span>
             <strong>{{activityTitle}}</strong>
             <span>{{activityStage}}</span>
             <span class="muted-text">{{activityTarget}}</span>
             <span class="mono muted-text">{{activityElapsed}}</span>
           </template>
-          <template v-else>
-            <strong>{{activeInstance?.displayName ?? activeServer?.displayName ?? '荒野中枢'}}</strong>
-            <span class="muted-text">{{activeServer ? 'SSH 已连接' : '从主机列表进入'}}</span>
-          </template>
         </div>
-        <button class="text-button" type="button" @click="openTaskDrawer">
-          <FileText :size="14"/>
+        <NButton text size="small" class="operation-task-button" @click="openTaskDrawer">
+          <template #icon><FileText :size="14"/></template>
           任务记录<span v-if="activityCount"> · {{activityCount}}</span>
-        </button>
-      </footer>
-    </main>
-    <TaskDrawer/>
-    <ConnectionSettingsDialog/>
-  </div>
+        </NButton>
+      </NLayoutFooter>
+    </NLayout>
+  </NLayout>
+  <TaskDrawer/>
+  <ConnectionSettingsDialog/>
+  </NConfigProvider>
 </template>

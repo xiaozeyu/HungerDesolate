@@ -1,28 +1,21 @@
 <script setup lang="ts">
-import { TooltipProvider, TooltipRoot, TooltipTrigger, TooltipPortal, TooltipContent } from "reka-ui";
-defineProps<{
-    label: string;
-    disabled?: boolean;
-}>();
-defineEmits<{
-    click: [
-    ];
-}>();
+import { NButton, NTooltip } from "naive-ui";
+
+withDefaults(defineProps<{
+  label: string;
+  disabled?: boolean;
+  tone?: "default" | "danger";
+}>(), { disabled: false, tone: "default" });
+defineEmits<{ click: [] }>();
 </script>
 
 <template>
-  <TooltipProvider>
-    <TooltipRoot>
-      <TooltipTrigger as-child>
-        <button class="icon-button" :aria-label="label" :disabled="disabled" @click="$emit('click')">
-          <slot/>
-        </button>
-      </TooltipTrigger>
-      <TooltipPortal>
-        <TooltipContent class="app-tooltip" :side-offset="4">
-          {{label}}
-        </TooltipContent>
-      </TooltipPortal>
-    </TooltipRoot>
-  </TooltipProvider>
+  <NTooltip>
+    <template #trigger>
+      <NButton quaternary circle class="app-icon-button" :class="{ 'app-icon-button--danger': tone === 'danger' }" :aria-label="label" :disabled="disabled" @click="$emit('click')">
+        <slot/>
+      </NButton>
+    </template>
+    {{ label }}
+  </NTooltip>
 </template>

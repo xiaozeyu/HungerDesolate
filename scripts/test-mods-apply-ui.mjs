@@ -19,7 +19,7 @@ test('MOD apply takes an explicit backup choice instead of always creating one',
   const previewStart = page.indexOf('<AppDialog v-model:open="applyPreviewOpen"');
   const previewEnd = page.indexOf('</AppDialog>', previewStart);
   assert.ok(previewStart >= 0 && previewEnd > previewStart);
-  assert.match(page.slice(previewStart, previewEnd), /v-model="createProtectionBackup"/);
+  assert.match(page.slice(previewStart, previewEnd), /v-model:checked="createProtectionBackup"/);
   assert.doesNotMatch(api, /listModApplyProtectionBackups/);
   assert.match(api, /createProtectionBackup: boolean/);
   assert.match(remote, /if request\["createProtectionBackup"\]:/);

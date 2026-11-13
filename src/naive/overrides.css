@@ -1,0 +1,49 @@
+/* Naive UI structure overrides. Components teleported to body cannot be scoped to a page. */
+.n-card.n-modal { border: 1px solid var(--border-strong); box-shadow: var(--shadow); max-height: calc(100dvh - 48px); }
+.n-card.n-modal .n-card-header { padding: 28px 30px 20px; border-bottom: 1px solid var(--border); }
+.n-card.n-modal .n-card-header__main { font-size: 20px; font-weight: 500; letter-spacing: -.02em; }
+.n-card.n-modal .n-card-content { padding: 24px 30px; overflow: auto; min-height: 0; }
+.n-card.n-modal .n-card__footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 30px; border-top: 1px solid var(--border); }
+.n-card.n-modal .n-base-close { color: var(--text-secondary); }
+.n-modal-mask { background-color: var(--overlay); backdrop-filter: blur(2px); }
+.n-card.n-modal .dialog-footer-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Keep the project's global native-input rules from doubling Naive's input chrome. */
+.n-input .n-input__input-el, .n-input .n-input__textarea-el {
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  font-size: inherit;
+}
+.n-input .n-input__input-el:focus, .n-input .n-input__textarea-el:focus { border-color: transparent; outline: none; }
+.world-field-control .n-input-number, .mod-config-field .n-input-number { width: 100%; }
+
+.app-icon-button.n-button { width: 28px; height: 28px; padding: 0; color: var(--text-secondary); box-shadow: none; }
+.app-icon-button.n-button:hover { color: var(--text); background: var(--surface-hover); box-shadow: none; transform: none; }
+.app-icon-button--danger.n-button { color: var(--danger); }
+.app-icon-button--danger.n-button:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+
+.n-button { transition: background 140ms ease, color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease; }
+.n-button--default-type:not(.app-icon-button) { box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent); }
+.n-button--default-type:not(.app-icon-button):hover { box-shadow: 0 4px 12px color-mix(in srgb, var(--text) 10%, transparent); transform: translateY(-1px); }
+.n-button--primary-type { box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 26%, transparent); }
+.n-button--primary-type:hover { box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 34%, transparent); transform: translateY(-1px); }
+.n-button--text-type { box-shadow: none; transform: none; }
+
+.naive-app .n-data-table .n-data-table-th {
+  font-size: 9px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border-strong);
+  transition: background 140ms ease;
+}
+.naive-app .n-data-table .n-data-table-th .n-data-table-th__title { font-size: 9px; letter-spacing: .12em; }
+.naive-app .n-data-table .n-data-table-td { border-bottom: 1px solid var(--border); transition: background 140ms ease; }
+.naive-app .n-data-table tbody tr:hover .n-data-table-td { background: color-mix(in srgb, var(--text) 3%, var(--surface)); }
+.naive-app .n-data-table .n-data-table-empty { padding: 32px 0; }
+.naive-app .row-actions { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 28px; }
+
+.n-notification { border: 1px solid var(--border); }

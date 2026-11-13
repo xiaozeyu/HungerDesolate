@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { Eye, EyeOff, RefreshCw, Save, Upload } from "@lucide/vue";
+import { NButton, NInput, NInputNumber, NSwitch } from "naive-ui";
 import AppSelect from "../components/AppSelect.vue";
+import LoadingState from "../components/LoadingState.vue";
+import { notifyError, notifyInfo, notifySuccess } from "../naive/notify";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import { applyWorldConfig, getWorldConfig, revealWorldSecrets, saveWorldConfig } from "../api/world";
@@ -26,7 +29,6 @@ const draft = reactive<WorldSettings>(defaultWorldSettings(false));
 const baseDesired = ref<WorldSettings | null>(null), baseRevision = ref(0);
 const loading = ref(false), saving = ref(false), stale = ref(false);
 const error = ref<UserError | null>(null);
-const saveMessage = ref("");
 const tokenStatus = ref<WorldConfig["tokenStatus"]>("unknown");
 const passwordStatus = ref<WorldConfig["serverPasswordStatus"]>("unknown");
 const tokenValue = ref(""), passwordValue = ref("");
@@ -159,7 +161,7 @@ async function refresh() {
       revealedToken.value = "";
       revealedPassword.value = "";
       secretError.value = "";
-      if (useRestored) saveMessage.value = "已恢复未保存的草稿。";
+      if (useRestored) notifyInfo("草稿已恢复", "已恢复未保存的草稿。");
     } else if (response.configRevision !== baseRevision.value) {
       error.value = { code: "REVISION_CONFLICT", message: "期望配置已被其他操作更新；本地草稿已保留，请比较后重载或重新编辑。", recoverySteps: [], field: null };
     }
@@ -230,27 +232,27 @@ function validateDraft(): string | null {
 async function save(): Promise<boolean> {
   const instanceTarget = target.value, connection = server.value, currentConfig = data.value;
   if (saving.value) {
-    saveMessage.value = "保存请求正在处理中，请等待结果。";
+    notifyInfo("保存请求正在处理中", "请等待结果。");
     return false;
   }
   if (!instanceTarget || !connection || !currentConfig) {
-    saveMessage.value = "尚未读取到可保存的专服配置，请先刷新。";
+    notifyError("无法保存", "尚未读取到可保存的专服配置，请先刷新。");
     return false;
   }
   if (loading.value) {
-    saveMessage.value = "专服配置仍在读取，请稍后保存。";
+    notifyInfo("专服配置仍在读取", "请稍后保存。");
     return false;
   }
   if (stale.value) {
-    saveMessage.value = "当前配置读取已过期，请刷新后再保存。";
+    notifyError("配置读取已过期", "请刷新后再保存。");
     return false;
   }
   if (workspace.preview.value) {
-    saveMessage.value = "界面预览数据不能保存，请在桌面应用中编辑真实专服。";
+    notifyInfo("界面预览数据不能保存", "请在桌面应用中编辑真实专服。");
     return false;
   }
   if (!hasChanges.value) {
-    saveMessage.value = "当前配置没有更改，无需保存。";
+    notifyInfo("没有需要保存的更改");
     return false;
   }
   const validation = validateDraft();
@@ -265,7 +267,6 @@ async function save(): Promise<boolean> {
   pendingOperationId.value = operationId;
   saving.value = true;
   error.value = null;
-  saveMessage.value = "正在提交期望配置…";
   try {
     const settings = copySettings(draft);
     const requestId = crypto.randomUUID();
@@ -300,12 +301,11 @@ async function save(): Promise<boolean> {
       secretError.value = "";
     }
     pendingOperationId.value = "";
-    saveMessage.value = `期望配置已保存（版本 ${response.data.revision}）。`;
+    notifySuccess("世界配置已保存", `版本 ${response.data.revision}`);
     return true;
   } catch (cause) {
     if (epoch === savedEpoch && target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget) {
       error.value = describeError(cause);
-      saveMessage.value = "";
     }
     return false;
   } finally {
@@ -331,7 +331,6 @@ async function applyWorld() {
   const ticketEpoch = epoch, revision = baseRevision.value;
   const requestId = crypto.randomUUID();
   error.value = null;
-  saveMessage.value = "正在检查并部署世界配置…";
   const outcome = await operations.run({
     kind: "worldApply",
     target: instanceTarget,
@@ -360,13 +359,12 @@ async function applyWorld() {
       || server.value?.recordVersion !== connection.recordVersion) return;
   if (outcome.error) {
     error.value = outcome.error;
-    saveMessage.value = "";
     return;
   }
   const result = outcome.result!;
-  saveMessage.value = [result.runningShards.length
-    ? "世界配置已部署并重启原运行分片；隔离运行验证仍待完成。"
-    : "世界配置已部署，专服保持停止；隔离运行验证仍待完成。", ...result.warnings].join(" ");
+  notifySuccess("世界配置已应用", [result.runningShards.length
+    ? "已部署并重启原运行分片；隔离运行验证仍待完成。"
+    : "已部署，专服保持停止；隔离运行验证仍待完成。", ...result.warnings].join(" "));
   await refresh();
 }
 
@@ -416,23 +414,23 @@ watch([() => target.value?.serverId, () => target.value?.hostId, () => target.va
   if (target.value) void refresh();
 }, { immediate: true, flush: "sync" });
 
-watch(draft, () => { draftVersion.value++; pendingOperationId.value = ""; if (!applyBusy.value) saveMessage.value = ""; }, { deep: true, flush: "sync" });
+watch(draft, () => { draftVersion.value++; pendingOperationId.value = ""; }, { deep: true, flush: "sync" });
 watch(draft, () => {
   const selected = target.value;
   if (!selected || !baseDesired.value) return;
   if (hasChanges.value) writeWorldDraft(selected, baseRevision.value, draft);
   else clearWorldDraft(selected);
 }, { deep: true, flush: "post" });
-watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperationId.value = ""; if (!applyBusy.value) saveMessage.value = ""; }, { flush: "sync" });
+watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperationId.value = ""; }, { flush: "sync" });
 </script>
 
 <template>
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="世界配置">
       <template #actions>
-        <button class="button" :disabled="loading || saving || applyBusy || !target" @click="refresh"><RefreshCw :size="16"/>{{loading?'读取中…':'刷新'}}</button>
-        <button class="button" :disabled="!canSave" @click="save"><Save :size="16"/>{{saving?'保存中…':'仅保存'}}</button>
-        <button class="button primary" :disabled="!canSave" @click="saveAndApply"><Upload :size="16"/>{{saving?'保存中…':applyBusy?'应用中…':'保存并应用'}}</button>
+        <NButton size="small" :disabled="loading || saving || applyBusy || !target" @click="refresh"><template #icon><RefreshCw :size="16"/></template>{{loading?'读取中…':'刷新'}}</NButton>
+        <NButton size="small" :disabled="!canSave" @click="save"><template #icon><Save :size="16"/></template>{{saving?'保存中…':'仅保存'}}</NButton>
+        <NButton size="small" type="primary" :disabled="!canSave" @click="saveAndApply"><template #icon><Upload :size="16"/></template>{{saving?'保存中…':applyBusy?'应用中…':'保存并应用'}}</NButton>
       </template>
     </PageHeader>
     <PreviewNotice/>
@@ -441,7 +439,7 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
       <ul v-if="applyBlockers.length"><li v-for="code in applyBlockers" :key="code">{{applyBlockerLabel(code)}}</li></ul>
       <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul>
     </div>
-    <div v-if="loading && !data" class="empty-state" role="status">读取世界配置…</div>
+    <LoadingState v-if="loading && !data" description="读取世界配置…"/>
     <div v-else-if="!target && !workspace.preview.value" class="empty-state"><h2>无法确定专服</h2><p>返回专服列表后重新进入。</p></div>
     <template v-else>
       <div v-if="stale" class="environment-error" role="status">显示上次读取的配置；当前结果已过期，保存已停用。</div>
@@ -454,18 +452,18 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
       <section v-if="activeView==='basic'" class="section-block world-form-panel">
         <div class="world-pane-heading"><h2>基本设置</h2></div>
         <div class="world-field-list">
-          <div class="world-field-row"><label for="world-room-name">世界名称</label><div class="world-field-control"><input id="world-room-name" v-model="draft.roomName" maxlength="64" autocomplete="off"/></div></div>
+          <div class="world-field-row"><label for="world-room-name">世界名称</label><div class="world-field-control"><NInput v-model:value="draft.roomName" placeholder="" maxlength="64" :input-props="{ id: 'world-room-name', autocomplete: 'off' }"/></div></div>
           <div class="world-field-row"><label>游戏模式</label><div class="world-field-control"><AppSelect v-model="draft.gameMode" :options="dstGameModeOptions" label="游戏模式"/></div></div>
-          <div class="world-field-row"><label for="world-max-players">最大玩家数</label><div class="world-field-control"><input id="world-max-players" v-model.number="draft.maxPlayers" type="number" min="1" max="128"/></div></div>
+          <div class="world-field-row"><label for="world-max-players">最大玩家数</label><div class="world-field-control"><NInputNumber :value="draft.maxPlayers" placeholder="" :min="1" :max="128" :precision="0" :show-button="false" :input-props="{ id: 'world-max-players' }" @update:value="value => draft.maxPlayers = value ?? 1"/></div></div>
           <div class="world-field-row"><label>语言</label><div class="world-field-control"><AppSelect v-model="draft.language" :options="languageOptions" label="语言"/></div></div>
-          <div class="world-field-row world-field-row-top"><label for="world-description">世界描述</label><div class="world-field-control"><textarea id="world-description" v-model="draft.description" maxlength="256" rows="3"/></div></div>
+          <div class="world-field-row world-field-row-top"><label for="world-description">世界描述</label><div class="world-field-control"><NInput v-model:value="draft.description" type="textarea" placeholder="" maxlength="256" :autosize="{ minRows: 3 }" :input-props="{ id: 'world-description' }"/></div></div>
         </div>
 
         <div class="world-subsection">
           <div class="world-pane-heading"><h2>联机凭据</h2></div>
           <div class="world-field-list">
-            <div class="world-field-row"><label for="world-server-password">服务器密码</label><div class="world-field-control world-secret-input"><input id="world-server-password" v-model="passwordInput" :type="showPassword ? 'text' : 'password'" autocomplete="new-password" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'"/><button class="world-secret-toggle" type="button" :aria-label="showPassword ? '隐藏服务器密码' : '显示服务器密码'" :aria-pressed="showPassword" @click="togglePasswordVisibility"><EyeOff v-if="showPassword" :size="16"/><Eye v-else :size="16"/></button></div></div>
-            <div class="world-field-row"><label for="world-klei-token">Klei Token</label><div class="world-field-control world-secret-input"><input id="world-klei-token" v-model="tokenInput" :type="showToken ? 'text' : 'password'" autocomplete="off" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'"/><button class="world-secret-toggle" type="button" :aria-label="showToken ? '隐藏 Klei Token' : '显示 Klei Token'" :aria-pressed="showToken" @click="toggleTokenVisibility"><EyeOff v-if="showToken" :size="16"/><Eye v-else :size="16"/></button></div></div>
+            <div class="world-field-row"><label for="world-server-password">服务器密码</label><div class="world-field-control world-secret-input"><NInput v-model:value="passwordInput" :type="showPassword ? 'text' : 'password'" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'" :input-props="{ id: 'world-server-password', autocomplete: 'new-password' }"/><button class="world-secret-toggle" type="button" :aria-label="showPassword ? '隐藏服务器密码' : '显示服务器密码'" :aria-pressed="showPassword" @click="togglePasswordVisibility"><EyeOff v-if="showPassword" :size="16"/><Eye v-else :size="16"/></button></div></div>
+            <div class="world-field-row"><label for="world-klei-token">Klei Token</label><div class="world-field-control world-secret-input"><NInput v-model:value="tokenInput" :type="showToken ? 'text' : 'password'" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'" :input-props="{ id: 'world-klei-token', autocomplete: 'off' }"/><button class="world-secret-toggle" type="button" :aria-label="showToken ? '隐藏 Klei Token' : '显示 Klei Token'" :aria-pressed="showToken" @click="toggleTokenVisibility"><EyeOff v-if="showToken" :size="16"/><Eye v-else :size="16"/></button></div></div>
           </div>
           <p v-if="secretError" class="error-strip" role="alert">{{ secretError }}</p>
         </div>
@@ -473,8 +471,8 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
         <div class="world-subsection">
           <div class="world-pane-heading"><h2>世界选项</h2></div>
           <div class="world-field-list">
-            <div class="world-field-row"><span><strong>允许 PVP</strong></span><span class="world-switch"><input v-model="draft.pvp" type="checkbox"/><span class="world-switch-track" aria-hidden="true"><span class="world-switch-thumb"/></span></span></div>
-            <div class="world-field-row"><span><strong>无人时暂停</strong></span><span class="world-switch"><input v-model="draft.pauseWhenEmpty" type="checkbox"/><span class="world-switch-track" aria-hidden="true"><span class="world-switch-thumb"/></span></span></div>
+            <div class="world-field-row"><span><strong>允许 PVP</strong></span><NSwitch v-model:value="draft.pvp"/></div>
+            <div class="world-field-row"><span><strong>无人时暂停</strong></span><NSwitch v-model:value="draft.pauseWhenEmpty"/></div>
           </div>
         </div>
       </section>
@@ -485,22 +483,22 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
           <section class="world-settings-panel">
             <h3>投票</h3>
             <div class="world-field-list">
-              <div class="world-field-row"><span><strong>启用踢人投票</strong></span><span class="world-switch"><input v-model="draft.advanced.voteEnabled" type="checkbox"/><span class="world-switch-track" aria-hidden="true"><span class="world-switch-thumb"/></span></span></div>
-              <div class="world-field-row"><label for="world-vote-percent">踢人投票比例</label><div class="world-field-control"><input id="world-vote-percent" v-model.number="draft.advanced.voteKickPercentage" type="number" min="0" max="100" :disabled="!draft.advanced.voteEnabled"/></div></div>
+              <div class="world-field-row"><span><strong>启用踢人投票</strong></span><NSwitch v-model:value="draft.advanced.voteEnabled"/></div>
+              <div class="world-field-row"><label for="world-vote-percent">踢人投票比例</label><div class="world-field-control"><NInputNumber :value="draft.advanced.voteKickPercentage" placeholder="" :min="0" :max="100" :precision="0" :show-button="false" :disabled="!draft.advanced.voteEnabled" :input-props="{ id: 'world-vote-percent' }" @update:value="value => draft.advanced.voteKickPercentage = value ?? 0"/></div></div>
             </div>
           </section>
           <section class="world-settings-panel">
             <h3>白名单</h3>
             <div class="world-field-list">
-              <div class="world-field-row"><label for="world-whitelist-slots">白名单预留位</label><div class="world-field-control"><input id="world-whitelist-slots" v-model.number="draft.advanced.whitelistSlots" type="number" min="0" :max="draft.maxPlayers"/></div></div>
-              <div class="world-field-row world-field-row-top"><label for="world-whitelist">白名单 Klei ID</label><div class="world-field-control"><textarea id="world-whitelist" :value="draft.advanced.whitelist.join('\n')" rows="5" @input="updateList('whitelist',($event.target as HTMLTextAreaElement).value)"/></div></div>
+              <div class="world-field-row"><label for="world-whitelist-slots">白名单预留位</label><div class="world-field-control"><NInputNumber :value="draft.advanced.whitelistSlots" placeholder="" :min="0" :max="draft.maxPlayers" :precision="0" :show-button="false" :input-props="{ id: 'world-whitelist-slots' }" @update:value="value => draft.advanced.whitelistSlots = value ?? 0"/></div></div>
+              <div class="world-field-row world-field-row-top"><label for="world-whitelist">白名单 Klei ID</label><div class="world-field-control"><NInput :value="draft.advanced.whitelist.join('\n')" type="textarea" placeholder="" :autosize="{ minRows: 5 }" :input-props="{ id: 'world-whitelist' }" @update:value="value => updateList('whitelist', value)"/></div></div>
             </div>
           </section>
           <section class="world-settings-panel world-settings-wide">
             <h3>名单</h3>
             <div class="world-list-grid">
-              <label>管理员 Klei ID<textarea :value="draft.advanced.adminList.join('\n')" rows="5" @input="updateList('adminList',($event.target as HTMLTextAreaElement).value)"/></label>
-              <label>封禁名单 Klei ID<textarea :value="draft.advanced.blocklist.join('\n')" rows="5" @input="updateList('blocklist',($event.target as HTMLTextAreaElement).value)"/></label>
+              <label>管理员 Klei ID<NInput :value="draft.advanced.adminList.join('\n')" type="textarea" placeholder="" :autosize="{ minRows: 5 }" @update:value="value => updateList('adminList', value)"/></label>
+              <label>封禁名单 Klei ID<NInput :value="draft.advanced.blocklist.join('\n')" type="textarea" placeholder="" :autosize="{ minRows: 5 }" @update:value="value => updateList('blocklist', value)"/></label>
             </div>
           </section>
         </div>

@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, ref, watch } from "vue";
 import { Download, Plus, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
+import { NButton, NCheckbox, NDataTable, type DataTableColumns } from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import AppDialog from "../components/AppDialog.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import SummaryBar from "../components/SummaryBar.vue";
+import IconButton from "../components/IconButton.vue";
 import TaskPanel from "../components/TaskPanel.vue";
 import { listHostMods } from "../api/hostMods";
 import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, listInstances, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
@@ -24,17 +25,10 @@ const mode = ref<BackupCaptureMode | null>(null);
 const createOpen = ref(false);
 const previews = ref<Record<BackupCaptureMode, BackupPreviewResponse | null>>({ cold: null, quasiHot: null });
 const items = ref<BackupSummary[]>([]);
-const verifiedCount = computed(() => items.value.filter(item => item.verification === "verified").length);
-const totalSize = computed(() => items.value.reduce((total, item) => total + item.sizeBytes, 0));
 const activeTaskTone = computed<"running"|"success"|"danger"|"warning"|"muted">(() => {
   const status = activeTask.value?.status;
   return status === "succeeded" ? "success" : status === "failed" ? "danger" : status === "interrupted" ? "warning" : status === "cancelled" ? "muted" : "running";
 });
-const backupSummary = computed(() => [
-  { label: "备份", value: items.value.length },
-  { label: "已校验", value: verifiedCount.value, tone: "success" as const },
-  { label: "占用空间", value: formatBytes(totalSize.value) },
-]);
 const preview = computed(() => mode.value ? previews.value[mode.value] : null);
 const loading = ref(false);
 const contextLoading = ref(false);
@@ -589,56 +583,85 @@ onBeforeUnmount(() => {
   currentListRequest = "";
   currentPreviewRequest = "";
 });
+
+const columns = computed<DataTableColumns<BackupSummary>>(() => {
+  void workspace.preview.value;
+  void restoreBusy.value;
+  void deleteBusy.value;
+  return [
+  { title: "时间", key: "createdAt", render: item => formatDate(item.createdAt) },
+  { title: "模式", key: "captureMode", render: item => modeLabel(item.captureMode) },
+  { title: "原因", key: "reason", render: item => item.reason },
+  { title: "DST build", key: "dstBuild", render: item => h("span", { class: "mono" }, item.dstBuild ?? "未知") },
+  { title: "大小", key: "sizeBytes", render: item => formatBytes(item.sizeBytes) },
+  {
+    title: "校验",
+    key: "verification",
+    render: item => h(StatusLabel, { tone: verificationTone(item.verification), label: verificationLabel(item.verification) }),
+  },
+  {
+    title: "恢复能力",
+    key: "restorability",
+    render: item => item.restorability === "restorable" ? "可恢复"
+      : item.restorability === "missingArtifacts" ? "缺少产物"
+      : item.restorability === "incompatible" ? "不兼容" : "待确认",
+  },
+  {
+    title: "",
+    key: "actions",
+    align: "center",
+    render: item => h("div", { class: "row-actions" }, [
+      h(IconButton, {
+        label: "下载备份",
+        disabled: workspace.preview.value,
+        onClick: () => void downloadBackup(item),
+      }, () => h(Download, { size: 15 })),
+      h(IconButton, {
+        label: "恢复备份",
+        disabled: workspace.preview.value || restoreBusy.value || item.verification !== "verified",
+        onClick: () => void prepareRestore(item),
+      }, () => h(RotateCcw, { size: 15 })),
+      h(IconButton, {
+        label: !item.checksum ? "缺少校验信息，不能删除" : deleteBusy.value ? "删除操作进行中" : "删除备份",
+        disabled: workspace.preview.value || deleteBusy.value || !item.checksum,
+        tone: "danger",
+        onClick: () => prepareDelete(item),
+      }, () => h(Trash2, { size: 15 })),
+    ]),
+  },
+  ];
+});
+const rowKey = (item: BackupSummary) => item.backupId;
 </script>
 
 <template>
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="备份">
       <template #actions>
-        <button class="button primary" :disabled="createBusy || pageLoading || revision === null || workspace.preview.value" @click="openCreateDialog">
-          <Plus :size="16"/>
+        <NButton type="primary" :disabled="createBusy || pageLoading || revision === null || workspace.preview.value" @click="openCreateDialog">
+          <template #icon><Plus :size="16"/></template>
           {{ createBusy ? "备份中…" : pendingCreate ? "重试原请求" : "创建备份" }}
-        </button>
-        <button class="button" :disabled="pageLoading || previewLoading || revision === null || workspace.preview.value" @click="refreshPage">
-          <RefreshCw :size="16"/>
+        </NButton>
+        <NButton :disabled="pageLoading || previewLoading || revision === null || workspace.preview.value" @click="refreshPage">
+          <template #icon><RefreshCw :size="16"/></template>
           {{ pageLoading || previewLoading ? "读取中…" : "刷新" }}
-        </button>
+        </NButton>
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <SummaryBar v-if="items.length" :items="backupSummary" label="备份摘要"/>
     <div v-if="error" class="error-strip" role="alert">{{ error }}</div>
-    <div v-if="pageLoading" class="empty-state" role="status"><h2>正在读取备份</h2></div>
-    <div v-else-if="!items.length" class="empty-state"><h2>暂无备份</h2></div>
-    <div v-else class="table-wrap">
-      <table>
-        <thead><tr><th>时间</th><th>模式</th><th>原因</th><th>DST build</th><th>大小</th><th>校验</th><th>恢复能力</th><th/></tr></thead>
-        <tbody>
-          <tr v-for="item in items" :key="item.backupId">
-            <td>{{ formatDate(item.createdAt) }}</td>
-            <td>{{ modeLabel(item.captureMode) }}</td>
-            <td>{{ item.reason }}</td>
-            <td class="mono">{{ item.dstBuild ?? "未知" }}</td>
-            <td>{{ formatBytes(item.sizeBytes) }}</td>
-            <td><StatusLabel :tone="verificationTone(item.verification)" :label="verificationLabel(item.verification)"/></td>
-            <td>{{ item.restorability === "restorable" ? "可恢复" : item.restorability === "missingArtifacts" ? "缺少产物" : item.restorability === "incompatible" ? "不兼容" : "待确认" }}</td>
-            <td class="table-action">
-              <button class="icon-button" :disabled="workspace.preview.value" title="下载" @click="downloadBackup(item)"><Download :size="15"/></button>
-              <button class="icon-button" :disabled="workspace.preview.value || restoreBusy || item.verification !== 'verified'" title="恢复" @click="prepareRestore(item)"><RotateCcw :size="15"/></button>
-              <button class="icon-button danger" :disabled="workspace.preview.value || deleteBusy || !item.checksum"
-                :title="!item.checksum ? '缺少校验信息，不能删除' : deleteBusy ? '删除操作进行中' : '删除备份'"
-                @click="prepareDelete(item)"><Trash2 :size="15"/></button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <template v-if="pageLoading || items.length">
+      <div class="table-wrap">
+        <NDataTable :columns="columns" :data="items" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="pageLoading"/>
+      </div>
+    </template>
+    <div v-else class="empty-state"><h2>暂无备份</h2></div>
     <section v-if="downloadTasks.length" class="backup-task-list" aria-label="备份下载任务">
       <div v-for="task in downloadTasks" :key="task.operationId" class="download-task">
         <span>{{ task.status === "succeeded" ? "下载完成" : task.status === "running" ? "正在下载" : "下载中断" }}</span>
         <span class="mono">{{ task.backupId }}</span>
         <span>{{ task.bytesTransferred ? formatBytes(task.bytesTransferred) : "待开始" }}</span>
-        <button v-if="task.status === 'interrupted'" class="button" :disabled="workspace.preview.value" @click="retryDownload(task)">继续下载</button>
+        <NButton v-if="task.status === 'interrupted'" size="small" :disabled="workspace.preview.value" @click="retryDownload(task)">继续下载</NButton>
       </div>
     </section>
 <FloatingTask v-if="activeTask" label="备份任务">
@@ -665,28 +688,25 @@ onBeforeUnmount(() => {
       <p v-if="mode && previewLoading" class="muted-text">正在校验{{ modeLabel(mode) }}条件…</p>
       <p v-else-if="mode && preview && !preview.allowed" class="environment-error">当前条件不满足{{ modeLabel(mode) }}。</p>
       <template #footer>
-        <button class="button" type="button" :disabled="createBusy" @click="closeCreateDialog(false)">取消</button>
-        <button class="button primary" type="button" :disabled="createBusy || previewLoading || !mode || !preview?.allowed || workspace.preview.value" @click="createBackup">
+        <NButton :disabled="createBusy" @click="closeCreateDialog(false)">取消</NButton>
+        <NButton type="primary" :disabled="createBusy || previewLoading || !mode || !preview?.allowed || workspace.preview.value" @click="createBackup">
           {{ createBusy ? "提交中…" : "创建备份" }}
-        </button>
+        </NButton>
       </template>
     </AppDialog>
 <AppDialog :open="!!restoreTarget" title="恢复备份" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; restoreModWarnings = []; } }">
       <p v-if="restoreTarget">将恢复 <span class="mono">{{ restoreTarget.backupId }}</span></p>
       <p class="muted-text">MOD 使用主机库当前最新版本；主机库缺少 MOD 时会提示，但不会阻止恢复</p>
       <p v-if="restoreModWarnings.length" class="backup-warning">{{ restoreModWarnings.join("；") }}。缺少 MOD 时继续恢复可能导致世界崩溃。</p>
-      <label class="backup-restore-option">
-        <input v-model="restoreProtection" type="checkbox" :disabled="restoreBusy" />
-        <span>恢复前创建备份</span>
-      </label>
+      <NCheckbox v-model:checked="restoreProtection" :disabled="restoreBusy" class="backup-restore-option">恢复前创建备份</NCheckbox>
       <p class="form-hint">保护备份用于失败回滚；不勾选会直接替换当前世界</p>
       <p v-if="restoreError" class="error-strip" role="alert">{{ restoreError }}</p>
-      <template #footer><button class="button" :disabled="restoreBusy" @click="restoreTarget = null; restoreError = ''; restoreModWarnings = []">取消</button><button class="button primary" :disabled="restoreBusy || workspace.preview.value" @click="restoreBackup">{{ restoreBusy ? "检测并开始恢复…" : "确认恢复" }}</button></template>
+      <template #footer><NButton :disabled="restoreBusy" @click="restoreTarget = null; restoreError = ''; restoreModWarnings = []">取消</NButton><NButton type="primary" :disabled="restoreBusy || workspace.preview.value" @click="restoreBackup">{{ restoreBusy ? "检测并开始恢复…" : "确认恢复" }}</NButton></template>
     </AppDialog>
     <AppDialog :open="!!deleteTarget" title="删除备份" description="此操作会永久删除远端归档，不能撤销。" @update:open="value => { if (!value && !deleteBusy) { deleteTarget = null; deleteError = ''; } }">
       <p v-if="deleteTarget">确定删除 <span class="mono">{{ deleteTarget.backupId }}</span>（{{ formatBytes(deleteTarget.sizeBytes) }}）？</p>
       <p v-if="deleteError" class="error-strip" role="alert">{{ deleteError }}</p>
-      <template #footer><button class="button" :disabled="deleteBusy" @click="deleteTarget = null">取消</button><button class="button danger" :disabled="deleteBusy || workspace.preview.value" @click="deleteBackup">{{ deleteBusy ? "删除中…" : "永久删除" }}</button></template>
+      <template #footer><NButton :disabled="deleteBusy" @click="deleteTarget = null">取消</NButton><NButton type="error" ghost :disabled="deleteBusy || workspace.preview.value" @click="deleteBackup">{{ deleteBusy ? "删除中…" : "永久删除" }}</NButton></template>
     </AppDialog>
   </div>
 </template>

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { Eye, Library, Package, Pencil, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
+import { computed, h, ref, watch } from "vue";
+import { ArrowUpCircle, Check, Eye, Library, Package, Pencil, Plus, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
+import { NButton, NCheckbox, NDataTable, NInput, NInputNumber, type DataTableColumns } from "naive-ui";
 import AppDialog from "../components/AppDialog.vue";
 import OptionSelect, { type OptionSelectItem } from "../components/OptionSelect.vue";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
-import SummaryBar from "../components/SummaryBar.vue";
+import IconButton from "../components/IconButton.vue";
+import LoadingState from "../components/LoadingState.vue";
 import { applyInstanceMods, listInstanceModApplyTasks,
   cancelInstanceModApply, listInstanceMods, previewInstanceMods, saveInstanceMods } from "../api/mods";
 import { getInstanceOverview } from "../api/instances";
@@ -119,16 +121,6 @@ let epoch = 0;
 let sequence = 0;
 let latestRequestId = "";
 const finalizedPrepareTasks = new Set<string>();
-
-const enabledCount = computed(() => items.value.filter(item => item.desiredEnabled === true).length);
-const pendingCount = computed(() => items.value.filter(modNeedsApply).length);
-const disabledCount = computed(() => items.value.filter(item => item.desiredEnabled === false).length);
-const modSummary = computed(() => [
-  { label: "MOD", value: items.value.length },
-  { label: "已启用", value: enabledCount.value, tone: "success" as const },
-  { label: "待应用", value: pendingCount.value, tone: pendingCount.value ? "warning" as const : "default" as const },
-  { label: "已禁用", value: disabledCount.value },
-]);
 
 function statusLabel(status: ModSchemaStatus) {
   return { available: "可配置", partial: "部分支持", noOptions: "无配置项", unavailable: "未准备", failed: "解析失败" }[status];
@@ -481,14 +473,13 @@ function updateOptionSelection(group: ModFieldGroup, value: string) {
   configDraft.value = { ...configDraft.value, [group.name]: group.options[index]!.value };
 }
 
-function updateScalarField(group: ModFieldGroup, event: Event) {
-  const input = event.target;
-  if (!(input instanceof HTMLInputElement)) return;
-  const value: unknown = group.control === "boolean" ? input.checked
-    : group.control === "number" ? input.value === "" ? "" : Number(input.value)
-      : input.value;
+function setScalarField(group: ModFieldGroup, value: unknown) {
   configDraft.value = { ...configDraft.value, [group.name]: value };
   markConfigurationChanged(group.name);
+}
+function scalarNumberValue(group: ModFieldGroup): number | null {
+  const value = scalarFieldValue(group);
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function resetConfigurationField(group: ModFieldGroup) {
@@ -764,21 +755,152 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
   void refreshApplyTasks();
   void loadHostLibrary();
 }, { immediate: true });
+
+const modColumns = computed<DataTableColumns<InstanceModSummary>>(() => {
+  void workspace.preview.value;
+  void savingWorkshopId.value;
+  void configSaving.value;
+  void loading.value;
+  void applyTask.value;
+  void hostLibraryItems.value;
+  return [
+  {
+    title: "MOD",
+    key: "name",
+    render: item => {
+      const metadata = hostMetadataFor(item);
+      return h("div", { class: "instance-mod-main" }, [
+        metadata?.previewUrl
+          ? h("img", { class: "instance-mod-thumb", src: versionedPreview(metadata.previewUrl, metadata.contentDigest), alt: instanceModName(item), width: 40, height: 40, loading: "lazy" })
+          : h("span", { class: "instance-mod-thumb instance-mod-placeholder" }, [h(Package, { size: 17 })]),
+        h("span", { class: "instance-mod-copy" }, [
+          h("strong", instanceModName(item)),
+          h("small", { class: "table-sub mono" }, `Workshop · ${item.workshopId}`),
+        ]),
+      ]);
+    },
+  },
+  {
+    title: "期望状态",
+    key: "desiredEnabled",
+    render: item => h(StatusLabel, {
+      tone: item.desiredEnabled === null ? "warning" : item.desiredEnabled ? "success" : "muted",
+      label: item.desiredEnabled === null ? "已移出期望" : item.desiredEnabled ? "启用" : "禁用",
+    }),
+  },
+  {
+    title: "实际部署",
+    key: "deployed",
+    render: item => h("div", null, [
+      h(StatusLabel, { tone: modNeedsApply(item) ? "warning" : "success", label: modNeedsApply(item) ? "待应用" : "一致" }),
+      h("small", { class: "table-sub" }, item.deployedVersion ? displayVersion(item.deployedVersion) : "运行版本未知"),
+    ]),
+  },
+  {
+    title: "配置解析",
+    key: "schema",
+    render: item => h(StatusLabel, { tone: statusTone(item.schema.status), label: statusLabel(item.schema.status) }),
+  },
+  {
+    title: "版本摘要",
+    key: "version",
+    render: item => h("span", { class: "mono", title: schemaDiagnostic(item) }, displayVersion(instanceModVersion(item))),
+  },
+  {
+    title: "",
+    key: "actions",
+    align: "center",
+    render: item => {
+      const applying = !!applyTask.value && ["queued", "running"].includes(applyTask.value.status);
+      const actions = [];
+      if (item.desiredEnabled !== null) {
+        actions.push(h(IconButton, {
+          label: item.desiredEnabled ? "禁用 MOD" : "启用 MOD",
+          disabled: workspace.preview.value || savingWorkshopId.value !== null || applying,
+          onClick: () => void setModEnabled(item),
+        }, () => h(Power, { size: 15 })));
+        actions.push(h(IconButton, {
+          label: "移除 MOD",
+          disabled: workspace.preview.value || savingWorkshopId.value !== null || applying,
+          tone: "danger",
+          onClick: () => { removeTarget.value = item; removeError.value = ""; },
+        }, () => h(Trash2, { size: 15 })));
+      }
+      if (canEditConfiguration(item)) {
+        actions.push(h(IconButton, {
+          label: "编辑配置",
+          disabled: workspace.preview.value || configSaving.value || loading.value,
+          onClick: () => void openConfigurationEditor(item),
+        }, () => h(Pencil, { size: 15 })));
+      }
+      return h("div", { class: "row-actions" }, actions);
+    },
+  },
+  ];
+});
+const modRowKey = (item: InstanceModSummary) => item.workshopId;
+
+const hostLibraryColumns = computed<DataTableColumns<HostModItem>>(() => {
+  void hostLibrarySelected.value;
+  void savingWorkshopId.value;
+  void items.value;
+  void hostLibraryItems.value;
+  return [
+  {
+    title: "",
+    key: "select",
+    width: 34,
+    render: item => h("input", {
+      type: "checkbox",
+      checked: hostLibrarySelected.value.has(hostLibraryKey(item)),
+      disabled: isHostLibraryCurrent(item) || savingWorkshopId.value !== null,
+      onChange: () => toggleHostLibraryItem(item),
+    }),
+  },
+  {
+    title: "图片",
+    key: "preview",
+    render: item => item.previewUrl
+      ? h("img", { class: "host-library-thumb", src: item.previewUrl, alt: item.name ?? item.workshopId, width: 40, height: 40, loading: "lazy" })
+      : h("span", { class: "host-library-thumb host-library-placeholder" }, [h(Package, { size: 16 })]),
+  },
+  { title: "名称", key: "name", render: item => h("strong", { class: "host-library-name" }, item.name ?? "—") },
+  { title: "ID", key: "workshopId", render: item => h("span", { class: "mono" }, item.workshopId) },
+  { title: "作者", key: "author", render: item => item.author ?? "未知" },
+  { title: "版本", key: "version", render: item => h("span", { class: "mono" }, item.version ?? "—") },
+  {
+    title: "",
+    key: "actions",
+    align: "center",
+    render: item => {
+      const current = isHostLibraryCurrent(item);
+      const updating = !!currentHostMod(item);
+      const Icon = current ? Check : updating ? ArrowUpCircle : Plus;
+      return h(IconButton, {
+        label: current ? "已在实例" : updating ? "更新到此版本" : savingWorkshopId.value === item.workshopId ? "保存中…" : "加入实例",
+        disabled: savingWorkshopId.value !== null || current,
+        onClick: () => void addHostLibraryItem(item),
+      }, () => h(Icon, { size: 15 }));
+    },
+  },
+  ];
+});
+const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
 </script>
 
 <template>
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="MOD">
       <template #actions>
-        <button class="button" :disabled="workspace.preview.value || !target || loading || applyPreviewLoading || savingWorkshopId !== null
+        <NButton :disabled="workspace.preview.value || !target || loading || applyPreviewLoading || savingWorkshopId !== null
           || !!applyTask && ['queued', 'running'].includes(applyTask.status)
           "
-          @click="openApplyPreview"><Eye :size="15"/>应用更改</button>
-        <button class="button" :disabled="workspace.preview.value || !target || loading" @click="openHostLibrary"><Library :size="15"/>主机库</button>
-        <button class="button" :disabled="loading || !target" @click="refreshAll">
-          <RefreshCw :size="16" :class="{ spinning: loading }" />
+          @click="openApplyPreview"><template #icon><Eye :size="15"/></template>应用更改</NButton>
+        <NButton :disabled="workspace.preview.value || !target || loading" @click="openHostLibrary"><template #icon><Library :size="15"/></template>主机库</NButton>
+        <NButton :disabled="loading || !target" @click="refreshAll">
+          <template #icon><RefreshCw :size="16" :class="{ spinning: loading }"/></template>
           刷新
-        </button>
+        </NButton>
       </template>
     </PageHeader>
 
@@ -786,50 +908,12 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
     <div v-if="taskError" class="error-strip">{{ taskError }}</div>
     <div v-if="applyTaskError" class="error-strip">{{ applyTaskError }}</div>
 
-    <SummaryBar v-if="revision !== null" :items="modSummary" label="MOD 摘要"/>
-    <div v-if="loading && items.length === 0" class="empty-state"><h2>正在读取 MOD</h2></div>
-    <div v-else-if="!loading && items.length === 0" class="empty-state"><h2>尚未发现 MOD</h2></div>
-    <div v-else class="table-wrap">
-      <table>
-        <thead><tr><th>MOD</th><th>期望状态</th><th>实际部署</th><th>配置解析</th><th>版本摘要</th><th class="table-action">操作</th></tr></thead>
-        <tbody>
-          <tr v-for="item in items" :key="item.workshopId">
-            <td>
-              <div class="instance-mod-main">
-                <img v-if="hostMetadataFor(item)?.previewUrl" class="instance-mod-thumb" :src="versionedPreview(hostMetadataFor(item)?.previewUrl ?? null, hostMetadataFor(item)?.contentDigest ?? null)" :alt="instanceModName(item)" width="40" height="40" loading="lazy"/>
-                <span v-else class="instance-mod-thumb instance-mod-placeholder"><Package :size="17"/></span>
-                <span class="instance-mod-copy">
-                  <strong>{{ instanceModName(item) }}</strong>
-                  <small class="table-sub mono">Workshop · {{ item.workshopId }}</small>
-                </span>
-              </div>
-            </td>
-            <td><StatusLabel :tone="item.desiredEnabled === null ? 'warning' : item.desiredEnabled ? 'success' : 'muted'" :label="item.desiredEnabled === null ? '已移出期望' : item.desiredEnabled ? '启用' : '禁用'" /></td>
-            <td>
-              <StatusLabel :tone="modNeedsApply(item) ? 'warning' : 'success'" :label="modNeedsApply(item) ? '待应用' : '一致'" />
-              <small class="table-sub">{{ item.deployedVersion ? displayVersion(item.deployedVersion) : '运行版本未知' }}</small>
-            </td>
-            <td><StatusLabel :tone="statusTone(item.schema.status)" :label="statusLabel(item.schema.status)" /></td>
-            <td class="mono"><span :title="schemaDiagnostic(item)">{{ displayVersion(instanceModVersion(item)) }}</span></td>
-            <td class="table-action">
-              <button v-if="item.desiredEnabled !== null" class="icon-button" type="button"
-                :aria-label="item.desiredEnabled ? `禁用 ${instanceModName(item)}` : `启用 ${instanceModName(item)}`"
-                :title="item.desiredEnabled ? '禁用 MOD' : '启用 MOD'"
-                :disabled="workspace.preview.value || savingWorkshopId !== null || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
-                @click="setModEnabled(item)"><Power :size="15"/></button>
-              <button v-if="item.desiredEnabled !== null" class="icon-button" type="button"
-                :aria-label="`移除 ${instanceModName(item)}`" title="移除 MOD"
-                :disabled="workspace.preview.value || savingWorkshopId !== null || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
-                @click="removeTarget = item; removeError = ''"><Trash2 :size="15"/></button>
-              <button v-if="canEditConfiguration(item)" class="icon-button" type="button"
-                :aria-label="`编辑 ${instanceModName(item)} 配置`"
-                title="编辑配置" :disabled="workspace.preview.value || configSaving || loading"
-                @click="openConfigurationEditor(item)"><Pencil :size="15"/></button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <template v-if="loading || items.length">
+      <div class="table-wrap">
+        <NDataTable :columns="modColumns" :data="items" :bordered="false" :single-line="true" size="medium" :row-key="modRowKey" :loading="loading"/>
+      </div>
+    </template>
+    <div v-else class="empty-state"><h2>尚未发现 MOD</h2></div>
 
 <FloatingTask v-if="applyTask" label="MOD 应用">
     <TaskPanel v-if="applyTask" title="应用 MOD" :status-label="applyTaskStatusLabel" :stage-label="applyStageLabel(applyTask)"
@@ -845,40 +929,18 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
       <template v-else-if="hostLibraryItems.length">
         <div class="host-library-toolbar">
           <span class="muted-text">已选 {{ selectedHostLibraryItems.length }}</span>
-          <button class="text-button" type="button" :disabled="!hostLibraryCandidates.length || savingWorkshopId !== null" @click="toggleAllHostLibrary">{{ allHostLibrarySelected ? "取消全选" : "全选未加入" }}</button>
+          <NButton text size="small" :disabled="!hostLibraryCandidates.length || savingWorkshopId !== null" @click="toggleAllHostLibrary">{{ allHostLibrarySelected ? "取消全选" : "全选未加入" }}</NButton>
         </div>
         <div class="table-wrap">
-          <table class="host-library-table">
-            <thead><tr><th class="host-library-check"><input type="checkbox" :checked="allHostLibrarySelected" :disabled="!hostLibraryCandidates.length || savingWorkshopId !== null" @change="toggleAllHostLibrary"/></th><th>图片</th><th>名称</th><th>ID</th><th>作者</th><th>版本</th><th class="table-action">操作</th></tr></thead>
-            <tbody>
-              <tr v-for="item in hostLibraryItems" :key="`${item.workshopId}:${item.contentDigest}`">
-                <td class="host-library-check"><input type="checkbox" :checked="hostLibrarySelected.has(hostLibraryKey(item))" :disabled="isHostLibraryCurrent(item) || savingWorkshopId !== null" @change="toggleHostLibraryItem(item)"/></td>
-                <td>
-                  <img v-if="item.previewUrl" class="host-library-thumb" :src="item.previewUrl" :alt="item.name ?? item.workshopId" width="40" height="40" loading="lazy"/>
-                  <span v-else class="host-library-thumb host-library-placeholder"><Package :size="16"/></span>
-                </td>
-                <td><strong class="host-library-name">{{ item.name ?? "—" }}</strong></td>
-                <td class="mono">{{ item.workshopId }}</td>
-                <td>{{ item.author ?? "未知" }}</td>
-                <td class="mono">{{ item.version ?? "—" }}</td>
-                <td class="table-action">
-                  <button class="text-button" type="button"
-                    :disabled="savingWorkshopId !== null || isHostLibraryCurrent(item)"
-                    @click="addHostLibraryItem(item)">
-                    {{ isHostLibraryCurrent(item) ? "已在实例" : currentHostMod(item) ? "更新到此版本" : savingWorkshopId === item.workshopId ? "保存中…" : "加入实例" }}
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <NDataTable :columns="hostLibraryColumns" :data="hostLibraryItems" :bordered="false" :single-line="true" size="medium" :row-key="hostLibraryRowKey"/>
         </div>
       </template>
       <div v-else class="empty-state"><h2>主机 MOD 库为空</h2><p class="muted-text">请先在主机级“MOD 库”添加内容。</p></div>
       <template #footer>
-        <button class="button" type="button" @click="hostLibraryOpen = false">关闭</button>
-        <button class="button primary" type="button" :disabled="savingWorkshopId !== null || !selectedHostLibraryItems.length" @click="addSelectedHostLibrary">
+        <NButton @click="hostLibraryOpen = false">关闭</NButton>
+        <NButton type="primary" :disabled="savingWorkshopId !== null || !selectedHostLibraryItems.length" @click="addSelectedHostLibrary">
           {{ savingWorkshopId === "__batch__" ? "保存中…" : `加入所选${selectedHostLibraryItems.length ? ` (${selectedHostLibraryItems.length})` : ""}` }}
-        </button>
+        </NButton>
       </template>
     </AppDialog>
 
@@ -900,15 +962,17 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
           <OptionSelect v-if="group.control === 'choice'" :model-value="configOptionSelection[group.name] ?? ''"
             :options="configOptionsFor(group)" :label="group.label" :disabled="configSaving"
             @update:model-value="updateOptionSelection(group, $event)"/>
-          <label v-else-if="group.control === 'boolean'" class="mod-config-toggle" :for="`mod-config-${group.name}`">
-            <input :id="`mod-config-${group.name}`" type="checkbox" :checked="scalarFieldValue(group) === true"
-              :disabled="configSaving" @change="updateScalarField(group, $event)" />
-            <span>{{ scalarFieldValue(group) === true ? '开启' : '关闭' }}</span>
-          </label>
-          <input v-else-if="group.control === 'number'" :id="`mod-config-${group.name}`" type="number" step="any"
-            :value="scalarFieldValue(group)" :disabled="configSaving" @input="updateScalarField(group, $event)" />
-          <input v-else-if="group.control === 'text'" :id="`mod-config-${group.name}`" type="text"
-            :value="scalarFieldValue(group)" :disabled="configSaving" @input="updateScalarField(group, $event)" />
+          <NCheckbox v-else-if="group.control === 'boolean'" class="mod-config-toggle"
+            :checked="scalarFieldValue(group) === true" :disabled="configSaving"
+            @update:checked="value => setScalarField(group, value)">
+            {{ scalarFieldValue(group) === true ? '开启' : '关闭' }}
+          </NCheckbox>
+          <NInputNumber v-else-if="group.control === 'number'" :value="scalarNumberValue(group)" placeholder=""
+            :disabled="configSaving" :show-button="false" :input-props="{ id: `mod-config-${group.name}` }"
+            @update:value="value => setScalarField(group, value ?? '')"/>
+          <NInput v-else-if="group.control === 'text'" :value="String(scalarFieldValue(group) ?? '')" placeholder=""
+            :disabled="configSaving" :input-props="{ id: `mod-config-${group.name}` }"
+            @update:value="value => setScalarField(group, value)"/>
           <div v-else class="mod-config-unsupported">{{ group.issue ?? group.fields[0]?.reason ?? '此配置项的类型无法安全编辑' }}</div>
           <small v-if="group.hover" class="mod-config-hover">{{ group.hover }}</small>
           <small v-if="fieldValueMismatch(group)" class="mod-config-warning">当前保存值与此版本可选值不匹配；保存其他项不会覆盖它</small>
@@ -917,15 +981,15 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
       <div v-if="configError" class="error-strip">{{ configError }}</div>
       <div v-if="configValidationError" class="error-strip">{{ configValidationError }}</div>
       <template #footer>
-        <button class="button" type="button" :disabled="configSaving" @click="configEditorOpen = false">取消</button>
-        <button class="button primary" type="button"
+        <NButton :disabled="configSaving" @click="configEditorOpen = false">取消</NButton>
+        <NButton type="primary"
           :disabled="configSaving || workspace.preview.value || configChangedFields.length === 0 || !!configValidationError"
-          @click="saveConfiguration">{{ configSaving ? '保存中…' : '保存配置' }}</button>
+          @click="saveConfiguration">{{ configSaving ? '保存中…' : '保存配置' }}</NButton>
       </template>
     </AppDialog>
 
     <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容、分片与恢复条件" size="lg">
-      <div v-if="applyPreviewLoading" class="empty-state"><h2>正在核对应用条件</h2></div>
+      <LoadingState v-if="applyPreviewLoading" compact description="正在核对应用条件"/>
       <div v-else-if="applyPreviewError" class="inline-error">{{ applyPreviewError }}</div>
       <div v-else-if="applyPreview" class="mod-apply-preview">
         <div class="mod-apply-summary">
@@ -945,10 +1009,7 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
         </section>
         <section v-if="applyPreview.changes.length" class="mod-apply-section">
           <h3>应用前备份</h3>
-          <label class="mod-backup-choice">
-            <input v-model="createProtectionBackup" type="checkbox"/>
-            应用前创建冷备份
-          </label>
+          <NCheckbox v-model:checked="createProtectionBackup" class="mod-backup-choice">应用前创建冷备份</NCheckbox>
         </section>
         <div v-if="applyPreview.warnings.length" class="mod-preview-warning-list">
           <p v-for="warning in applyPreview.warnings" :key="warning">{{ warning }}</p>
@@ -959,12 +1020,12 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
         </div>
       </div>
       <template #footer>
-        <button class="button" type="button" @click="applyPreviewOpen = false">关闭</button>
-        <button class="button primary" type="button" :disabled="applyPreviewLoading || !applyPreview || applyPreviewStale"
-          @click="openApplyPreview">重新核对</button>
-        <button class="button primary" type="button" :disabled="applyPreviewLoading || applyBusy || !applyPreview?.canApply
+        <NButton @click="applyPreviewOpen = false">关闭</NButton>
+        <NButton type="primary" :disabled="applyPreviewLoading || !applyPreview || applyPreviewStale"
+          @click="openApplyPreview">重新核对</NButton>
+        <NButton type="primary" :disabled="applyPreviewLoading || applyBusy || !applyPreview?.canApply
           || !serverApplyPreview || applyPreviewStale || !!applyTask && ['queued', 'running'].includes(applyTask.status)"
-          @click="applyMods">{{ applyBusy ? '正在提交…' : '应用 MOD' }}</button>
+          @click="applyMods">{{ applyBusy ? '正在提交…' : '应用 MOD' }}</NButton>
       </template>
     </AppDialog>
 
@@ -977,10 +1038,10 @@ watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""
         <div v-if="removeError" class="error-strip" role="alert">{{ removeError }}</div>
       </div>
       <template #footer>
-        <button class="button" type="button" :disabled="removeBusy" @click="removeTarget = null">取消</button>
-        <button class="button primary" type="button" :disabled="removeBusy || workspace.preview.value" @click="confirmRemoveMod">
+        <NButton :disabled="removeBusy" @click="removeTarget = null">取消</NButton>
+        <NButton type="primary" :disabled="removeBusy || workspace.preview.value" @click="confirmRemoveMod">
           {{ removeBusy ? '移除中…' : '移除 MOD' }}
-        </button>
+        </NButton>
       </template>
     </AppDialog>
   </div>

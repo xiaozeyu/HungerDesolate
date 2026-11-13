@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, h, ref, watch } from "vue";
 import { RefreshCw, Terminal, AlertCircle } from "@lucide/vue";
+import { NButton, NDataTable, type DataTableColumns } from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import LoadingState from "../components/LoadingState.vue";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { getInstanceDiagnostics, type DiagnosticsResponse } from "../api/diagnostics";
@@ -55,16 +57,49 @@ watch(data, response => {
   if (!response) return;
   if (!response.logs.some(item => item.shard === selectedShard.value)) selectedShard.value = response.logs[0]?.shard ?? "master";
 }, { flush: "post" });
+
+type DiagnosticsTask = DiagnosticsResponse["tasks"][number];
+const columns = computed<DataTableColumns<DiagnosticsTask>>(() => [
+  {
+    title: "任务",
+    key: "taskId",
+    render: task => h("div", null, [
+      h("span", { class: "mono" }, task.taskId.slice(0, 8)),
+      h("small", { class: "table-sub" }, task.operation ?? "任务"),
+    ]),
+  },
+  {
+    title: "状态",
+    key: "status",
+    render: task => h(StatusLabel, { tone: task.status === "failed" ? "danger" : "warning", label: taskLabel(task.status) }),
+  },
+  { title: "阶段", key: "stage", render: task => task.stage ?? "—" },
+  { title: "错误", key: "errorCode", render: task => h("span", { class: "mono" }, task.errorCode ?? "—") },
+  {
+    title: "证据",
+    key: "evidence",
+    render: task => {
+      if (!task.journal.length && !task.recoverySteps.length) return h("span", { class: "muted-text" }, "—");
+      return h("details", null, [
+        h("summary", null, `${task.journal.length} 条`),
+        task.recoverySteps.length ? h("ul", null, task.recoverySteps.map(step => h("li", { key: step }, step))) : null,
+        task.journal.length ? h("ul", { class: "task-journal" }, task.journal.map(entry => h("li", { key: entry.sequence }, `${entry.stage} · ${entry.status}`))) : null,
+      ]);
+    },
+  },
+  { title: "时间", key: "time", render: task => formatTime(task.finishedAt ?? task.createdAt) },
+]);
+const taskRowKey = (task: DiagnosticsTask) => task.taskId;
 </script>
 
 <template>
   <div class="page">
     <PageHeader :eyebrow="instanceName" title="诊断">
       <template #actions>
-        <button class="button" :disabled="loading || workspace.preview.value || !target" @click="refresh">
-          <RefreshCw :size="16" :class="{ spinning: loading }"/>
+        <NButton size="small" :disabled="loading || workspace.preview.value || !target" @click="refresh">
+          <template #icon><RefreshCw :size="16" :class="{ spinning: loading }"/></template>
           {{ loading ? "读取中…" : "刷新证据" }}
-        </button>
+        </NButton>
       </template>
     </PageHeader>
     <PreviewNotice/>
@@ -73,7 +108,7 @@ watch(data, response => {
       <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
     </div>
     <div v-if="stale" class="error-strip" role="status">诊断刷新失败，当前显示上次结果</div>
-    <div v-if="loading && !data" class="empty-state" role="status"><h2>读取专服诊断…</h2></div>
+    <LoadingState v-if="loading && !data" description="读取专服诊断…"/>
     <div v-else-if="!data" class="empty-state" role="alert">
       <h2>{{ workspace.preview.value ? "诊断需要桌面连接" : "暂无诊断结果" }}</h2>
     </div>
@@ -135,22 +170,7 @@ watch(data, response => {
         </div>
         <div v-if="!data.tasks.length" class="empty-state"><h2>没有失败任务</h2></div>
         <div v-else class="table-wrap">
-          <table>
-            <thead><tr><th>任务</th><th>状态</th><th>阶段</th><th>错误</th><th>证据</th><th>时间</th></tr></thead>
-            <tbody>
-              <tr v-for="task in data.tasks" :key="task.taskId">
-                <td><span class="mono">{{ task.taskId.slice(0, 8) }}</span><small class="table-sub">{{ task.operation ?? '任务' }}</small></td>
-                <td><StatusLabel :tone="task.status === 'failed' ? 'danger' : 'warning'" :label="taskLabel(task.status)"/></td>
-                <td>{{ task.stage ?? '—' }}</td>
-                <td class="mono">{{ task.errorCode ?? '—' }}</td>
-                <td>
-                  <details v-if="task.journal.length || task.recoverySteps.length"><summary>{{ task.journal.length }} 条</summary><ul v-if="task.recoverySteps.length"><li v-for="step in task.recoverySteps" :key="step">{{ step }}</li></ul><ul v-if="task.journal.length" class="task-journal"><li v-for="entry in task.journal" :key="entry.sequence">{{ entry.stage }} · {{ entry.status }}</li></ul></details>
-                  <span v-else class="muted-text">—</span>
-                </td>
-                <td>{{ formatTime(task.finishedAt ?? task.createdAt) }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <NDataTable :columns="columns" :data="data.tasks" :bordered="false" :single-line="true" size="medium" :row-key="taskRowKey"/>
         </div>
       </section>
     </template>

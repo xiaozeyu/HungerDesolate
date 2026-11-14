@@ -69,8 +69,9 @@ test('app shell exposes a global task center and operation bar without the updat
   assert.doesNotMatch(backups, /scheduleRestorePoll|scheduleTaskPoll|getInstanceBackupTask|getInstanceRestoreTask/);
   assert.match(backups, /watch\(activeTask/);
   assert.match(backups, /const pageLoading = computed/);
-  assert.match(backups, /v-if="pageLoading \|\| items\.length"/);
   assert.match(backups, /:loading="pageLoading"/);
+  assert.match(backups, /#empty/);
+  assert.match(backups, /暂无备份/);
   assert.doesNotMatch(backups, /useInstanceOverview|overview\.refresh/);
   assert.match(backups, /listInstances/);
   assert.doesNotMatch(backups, /确认后会先检查归属、校验和、版本产物及空间/);

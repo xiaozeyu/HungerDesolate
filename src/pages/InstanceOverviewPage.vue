@@ -59,7 +59,8 @@ onBeforeUnmount(() => { mounted = false; });
 const name = computed(() => data.value?.identity.displayName ?? "专服");
 const runtimeStatus = computed(() => data.value?.runtime?.status ?? data.value?.identity.runtimeStatus ?? "unknown");
 const runtime = computed(() => data.value?.runtime);
-const shards = computed(() => runtime.value?.shards ?? []);
+const shards = computed(() => [...(runtime.value?.shards ?? [])].sort((left, right) =>
+  Number(left.shard !== "master") - Number(right.shard !== "master")));
 const ports = computed(() => runtime.value?.ports.filter(port => port.hostPort !== null) ?? []);
 const readyShards = computed(() => shards.value.filter(shard => shard.ready).length);
 const installedBuild = computed(() => runtime.value?.installedBuild ?? null);
@@ -279,7 +280,7 @@ const updateOptions = computed(() => updateCandidates.value.map(release => ({
       </div>
       <section class="section-block shard-section">
         <div class="section-heading">
-          <div><h2>分片状态</h2><p class="muted-text">容器、进程与 UDP 端口就绪情况</p></div>
+          <div><h2>分片状态</h2></div>
           <StatusLabel :tone="stale ? 'warning' : shards.length && readyShards === shards.length ? 'success' : 'warning'" :label="stale ? '状态可能已过期' : `${readyShards}/${shards.length} 就绪`"/>
         </div>
         <div v-if="shards.length" class="shard-grid">

@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from "vue";
-import { RefreshCw, Terminal, AlertCircle } from "@lucide/vue";
-import { NButton, NDataTable, type DataTableColumns } from "naive-ui";
+import { RefreshCw, ChevronDown, ChevronUp, AlertCircle } from "@lucide/vue";
+import {
+  NButton, NCollapseTransition, NDataTable, NLog, NRadioButton, NRadioGroup,
+  type DataTableColumns,
+} from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
+import IconButton from "../components/IconButton.vue";
 import LoadingState from "../components/LoadingState.vue";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { getInstanceDiagnostics, type DiagnosticsResponse } from "../api/diagnostics";
-import { formatBytes } from "../lib/environmentView";
 import { useQuery } from "../lib/queryClient";
 
 const { server, target, instanceName } = usePageTarget();
@@ -43,11 +46,31 @@ const stale = query.stale;
 const refresh = query.refresh;
 const shardLog = computed(() => data.value?.logs.find(item => item.shard === selectedShard.value) ?? null);
 const health = computed(() => data.value?.health ?? null);
-const runtimeLabel = computed(() => {
-  const value = health.value?.runtimeStatus;
-  return value === "running" ? "运行中" : value === "stopped" ? "已停止" : value === "degraded" ? "部分异常" : "待核实";
-});
-const shardLabel = (shard: "master" | "caves") => shard === "master" ? "Master" : "Caves";
+const logCollapsed = ref(false);
+const shardLabel = (shard: "master" | "caves") => shard === "master" ? "主世界" : "洞穴";
+function shardStatusLabel(status: string | null | undefined) {
+  if (!status) return "未找到容器";
+  if (status === "Up less than a second") return "已运行 不到 1 秒";
+  if (status.startsWith("Up ")) {
+    const value = status.slice(3)
+      .replace(/^about an hour$/i, "约 1 小时")
+      .replace(/^about a minute$/i, "约 1 分钟")
+      .replace(/^an hour$/i, "1 小时")
+      .replace(/^a minute$/i, "1 分钟")
+      .replace(/\(healthy\)$/i, "（健康）")
+      .replace(/\bweeks?\b/gi, "周")
+      .replace(/\bdays?\b/gi, "天")
+      .replace(/\bhours?\b/gi, "小时")
+      .replace(/\bminutes?\b/gi, "分钟")
+      .replace(/\bseconds?\b/gi, "秒");
+    return `已运行 ${value}`;
+  }
+  if (status.startsWith("Exited")) return "已停止";
+  if (status.startsWith("Restarting")) return "重启中";
+  if (status.startsWith("Created")) return "已创建";
+  if (status.startsWith("Paused")) return "已暂停";
+  return status;
+}
 const taskLabel = (status: string) => status === "failed" ? "失败" : status === "interrupted" ? "中断" : status;
 const formatTime = (value: string | null) => value ? new Date(value).toLocaleString() : "—";
 const warningLabel = (value: string) => value === "DOCKER_CONTAINERS_UNAVAILABLE" ? "无法读取 Docker 容器"
@@ -113,54 +136,41 @@ const taskRowKey = (task: DiagnosticsTask) => task.taskId;
       <h2>{{ workspace.preview.value ? "诊断需要桌面连接" : "暂无诊断结果" }}</h2>
     </div>
     <template v-else>
-      <section class="identity-strip">
-        <div><span class="label">运行状态</span><StatusLabel :tone="health?.runtimeStatus === 'running' ? 'success' : health?.runtimeStatus === 'degraded' ? 'danger' : 'muted'" :label="runtimeLabel"/></div>
-        <div><span class="label">配置版本</span><strong class="mono">{{ health?.configRevision ?? '—' }}</strong></div>
-        <div><span class="label">世界版本</span><strong class="mono">{{ health?.worldRevision ?? '—' }}</strong></div>
-        <div><span class="label">MOD 版本</span><strong class="mono">{{ health?.modsRevision ?? '—' }}</strong></div>
-        <div><span class="label">采集时间</span><span class="mono">{{ formatTime(data.capturedAt) }}</span></div>
-      </section>
-
       <section v-if="health?.warnings.length" class="environment-error" role="status">
         <strong>诊断发现</strong>
         <ul><li v-for="warning in health.warnings" :key="warning">{{ warningLabel(warning) }}</li></ul>
       </section>
 
-      <div class="diagnostic-grid">
-        <section class="section-block">
-          <div class="section-heading"><div><h2>运行证据</h2><p class="muted-text">容器、Release 与磁盘</p></div></div>
-          <dl class="creation-facts">
-            <div><dt>DST build</dt><dd class="mono">{{ health?.dstBuild ?? '未知' }}</dd></div>
-            <div><dt>Release ID</dt><dd class="mono">{{ health?.dstReleaseId ?? '—' }}</dd></div>
-            <div><dt>MOD Release</dt><dd class="mono">{{ health?.modsReleaseId ?? '—' }}</dd></div>
-            <div><dt>Docker</dt><dd>{{ health?.dockerVersion ?? '不可用' }}</dd></div>
-            <div><dt>可用磁盘</dt><dd>{{ health?.diskAvailableBytes == null ? '未知' : formatBytes(health.diskAvailableBytes) }}</dd></div>
-          </dl>
-        </section>
-        <section class="section-block">
-          <div class="section-heading"><div><h2>分片</h2><p class="muted-text">容器状态</p></div></div>
-          <div v-if="!health?.shards.length" class="muted-text">未采集到分片</div>
-          <div v-else class="shard-list">
-            <div v-for="shard in health.shards" :key="shard.shard" class="shard-row">
-              <strong>{{ shardLabel(shard.shard) }}</strong>
-              <StatusLabel :tone="shard.status?.startsWith('Up') ? 'success' : 'muted'" :label="shard.status ?? '未找到容器'"/>
-            </div>
+      <section class="section-block">
+        <div class="section-heading"><div><h2>分片</h2><p class="muted-text">容器状态</p></div></div>
+        <div v-if="!health?.shards.length" class="muted-text">未采集到分片</div>
+        <div v-else class="diagnostic-shard-grid">
+          <div v-for="shard in health.shards" :key="shard.shard" class="diagnostic-shard">
+            <strong>{{ shardLabel(shard.shard) }}</strong>
+            <StatusLabel :tone="shard.status?.startsWith('Up') ? 'success' : 'muted'" :label="shardStatusLabel(shard.status)"/>
           </div>
-        </section>
-      </div>
+        </div>
+      </section>
 
       <section class="section-block">
         <div class="section-heading">
           <div><h2>分片日志</h2><p class="muted-text">最近 200 行，已脱敏</p></div>
-          <Terminal :size="18"/>
         </div>
-        <div class="segmented" role="group" aria-label="日志分片">
-          <button v-for="log in data.logs" :key="log.shard" :aria-pressed="selectedShard === log.shard" @click="selectedShard = log.shard">{{ shardLabel(log.shard) }}</button>
+        <div class="diagnostic-log-toolbar">
+          <NRadioGroup v-model:value="selectedShard" size="small">
+            <NRadioButton v-for="log in data.logs" :key="log.shard" :value="log.shard">{{ shardLabel(log.shard) }}</NRadioButton>
+          </NRadioGroup>
+          <IconButton :label="logCollapsed ? '展开日志' : '收起日志'" @click="logCollapsed = !logCollapsed">
+            <ChevronDown v-if="logCollapsed" :size="16"/>
+            <ChevronUp v-else :size="16"/>
+          </IconButton>
         </div>
-        <div v-if="!shardLog?.available" class="muted-text">容器不可用，无法读取日志</div>
-        <div v-else-if="!shardLog.lines.length" class="muted-text">暂无日志</div>
-        <pre v-else class="log-window">{{ shardLog.lines.join("\n") }}</pre>
-        <p v-if="shardLog?.truncated" class="muted-text">日志已截断</p>
+        <NCollapseTransition :show="!logCollapsed">
+          <div v-if="!shardLog?.available" class="muted-text">容器不可用，无法读取日志</div>
+          <div v-else-if="!shardLog.lines.length" class="muted-text">暂无日志</div>
+          <NLog v-else :log="shardLog.lines.join('\n')" :rows="12" class="diagnostic-log"/>
+          <p v-if="shardLog?.truncated" class="muted-text log-truncated">日志已截断</p>
+        </NCollapseTransition>
       </section>
 
       <section class="section-block">
@@ -178,10 +188,12 @@ const taskRowKey = (task: DiagnosticsTask) => task.taskId;
 </template>
 
 <style scoped>
-.diagnostic-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-8); }
-.segmented { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius-control); overflow: hidden; margin-bottom: var(--space-4); }
-.segmented button { min-height: 34px; padding: 0 var(--space-4); border: 0; background: var(--surface); color: var(--text-secondary); cursor: pointer; }
-.segmented button + button { border-left: 1px solid var(--border); }
-.segmented button[aria-pressed="true"] { background: var(--surface-muted); color: var(--text); font-weight: 600; }
-@media (max-width: 720px) { .diagnostic-grid { grid-template-columns: 1fr; } }
+.diagnostic-shard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.diagnostic-shard { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.diagnostic-shard strong { font-size: 14px; }
+.diagnostic-log-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.diagnostic-log { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface-muted); }
+.diagnostic-log :deep(.n-code) { background: transparent; }
+.log-truncated { margin-top: 8px; }
+@media (max-width: 720px) { .diagnostic-shard-grid { grid-template-columns: 1fr; } }
 </style>

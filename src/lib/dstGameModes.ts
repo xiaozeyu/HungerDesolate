@@ -2,8 +2,8 @@ import type { WorldSettings } from "../types/world";
 
 export const dstGameModeOptions: ReadonlyArray<{ label: string; value: WorldSettings["gameMode"] }> = [
   { label: "轻松", value: "relaxed" },
-  { label: "生存", value: "survival" },
   { label: "无尽", value: "endless" },
+  { label: "生存", value: "survival" },
   { label: "荒野", value: "wilderness" },
   { label: "永夜", value: "lightsout" },
 ];

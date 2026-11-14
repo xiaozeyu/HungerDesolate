@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch, onBeforeUnmount } from "vue";
-import { NButton, NInput } from "naive-ui";
+import { NInput } from "naive-ui";
 import { isTauri } from "@tauri-apps/api/core";
 import AppSelect from "./AppSelect.vue";
 import CredentialFields from "./CredentialFields.vue";
@@ -12,7 +12,7 @@ import { describeError, type UserError } from "../lib/commandError";
 import { serverInput, validateServerForm, type ServerFields, type ServerFormErrors } from "../lib/serverForm";
 import { useWorkspace } from "../composables/useWorkspace";
 import type { SaveServerRequest, ServerSummary } from "../types/contracts";
-const props = defineProps<{server: ServerSummary | null; readonly?: boolean; formId: string}>();
+const props = defineProps<{server: ServerSummary | null; readonly?: boolean; formId: string; credentialConfigured?: boolean}>();
 const emit = defineEmits<{saved: [server: ServerSummary]; tested: [server: ServerSummary]; busy: [value: boolean]}>();
 const workspace = useWorkspace();
 const fields = reactive<ServerFields>({displayName: "", host: "", sshPort: "22", username: "root", authKind: "key"});
@@ -23,13 +23,22 @@ const baseVersion = ref<number | null>(null);
 const credentials = ref(emptyCredentials());
 const credentialFailure = ref<string | null>(null);
 const progress = ref<NewServerProgress | null>(null);
+let credentialEditVersion = 0;
+let credentialAttempt: {editVersion: number; baseVersion: number; operationId: string} | null = null;
 function editCredentials(value: CredentialValues) {
-  credentials.value = value; credentialFailure.value = null;
+  credentials.value = value; credentialFailure.value = null; credentialEditVersion++;
   if (progress.value && !busy.value) progress.value.credentialOperationId = crypto.randomUUID();
 }
 const dirty = ref(false);
 const changedElsewhere = computed(() => dirty.value && props.server !== null && baseVersion.value !== props.server.recordVersion);
 const authOptions = [{label: "SSH 密钥", value: "key"}, {label: "密码", value: "password"}];
+const authKindChanged = computed(() => !!props.server && props.server.authKind !== fields.authKind);
+const hasStoredCredential = computed(() => !!props.server && !!props.credentialConfigured);
+const credentialOptional = computed(() => !!props.server && hasStoredCredential.value && !authKindChanged.value);
+function hasNewCredential() {
+  if (fields.authKind === "password") return credentials.value.password.length > 0;
+  return (credentials.value.keySource === "file" ? credentials.value.privateKeyPath.trim() : credentials.value.privateKey.trim()).length > 0;
+}
 let attempt: {payload: string; request: SaveServerRequest} | null = null;
 let contextEpoch = 0;
 onBeforeUnmount(() => { contextEpoch++; credentials.value = emptyCredentials(); progress.value = null; });
@@ -38,6 +47,7 @@ function reset() {
   Object.assign(fields, {displayName: server?.displayName ?? "", host: server?.host ?? "", sshPort: String(server?.sshPort ?? 22), username: server?.username ?? "root", authKind: server?.authKind ?? "key"});
   baseVersion.value = server?.recordVersion ?? null; dirty.value = false;
   errors.value = {}; failure.value = null; attempt = null; credentials.value = emptyCredentials(); credentialFailure.value = null; progress.value = null;
+  credentialAttempt = null; credentialEditVersion++;
 }
 watch(() => props.server?.serverId, () => { contextEpoch++; busy.value = false; emit("busy", false); reset(); }, {immediate: true});
 watch(() => props.server?.recordVersion, () => { if (!dirty.value) reset(); });
@@ -45,9 +55,16 @@ function edited() { dirty.value = true; }
 function authChanged(value: string) { if (value === "password" || value === "key") { fields.authKind = value; edited(); } }
 async function save(test = false) {
   errors.value = validateServerForm(fields); failure.value = null;
-  credentialFailure.value = props.server ? null : credentialError(fields.authKind,credentials.value);
+  const credentialRequired = !props.server || authKindChanged.value || !hasStoredCredential.value;
+  const newCredential = hasNewCredential();
+  credentialFailure.value = (credentialRequired || newCredential)
+    ? credentialError(fields.authKind, credentials.value) : null;
   if (Object.keys(errors.value).length || credentialFailure.value || busy.value || props.readonly) return;
   if (!isTauri()) { failure.value = describeError(new Error("请用 npm run desktop:dev 启动桌面环境后保存")); return; }
+  if (props.server && !dirty.value && !authKindChanged.value && !newCredential) {
+    if (test) emit("tested", props.server); else emit("saved", props.server);
+    return;
+  }
   const epoch = contextEpoch;
   const payload = JSON.stringify({serverId: props.server?.serverId ?? null, expectedRecordVersion: baseVersion.value, input: serverInput(fields)});
   if (attempt?.payload !== payload) attempt = {payload, request: {schemaVersion: 1, requestId: crypto.randomUUID(), operationId: crypto.randomUUID(), serverId: props.server?.serverId ?? null, expectedRecordVersion: baseVersion.value, input: serverInput(fields)}};
@@ -64,16 +81,45 @@ async function save(test = false) {
       }
       return;
     }
-    const result = await workspace.save(attempt.request);
-    if (epoch === contextEpoch) {
+    let current = props.server;
+    if (dirty.value || authKindChanged.value) {
+      const result = await workspace.save(attempt.request);
+      if (epoch !== contextEpoch) return;
       const latest = workspace.servers.value.find(item => item.serverId === result.serverId);
       if (latest && latest.recordVersion !== result.recordVersion) {
         failure.value = {code: "REVISION_CONFLICT", message: "原保存操作已完成，但记录随后再次被修改", recoverySteps: ["保留输入，与最新记录比较后再保存"], field: null};
         return;
       }
+      current = latest ?? {...props.server, recordVersion: result.recordVersion};
       baseVersion.value = result.recordVersion; dirty.value = false; attempt = null;
-      if (test) emit("tested", result); else emit("saved", result);
     }
+    if (newCredential && baseVersion.value !== null) {
+      if (!credentialAttempt || credentialAttempt.editVersion !== credentialEditVersion
+          || credentialAttempt.baseVersion !== baseVersion.value)
+        credentialAttempt = {editVersion: credentialEditVersion, baseVersion: baseVersion.value,
+          operationId: crypto.randomUUID()};
+      const requestId = crypto.randomUUID();
+      const response = await saveCredentials({
+        schemaVersion: 1, requestId, serverId: current.serverId,
+        expectedRecordVersion: baseVersion.value, operationId: credentialAttempt.operationId,
+        credential: credentialInput(fields.authKind, credentials.value),
+      });
+      if (epoch !== contextEpoch) return;
+      if (response.schemaVersion !== 1 || response.requestId !== requestId
+          || response.serverId !== current.serverId || response.recordVersion !== baseVersion.value + 1)
+        throw new Error("凭据响应与当前主机不匹配，请刷新核实");
+      baseVersion.value = response.recordVersion;
+      credentials.value = emptyCredentials();
+      credentialFailure.value = null;
+      credentialAttempt = null;
+    }
+    await workspace.refresh();
+    if (epoch !== contextEpoch) return;
+    const latest = workspace.servers.value.find(item => item.serverId === props.server!.serverId)
+      ?? {...current, recordVersion: baseVersion.value ?? current.recordVersion};
+    baseVersion.value = latest.recordVersion;
+    dirty.value = false;
+    if (test) emit("tested", latest); else emit("saved", latest);
   } catch (cause) {
     if (epoch === contextEpoch) {
       const error = describeError(cause);
@@ -110,7 +156,8 @@ defineExpose({testConnection});
         <div class="form-field"><span>认证方式</span><AppSelect :model-value="fields.authKind" :options="authOptions" label="认证方式" :disabled="busy || readonly || !!progress" @update:model-value="authChanged"/></div>
       </div>
     </fieldset>
-    <CredentialFields v-if="!server" :model-value="credentials" :auth-kind="fields.authKind" :id-prefix="`${formId}-credential`" :disabled="busy || readonly" :error="credentialFailure" :allow-paste="false" @update:model-value="editCredentials"/>
-    <div class="form-actions"><NButton v-if="props.server" :disabled="busy || readonly" @click="reset">放弃输入并载入最新记录</NButton><slot name="actions" :busy="busy"/></div>
+    <CredentialFields :model-value="credentials" :auth-kind="fields.authKind" :id-prefix="`${formId}-credential`" :disabled="busy || readonly || !!progress" :error="credentialFailure" :allow-paste="false" @update:model-value="editCredentials"/>
+    <p v-if="credentialOptional" class="form-hint">留空保持当前凭据；输入新值将替换。</p>
+    <div v-if="$slots.actions" class="form-actions"><slot name="actions" :busy="busy"/></div>
   </form>
 </template>

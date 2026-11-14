@@ -35,8 +35,12 @@ test('host list connects directly and confirms fingerprints without a settings g
 
   assert.match(trust, /指纹已变化/);
   assert.match(trust, /确认指纹/);
-  assert.match(sshPanel, /FingerprintTrustDialog/);
-  assert.match(settings, /markVerified/);
+  assert.match(sshPanel, /getSshState/);
+  assert.doesNotMatch(sshPanel, /FingerprintTrustDialog|scanFingerprint|saveCredentials/);
+  assert.match(settings, /FingerprintTrustDialog/);
+  assert.match(settings, /hostConnection\.connect/);
+  assert.match(form, /saveCredentials/);
+  assert.doesNotMatch(form, /放弃输入并载入最新记录/);
 
   assert.match(environment, /管理目录需要通过初始化/);
   assert.match(registry, /检查注册表与实例清单或刷新/);

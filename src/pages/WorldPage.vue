@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from "vue";
-import { Eye, EyeOff, RefreshCw, Save, Upload } from "@lucide/vue";
-import { NButton, NInput, NInputNumber, NSwitch } from "naive-ui";
+import { computed, h, nextTick, reactive, ref, watch } from "vue";
+import { RefreshCw, RotateCcw, Upload } from "@lucide/vue";
+import {
+  NAlert, NButton, NCard, NDivider, NEmpty, NForm, NFormItem, NFormItemGi, NGrid,
+  NInput, NInputNumber, NMenu, NPopconfirm, NRadioButton, NRadioGroup, NSwitch,
+  NTabs, NTabPane, NTag, NText, type MenuOption,
+} from "naive-ui";
 import AppSelect from "../components/AppSelect.vue";
 import LoadingState from "../components/LoadingState.vue";
 import { notifyError, notifyInfo, notifySuccess } from "../naive/notify";
@@ -13,11 +17,11 @@ import { useOperations } from "../composables/useOperations";
 import { usePageTarget } from "../composables/usePageTarget";
 import { describeError, type UserError } from "../lib/commandError";
 import { dstGameModeOptions, languageOptions } from "../lib/dstGameModes";
-import { defaultWorldSettings, optionValue, optionValuesForShard, updateShardOption, visibleWorldOptions } from "../lib/dstWorldOptions";
+import { defaultWorldSettings, optionDefaultValue, optionValue, optionValuesForShard, resetShardGroup, updateShardOption, visibleWorldOptions } from "../lib/dstWorldOptions";
 import { copyWorldSettings } from "../lib/worldConfigDraft";
 import { clearWorldDraft, readWorldDraft, writeWorldDraft } from "../lib/worldDraft";
 import { operationTargetKey } from "../lib/operationView";
-import type { DstWorldCategory, DstWorldShard, WorldConfig, WorldSettings } from "../types/world";
+import type { DstWorldCategory, DstWorldOption, DstWorldShard, WorldConfig, WorldSettings } from "../types/world";
 
 const workspace = useWorkspace();
 const operations = useOperations();
@@ -32,9 +36,9 @@ const error = ref<UserError | null>(null);
 const tokenStatus = ref<WorldConfig["tokenStatus"]>("unknown");
 const passwordStatus = ref<WorldConfig["serverPasswordStatus"]>("unknown");
 const tokenValue = ref(""), passwordValue = ref("");
-const showToken = ref(false), showPassword = ref(false);
 const revealedToken = ref(""), revealedPassword = ref("");
 const revealLoading = ref(false), secretError = ref("");
+const listText = reactive({ whitelist: "", adminList: "", blocklist: "" });
 const passwordInput = computed({
   get: () => passwordValue.value || revealedPassword.value,
   set: (value: string) => { passwordValue.value = value; revealedPassword.value = ""; },
@@ -71,6 +75,26 @@ const optionGroups = computed(() => {
 });
 const selectedGroupOptions = computed(() => visibleOptions.value.filter((item) => item.group === activeGroup.value));
 const activeGroupLabel = computed(() => optionGroups.value.find((group) => group.key === activeGroup.value)?.label ?? "世界选项");
+const optionMenuOptions = computed<MenuOption[]>(() => optionGroups.value.map((group) => ({
+  key: group.key,
+  label: () => h("div", { class: "world-menu-item" }, [
+    h("span", { class: "world-menu-item-label" }, group.label),
+    h("span", { class: "world-menu-item-count" }, String(group.count)),
+  ]),
+})));
+function optionChanged(item: DstWorldOption) {
+  return optionValue(draft.worldgen[selectedShard.value], item, selectedShard.value)
+    !== optionDefaultValue(item, selectedShard.value);
+}
+const activeGroupChangedCount = computed(() => selectedGroupOptions.value.filter(optionChanged).length);
+
+function resetActiveGroup() {
+  const category = selectedCategory.value;
+  if (!category || activeGroupChangedCount.value === 0) return;
+  const shard = selectedShard.value;
+  draft.worldgen[shard] = resetShardGroup(draft.worldgen[shard], shard, activeGroup.value, category);
+  draftVersion.value++;
+}
 
 function selectView(view: typeof activeView.value) {
   activeView.value = view;
@@ -97,6 +121,9 @@ function copySettings(value: WorldSettings): WorldSettings {
 
 function assignSettings(value: WorldSettings) {
   Object.assign(draft, copySettings(value));
+  listText.whitelist = draft.advanced.whitelist.join("\n");
+  listText.adminList = draft.advanced.adminList.join("\n");
+  listText.blocklist = draft.advanced.blocklist.join("\n");
   if (!draft.cavesEnabled) selectedShard.value = "master";
 }
 
@@ -156,8 +183,6 @@ async function refresh() {
       baseRevision.value = response.configRevision;
       tokenValue.value = "";
       passwordValue.value = "";
-      showToken.value = false;
-      showPassword.value = false;
       revealedToken.value = "";
       revealedPassword.value = "";
       secretError.value = "";
@@ -183,7 +208,12 @@ async function refresh() {
 }
 
 function listDraft(value: string): string[] {
-  return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
+  return value.split("\n").map((item) => item.trim()).filter(Boolean);
+}
+
+function listStats(key: "adminList" | "whitelist" | "blocklist") {
+  const values = draft.advanced[key];
+  return { count: values.length, duplicates: values.length - new Set(values).size };
 }
 
 async function revealSavedSecrets() {
@@ -209,14 +239,6 @@ async function revealSavedSecrets() {
   }
 }
 
-function togglePasswordVisibility() {
-  showPassword.value = !showPassword.value;
-}
-
-function toggleTokenVisibility() {
-  showToken.value = !showToken.value;
-}
-
 function validateDraft(): string | null {
   if (!draft.roomName.trim()) return "世界名称不能为空";
   if (draft.roomName.trim().length > 64) return "世界名称不能超过 64 个字符";
@@ -225,6 +247,12 @@ function validateDraft(): string | null {
   if (!Number.isInteger(draft.advanced.voteKickPercentage) || draft.advanced.voteKickPercentage < 0 || draft.advanced.voteKickPercentage > 100) return "踢人投票比例必须在 0 到 100 之间";
   if (!Number.isInteger(draft.advanced.whitelistSlots) || draft.advanced.whitelistSlots < 0 || draft.advanced.whitelistSlots > draft.maxPlayers) return "白名单预留位不能超过最大玩家数";
   if (draft.advanced.whitelistSlots > 0 && draft.advanced.whitelist.length === 0) return "设置白名单预留位前，请先填写白名单";
+  for (const [key, label] of [
+    ["whitelist", "白名单"], ["adminList", "管理员名单"], ["blocklist", "封禁名单"],
+  ] as const) {
+    const values = draft.advanced[key];
+    if (new Set(values).size !== values.length) return `${label}存在重复 Klei ID`;
+  }
   for (const value of [tokenValue.value, passwordValue.value]) if (value.length > 8192 || value.includes("\0")) return "凭据长度或字符无效";
   return null;
 }
@@ -294,14 +322,11 @@ async function save(): Promise<boolean> {
       assignSettings(response.data.desired);
       tokenValue.value = "";
       passwordValue.value = "";
-      showToken.value = false;
-      showPassword.value = false;
       revealedToken.value = "";
       revealedPassword.value = "";
       secretError.value = "";
     }
     pendingOperationId.value = "";
-    notifySuccess("世界配置已保存", `版本 ${response.data.revision}`);
     return true;
   } catch (cause) {
     if (epoch === savedEpoch && target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget) {
@@ -377,6 +402,7 @@ function changeWorldOption(itemKey: string, value: string) {
 }
 
 function updateList(key: "adminList" | "whitelist" | "blocklist", value: string) {
+  listText[key] = value;
   draft.advanced[key] = listDraft(value);
 }
 
@@ -425,181 +451,242 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
 </script>
 
 <template>
-  <div class="page">
+  <div class="page world-page">
     <PageHeader :eyebrow="instanceName" title="世界配置">
       <template #actions>
-        <NButton size="small" :disabled="loading || saving || applyBusy || !target" @click="refresh"><template #icon><RefreshCw :size="16"/></template>{{loading?'读取中…':'刷新'}}</NButton>
-        <NButton size="small" :disabled="!canSave" @click="save"><template #icon><Save :size="16"/></template>{{saving?'保存中…':'仅保存'}}</NButton>
-        <NButton size="small" type="primary" :disabled="!canSave" @click="saveAndApply"><template #icon><Upload :size="16"/></template>{{saving?'保存中…':applyBusy?'应用中…':'保存并应用'}}</NButton>
+        <NTag v-if="hasChanges" size="small" type="warning" :bordered="false">未保存</NTag>
+        <NButton size="small" :disabled="loading || saving || applyBusy || !target" @click="refresh">
+          <template #icon><RefreshCw :size="16"/></template>{{ loading ? "读取中…" : "刷新" }}
+        </NButton>
+        <NButton size="small" type="primary" :disabled="!canSave" @click="saveAndApply">
+          <template #icon><Upload :size="16"/></template>{{ saving ? "保存中…" : applyBusy ? "应用中…" : "保存并应用" }}
+        </NButton>
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <div v-if="error" class="environment-error" role="alert">
-      <strong>{{error.message}}</strong>
-      <ul v-if="applyBlockers.length"><li v-for="code in applyBlockers" :key="code">{{applyBlockerLabel(code)}}</li></ul>
-      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul>
-    </div>
+    <NAlert v-if="error" type="error" :bordered="false" show-icon class="world-alert" role="alert">
+      <strong>{{ error.message }}</strong>
+      <ul v-if="applyBlockers.length"><li v-for="code in applyBlockers" :key="code">{{ applyBlockerLabel(code) }}</li></ul>
+      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
+    </NAlert>
     <LoadingState v-if="loading && !data" description="读取世界配置…"/>
-    <div v-else-if="!target && !workspace.preview.value" class="empty-state"><h2>无法确定专服</h2><p>返回专服列表后重新进入。</p></div>
+    <NEmpty v-else-if="!target && !workspace.preview.value" class="world-empty" description="无法确定专服">
+      <template #extra><span class="muted-text">返回专服列表后重新进入。</span></template>
+    </NEmpty>
     <template v-else>
-      <div v-if="stale" class="environment-error" role="status">显示上次读取的配置；当前结果已过期，保存已停用。</div>
-      <nav class="world-view-tabs" aria-label="世界配置分类">
-        <button type="button" :aria-pressed="activeView==='basic'" :class="{active:activeView==='basic'}" @click="selectView('basic')">基本设置</button>
-        <button type="button" :aria-pressed="activeView==='access'" :class="{active:activeView==='access'}" @click="selectView('access')">访问与联机</button>
-        <button type="button" :aria-pressed="activeView==='world'" :class="{active:activeView==='world'}" @click="selectView('world')">世界</button>
-      </nav>
-
-      <section v-if="activeView==='basic'" class="section-block world-form-panel">
-        <div class="world-pane-heading"><h2>基本设置</h2></div>
-        <div class="world-field-list">
-          <div class="world-field-row"><label for="world-room-name">世界名称</label><div class="world-field-control"><NInput v-model:value="draft.roomName" placeholder="" maxlength="64" :input-props="{ id: 'world-room-name', autocomplete: 'off' }"/></div></div>
-          <div class="world-field-row"><label>游戏模式</label><div class="world-field-control"><AppSelect v-model="draft.gameMode" :options="dstGameModeOptions" label="游戏模式"/></div></div>
-          <div class="world-field-row"><label for="world-max-players">最大玩家数</label><div class="world-field-control"><NInputNumber :value="draft.maxPlayers" placeholder="" :min="1" :max="128" :precision="0" :show-button="false" :input-props="{ id: 'world-max-players' }" @update:value="value => draft.maxPlayers = value ?? 1"/></div></div>
-          <div class="world-field-row"><label>语言</label><div class="world-field-control"><AppSelect v-model="draft.language" :options="languageOptions" label="语言"/></div></div>
-          <div class="world-field-row world-field-row-top"><label for="world-description">世界描述</label><div class="world-field-control"><NInput v-model:value="draft.description" type="textarea" placeholder="" maxlength="256" :autosize="{ minRows: 3 }" :input-props="{ id: 'world-description' }"/></div></div>
-        </div>
-
-        <div class="world-subsection">
-          <div class="world-pane-heading"><h2>联机凭据</h2></div>
-          <div class="world-field-list">
-            <div class="world-field-row"><label for="world-server-password">服务器密码</label><div class="world-field-control world-secret-input"><NInput v-model:value="passwordInput" :type="showPassword ? 'text' : 'password'" maxlength="8192" :placeholder="passwordStatus==='configured'?'留空保持当前密码':'输入服务器密码'" :input-props="{ id: 'world-server-password', autocomplete: 'new-password' }"/><button class="world-secret-toggle" type="button" :aria-label="showPassword ? '隐藏服务器密码' : '显示服务器密码'" :aria-pressed="showPassword" @click="togglePasswordVisibility"><EyeOff v-if="showPassword" :size="16"/><Eye v-else :size="16"/></button></div></div>
-            <div class="world-field-row"><label for="world-klei-token">Klei Token</label><div class="world-field-control world-secret-input"><NInput v-model:value="tokenInput" :type="showToken ? 'text' : 'password'" maxlength="8192" :placeholder="tokenStatus==='configured'?'留空保持当前 Token':'输入 Klei Token'" :input-props="{ id: 'world-klei-token', autocomplete: 'off' }"/><button class="world-secret-toggle" type="button" :aria-label="showToken ? '隐藏 Klei Token' : '显示 Klei Token'" :aria-pressed="showToken" @click="toggleTokenVisibility"><EyeOff v-if="showToken" :size="16"/><Eye v-else :size="16"/></button></div></div>
-          </div>
-          <p v-if="secretError" class="error-strip" role="alert">{{ secretError }}</p>
-        </div>
-
-        <div class="world-subsection">
-          <div class="world-pane-heading"><h2>世界选项</h2></div>
-          <div class="world-field-list">
-            <div class="world-field-row"><span><strong>允许 PVP</strong></span><NSwitch v-model:value="draft.pvp"/></div>
-            <div class="world-field-row"><span><strong>无人时暂停</strong></span><NSwitch v-model:value="draft.pauseWhenEmpty"/></div>
-          </div>
-        </div>
-      </section>
-
-      <section v-else-if="activeView==='access'" class="section-block world-form-panel">
-        <div class="world-pane-heading"><h2>访问与联机</h2></div>
-        <div class="world-settings-grid">
-          <section class="world-settings-panel">
-            <h3>投票</h3>
-            <div class="world-field-list">
-              <div class="world-field-row"><span><strong>启用踢人投票</strong></span><NSwitch v-model:value="draft.advanced.voteEnabled"/></div>
-              <div class="world-field-row"><label for="world-vote-percent">踢人投票比例</label><div class="world-field-control"><NInputNumber :value="draft.advanced.voteKickPercentage" placeholder="" :min="0" :max="100" :precision="0" :show-button="false" :disabled="!draft.advanced.voteEnabled" :input-props="{ id: 'world-vote-percent' }" @update:value="value => draft.advanced.voteKickPercentage = value ?? 0"/></div></div>
-            </div>
+      <NAlert v-if="stale" type="warning" :bordered="false" show-icon class="world-alert" role="status">
+        显示上次读取的配置；当前结果已过期，保存已停用。
+      </NAlert>
+      <NTabs :value="activeView" type="line" class="world-tabs"
+        @update:value="value => selectView(value as 'basic' | 'access' | 'world')">
+        <NTabPane name="basic" tab="基本设置" display-directive="show">
+          <section class="world-section">
+            <NForm label-placement="left" label-width="110" :show-feedback="false" class="world-form">
+              <NGrid cols="1 s:1 m:2 l:2" :x-gap="28" :y-gap="2" responsive="screen">
+                <NFormItemGi label="世界名称" :label-props="{ for: 'world-room-name' }">
+                  <NInput v-model:value="draft.roomName" placeholder="" maxlength="64" :input-props="{ id: 'world-room-name', autocomplete: 'off' }"/>
+                </NFormItemGi>
+                <NFormItemGi label="游戏模式">
+                  <AppSelect v-model="draft.gameMode" :options="dstGameModeOptions" label="游戏模式"/>
+                </NFormItemGi>
+                <NFormItemGi label="最大玩家数" :label-props="{ for: 'world-max-players' }">
+                  <NInputNumber :value="draft.maxPlayers" placeholder="" :min="1" :max="128" :precision="0" :show-button="false" :input-props="{ id: 'world-max-players' }" @update:value="value => draft.maxPlayers = value ?? 1"/>
+                </NFormItemGi>
+                <NFormItemGi label="语言">
+                  <AppSelect v-model="draft.language" :options="languageOptions" label="语言"/>
+                </NFormItemGi>
+              </NGrid>
+              <NFormItem label="世界描述" :label-props="{ for: 'world-description' }">
+                <NInput v-model:value="draft.description" type="textarea" placeholder="" maxlength="256" :autosize="{ minRows: 3 }" :input-props="{ id: 'world-description' }"/>
+              </NFormItem>
+            </NForm>
           </section>
-          <section class="world-settings-panel">
-            <h3>白名单</h3>
-            <div class="world-field-list">
-              <div class="world-field-row"><label for="world-whitelist-slots">白名单预留位</label><div class="world-field-control"><NInputNumber :value="draft.advanced.whitelistSlots" placeholder="" :min="0" :max="draft.maxPlayers" :precision="0" :show-button="false" :input-props="{ id: 'world-whitelist-slots' }" @update:value="value => draft.advanced.whitelistSlots = value ?? 0"/></div></div>
-              <div class="world-field-row world-field-row-top"><label for="world-whitelist">白名单 Klei ID</label><div class="world-field-control"><NInput :value="draft.advanced.whitelist.join('\n')" type="textarea" placeholder="" :autosize="{ minRows: 5 }" :input-props="{ id: 'world-whitelist' }" @update:value="value => updateList('whitelist', value)"/></div></div>
-            </div>
-          </section>
-          <section class="world-settings-panel world-settings-wide">
-            <h3>名单</h3>
-            <div class="world-list-grid">
-              <label>管理员 Klei ID<NInput :value="draft.advanced.adminList.join('\n')" type="textarea" placeholder="" :autosize="{ minRows: 5 }" @update:value="value => updateList('adminList', value)"/></label>
-              <label>封禁名单 Klei ID<NInput :value="draft.advanced.blocklist.join('\n')" type="textarea" placeholder="" :autosize="{ minRows: 5 }" @update:value="value => updateList('blocklist', value)"/></label>
-            </div>
-          </section>
-        </div>
-      </section>
 
-      <section v-else class="section-block world-form-panel">
-        <div class="world-pane-heading"><h2>世界</h2></div>
-        <div class="world-subtabs" aria-label="世界设置">
-          <button type="button" :aria-pressed="worldView==='worldSettings'" :class="{active:worldView==='worldSettings'}" @click="selectWorldView('worldSettings')">世界规则</button>
-          <button type="button" :aria-pressed="worldView==='worldgen'" :class="{active:worldView==='worldgen'}" @click="selectWorldView('worldgen')">世界生成</button>
-        </div>
-        <div class="world-layout">
-          <aside class="world-sidebar">
-            <div class="world-sidebar-label">分片</div>
-            <div class="world-shard-switch">
-              <button type="button" :aria-pressed="selectedShard==='master'" :class="{active:selectedShard==='master'}" @click="selectShard('master')">Master</button>
-              <button v-if="draft.cavesEnabled" type="button" :aria-pressed="selectedShard==='caves'" :class="{active:selectedShard==='caves'}" @click="selectShard('caves')">Caves</button>
-            </div>
-            <div class="world-sidebar-label">分类</div>
-            <nav class="world-nav-list" aria-label="选项分组">
-              <button v-for="group in optionGroups" :key="group.key" type="button" :aria-pressed="activeGroup===group.key" :class="{active:activeGroup===group.key}" @click="activeGroup=group.key">{{group.label}} <span>{{group.count}}</span></button>
-            </nav>
-          </aside>
-          <div class="world-option-pane">
-            <div class="world-option-heading"><h3>{{ activeGroupLabel }}</h3><span>{{ selectedGroupOptions.length }} 项</span></div>
-            <div class="world-option-list">
-              <div v-for="item in selectedGroupOptions" :key="item.key" class="world-option-row">
-                <span>{{ item.label }}</span>
-                <div class="world-field-control">
-                  <AppSelect :model-value="optionValue(draft.worldgen[selectedShard],item,selectedShard)"
-                    :options="optionValuesForShard(item,selectedShard)" :label="item.label"
-                    @update:model-value="changeWorldOption(item.key,$event)"/>
+          <section class="world-section">
+            <NDivider title-placement="left">联机凭据</NDivider>
+            <NForm label-placement="left" label-width="110" :show-feedback="false" class="world-form">
+              <NGrid cols="1 s:1 m:2 l:2" :x-gap="28" :y-gap="2" responsive="screen">
+                <NFormItemGi label="服务器密码" :label-props="{ for: 'world-server-password' }">
+                  <NInput v-model:value="passwordInput" type="password" show-password-on="click" maxlength="8192"
+                    :placeholder="passwordStatus === 'configured' ? '留空保持当前密码' : '输入服务器密码'"
+                    :input-props="{ id: 'world-server-password', autocomplete: 'new-password' }"/>
+                </NFormItemGi>
+                <NFormItemGi label="Klei Token" :label-props="{ for: 'world-klei-token' }">
+                  <NInput v-model:value="tokenInput" type="password" show-password-on="click" maxlength="8192"
+                    :placeholder="tokenStatus === 'configured' ? '留空保持当前 Token' : '输入 Klei Token'"
+                    :input-props="{ id: 'world-klei-token', autocomplete: 'off' }"/>
+                </NFormItemGi>
+              </NGrid>
+            </NForm>
+            <NAlert v-if="secretError" type="error" :bordered="false" show-icon class="world-alert" role="alert">{{ secretError }}</NAlert>
+          </section>
+
+          <section class="world-section">
+            <NDivider title-placement="left">世界选项</NDivider>
+            <NForm label-placement="left" label-width="110" :show-feedback="false" class="world-form">
+              <NGrid cols="1 s:1 m:2 l:2" :x-gap="28" :y-gap="2" responsive="screen">
+                <NFormItemGi label="允许 PVP"><NSwitch v-model:value="draft.pvp"/></NFormItemGi>
+                <NFormItemGi label="无人时暂停"><NSwitch v-model:value="draft.pauseWhenEmpty"/></NFormItemGi>
+              </NGrid>
+            </NForm>
+          </section>
+        </NTabPane>
+
+        <NTabPane name="access" tab="访问与联机" display-directive="show">
+          <section class="world-section">
+            <NForm label-placement="left" label-width="120" :show-feedback="false" class="world-form">
+              <NGrid cols="1 s:1 m:2 l:2" :x-gap="28" :y-gap="2" responsive="screen">
+                <NFormItemGi label="启用踢人投票"><NSwitch v-model:value="draft.advanced.voteEnabled"/></NFormItemGi>
+                <NFormItemGi label="踢人投票比例" :label-props="{ for: 'world-vote-percent' }">
+                  <NInputNumber :value="draft.advanced.voteKickPercentage" placeholder="" :min="0" :max="100" :precision="0" :show-button="false" :disabled="!draft.advanced.voteEnabled" :input-props="{ id: 'world-vote-percent' }" @update:value="value => draft.advanced.voteKickPercentage = value ?? 0"/>
+                </NFormItemGi>
+                <NFormItemGi label="白名单预留位" :label-props="{ for: 'world-whitelist-slots' }">
+                  <NInputNumber :value="draft.advanced.whitelistSlots" placeholder="" :min="0" :max="draft.maxPlayers" :precision="0" :show-button="false" :input-props="{ id: 'world-whitelist-slots' }" @update:value="value => draft.advanced.whitelistSlots = value ?? 0"/>
+                </NFormItemGi>
+              </NGrid>
+              <NFormItem label="白名单 Klei ID" :label-props="{ for: 'world-whitelist' }">
+                <div class="world-list-field">
+                  <NInput :value="listText.whitelist" type="textarea" placeholder="一行一个 Klei ID" :autosize="{ minRows: 5 }" :input-props="{ id: 'world-whitelist' }" @update:value="value => updateList('whitelist', value)"/>
+                  <div class="world-list-meta">
+                    <NText depth="3">{{ listStats('whitelist').count }} 个 ID</NText>
+                    <NTag v-if="listStats('whitelist').duplicates" size="small" type="warning" :bordered="false">{{ listStats('whitelist').duplicates }} 个重复</NTag>
+                  </div>
                 </div>
+              </NFormItem>
+              <NGrid cols="1 s:1 m:2 l:2" :x-gap="28" :y-gap="2" responsive="screen">
+                <NFormItemGi label="管理员 Klei ID" :label-props="{ for: 'world-admin-list' }">
+                  <div class="world-list-field">
+                    <NInput :value="listText.adminList" type="textarea" placeholder="一行一个 Klei ID" :autosize="{ minRows: 5 }" :input-props="{ id: 'world-admin-list' }" @update:value="value => updateList('adminList', value)"/>
+                    <div class="world-list-meta">
+                      <NText depth="3">{{ listStats('adminList').count }} 个 ID</NText>
+                      <NTag v-if="listStats('adminList').duplicates" size="small" type="warning" :bordered="false">{{ listStats('adminList').duplicates }} 个重复</NTag>
+                    </div>
+                  </div>
+                </NFormItemGi>
+                <NFormItemGi label="封禁名单 Klei ID" :label-props="{ for: 'world-block-list' }">
+                  <div class="world-list-field">
+                    <NInput :value="listText.blocklist" type="textarea" placeholder="一行一个 Klei ID" :autosize="{ minRows: 5 }" :input-props="{ id: 'world-block-list' }" @update:value="value => updateList('blocklist', value)"/>
+                    <div class="world-list-meta">
+                      <NText depth="3">{{ listStats('blocklist').count }} 个 ID</NText>
+                      <NTag v-if="listStats('blocklist').duplicates" size="small" type="warning" :bordered="false">{{ listStats('blocklist').duplicates }} 个重复</NTag>
+                    </div>
+                  </div>
+                </NFormItemGi>
+              </NGrid>
+            </NForm>
+          </section>
+        </NTabPane>
+
+        <NTabPane name="world" tab="世界" display-directive="show">
+          <section class="world-section">
+            <div class="world-world-head">
+              <NRadioGroup :value="worldView" size="small" @update:value="value => selectWorldView(value as 'worldSettings' | 'worldgen')">
+                <NRadioButton value="worldSettings">世界规则</NRadioButton>
+                <NRadioButton value="worldgen">世界生成</NRadioButton>
+              </NRadioGroup>
+            </div>
+            <div class="world-layout">
+              <NCard size="small" class="world-nav-card">
+                <div class="world-nav-block">
+                  <NText depth="3" class="world-nav-label">分片</NText>
+                  <NRadioGroup :value="selectedShard" size="small" @update:value="value => selectShard(value as 'master' | 'caves')">
+                    <NRadioButton value="master">Master</NRadioButton>
+                    <NRadioButton v-if="draft.cavesEnabled" value="caves">Caves</NRadioButton>
+                  </NRadioGroup>
+                </div>
+                <div class="world-nav-block">
+                  <NText depth="3" class="world-nav-label">分类</NText>
+                  <NMenu :value="activeGroup" :options="optionMenuOptions" :indent="0" class="world-menu" @update:value="value => activeGroup = String(value)"/>
+                </div>
+              </NCard>
+              <div class="world-option-pane">
+                <div class="world-option-heading">
+                  <div class="world-option-title">
+                    <h3>{{ activeGroupLabel }}</h3>
+                    <NTag size="small" :bordered="false">{{ selectedGroupOptions.length }} 项</NTag>
+                    <NTag v-if="activeGroupChangedCount" size="small" type="warning" :bordered="false">已修改 {{ activeGroupChangedCount }}</NTag>
+                  </div>
+                  <NPopconfirm @positive-click="resetActiveGroup">
+                    <template #trigger>
+                      <NButton size="small" class="world-reset-button" :disabled="!activeGroupChangedCount">
+                        <template #icon><RotateCcw :size="14"/></template>重置本组
+                      </NButton>
+                    </template>
+                    恢复本组世界选项的默认值？
+                  </NPopconfirm>
+                </div>
+                <NEmpty v-if="!selectedGroupOptions.length" description="没有可配置项"/>
+                <NForm v-else label-placement="left" label-width="150" size="small" :show-feedback="false" class="world-options-form">
+                  <NGrid cols="1 s:1 m:2 l:2" :x-gap="28" :y-gap="2" responsive="screen">
+                    <NFormItemGi v-for="item in selectedGroupOptions" :key="item.key">
+                      <template #label>
+                        <span class="world-option-label">{{ item.label }}</span>
+                        <span v-if="optionChanged(item)" class="world-option-dot" role="img" aria-label="已修改" title="已修改"></span>
+                      </template>
+                      <AppSelect :model-value="optionValue(draft.worldgen[selectedShard],item,selectedShard)"
+                        :options="optionValuesForShard(item,selectedShard)" :label="item.label"
+                        @update:model-value="changeWorldOption(item.key,$event)"/>
+                    </NFormItemGi>
+                  </NGrid>
+                </NForm>
               </div>
             </div>
-          </div>
-        </div>
-      </section>
+          </section>
+        </NTabPane>
+      </NTabs>
     </template>
   </div>
 </template>
 
 
 <style scoped>
-.world-pane-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-.world-pane-heading h2 { font-size: 15px; font-weight: 600; }
-.world-field-list { border-top: 1px solid var(--border); }
-.world-field-row { display: grid; grid-template-columns: minmax(140px, 220px) minmax(0, 1fr); gap: 24px; align-items: center; min-height: 48px; padding: 9px 0; border-bottom: 1px solid var(--border); }
-.world-field-row > label, .world-field-row > span:first-child { color: var(--text-secondary); font-size: 12px; }
-.world-field-row > label { cursor: pointer; }
-.world-field-row > span strong { display: block; color: var(--text); font-size: 12px; font-weight: 500; }
-.world-field-row-top { align-items: start; padding-top: 13px; padding-bottom: 13px; }
-.world-field-control { width: 100%; max-width: 420px; min-width: 0; }
-.world-field-control input, .world-field-control textarea { width: 100%; }
-.world-field-control textarea { min-height: 74px; resize: vertical; }
-.world-subsection { margin-top: 34px; }
-.world-secret-input { position: relative; display: flex; align-items: center; }
-.world-secret-input input { width: 100%; padding-right: 38px; }
-.world-secret-toggle { position: absolute; right: 3px; top: 50%; display: grid; width: 30px; height: 30px; place-items: center; transform: translateY(-50%); border: 0; border-radius: 2px; background: transparent; color: var(--text-tertiary); }
-.world-secret-toggle:hover { color: var(--text); background: var(--surface-hover); }
-.world-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 36px 44px; }
-.world-settings-panel { min-width: 0; }
-.world-settings-panel h3 { margin: 0 0 8px; color: var(--text-tertiary); font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
-.world-settings-wide { grid-column: 1 / -1; }
-.world-list-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
-.world-list-grid label { display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: 11px; }
-.world-subtabs { display: flex; gap: 0; margin-bottom: 28px; border-bottom: 1px solid var(--border); }
-.world-subtabs button { min-height: 38px; padding: 0 20px; border-bottom: 2px solid transparent; color: var(--text-secondary); font-size: 12px; }
-.world-subtabs button:hover { color: var(--text); }
-.world-subtabs button.active { border-bottom-color: var(--text); color: var(--text); font-weight: 500; }
-.world-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 44px; align-items: start; }
-.world-sidebar { min-width: 0; }
-.world-sidebar-label { margin: 0 0 8px; color: var(--text-tertiary); font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
-.world-sidebar-label:not(:first-child) { margin-top: 26px; }
-.world-shard-switch { display: flex; gap: 2px; border-bottom: 1px solid var(--border); }
-.world-shard-switch button { min-height: 32px; padding: 0 10px 8px; border-bottom: 2px solid transparent; color: var(--text-secondary); font-size: 11px; }
-.world-shard-switch button.active { border-bottom-color: var(--text); color: var(--text); }
-.world-nav-list { display: grid; gap: 1px; }
-.world-nav-list button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 31px; padding: 5px 0 5px 12px; border-left: 1px solid transparent; color: var(--text-secondary); text-align: left; font-size: 11px; }
-.world-nav-list button:hover { color: var(--text); }
-.world-nav-list button.active { border-left-color: var(--text); color: var(--text); }
-.world-nav-list button span { color: var(--text-tertiary); font-size: 10px; font-variant-numeric: tabular-nums; }
+.world-page { min-width: 0; }
+.world-alert { margin-bottom: 16px; }
+.world-alert :deep(ul) { margin: 8px 0 0; padding-left: 20px; }
+.world-empty { padding: 48px 0; }
+.world-tabs { margin-top: 2px; }
+.world-tabs :deep(.n-tabs-nav) { margin-bottom: 22px; }
+.world-section { margin-bottom: 32px; }
+.world-section :deep(.n-divider) { margin: 0 0 18px; }
+.world-form { max-width: 100%; }
+.world-form :deep(.n-form-item) { margin-bottom: 8px; }
+.world-list-field { display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0; }
+.world-list-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.world-world-head { display: flex; justify-content: flex-start; margin-bottom: 20px; }
+.world-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; align-items: start; }
+.world-nav-card { position: sticky; top: 16px; }
+.world-nav-card :deep(.n-card__content) { padding: 14px; }
+.world-nav-block + .world-nav-block { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.world-nav-label { display: block; margin-bottom: 8px; font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+.world-menu { margin: 0 -6px; }
+.world-menu :deep(.n-menu-item) { margin: 2px 0; }
+.world-menu :deep(.n-menu-item-content) { height: 34px; padding: 0 10px !important; border-radius: 7px; transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease; }
+.world-menu :deep(.n-menu-item-content::before) { display: none; }
+.world-menu :deep(.n-menu-item-content:hover) { background: var(--surface-hover); box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 5%, transparent); }
+.world-menu :deep(.n-menu-item-content--selected) { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); box-shadow: inset 2px 0 0 var(--accent), 0 1px 2px color-mix(in srgb, var(--text) 5%, transparent); }
+.world-menu :deep(.n-menu-item-content--selected .n-menu-item-content-header) { color: var(--accent); font-weight: 600; }
+.world-menu :deep(.n-menu-item-content--selected .world-menu-item-count) { color: var(--accent); opacity: .75; }
+.world-menu :deep(.n-menu-item-content:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.world-menu :deep(.n-menu-item-content-header) { font-size: 12px; }
+.world-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; }
+.world-menu-item-count { color: var(--text-tertiary); font-size: 10px; font-variant-numeric: tabular-nums; }
+.world-reset-button.n-button { border-radius: 8px; box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent); }
+.world-reset-button.n-button:hover { box-shadow: 0 4px 12px color-mix(in srgb, var(--text) 10%, transparent); transform: translateY(-1px); }
 .world-option-pane { min-width: 0; }
-.world-option-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-.world-option-heading h3 { margin: 0; font-size: 13px; font-weight: 600; }
-.world-option-heading span { color: var(--text-tertiary); font-size: 10px; }
-.world-option-list { border-top: 1px solid var(--border); }
-.world-option-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(170px, 220px); gap: 24px; align-items: center; min-height: 46px; padding: 7px 0; border-bottom: 1px solid var(--border); }
-.world-option-row > span { color: var(--text-secondary); font-size: 12px; }
-.world-option-row .world-field-control { max-width: none; }
+.world-option-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-bottom: 12px; }
+.world-option-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.world-option-title h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.world-options-form :deep(.n-form-item) { margin-bottom: 4px; }
+.world-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.world-option-dot { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--warning); vertical-align: middle; }
 @media (max-width: 900px) {
-  .world-field-row { grid-template-columns: 1fr; gap: 6px; }
-  .world-field-row-top { padding-top: 10px; }
-  .world-settings-grid, .world-list-grid { grid-template-columns: 1fr; gap: 24px; }
-  .world-settings-wide { grid-column: auto; }
-  .world-layout { grid-template-columns: 1fr; gap: 28px; }
-  .world-sidebar { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; align-items: center; }
-  .world-sidebar-label { margin: 0; }
-  .world-sidebar-label:not(:first-child) { margin-top: 0; }
-  .world-shard-switch { border-bottom: 0; }
-  .world-nav-list { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .world-option-row { grid-template-columns: minmax(0, 1fr) minmax(150px, 200px); gap: 12px; }
+  .world-layout { grid-template-columns: 1fr; }
+  .world-nav-card { position: static; }
+  .world-nav-card :deep(.n-card__content) { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .world-nav-block + .world-nav-block { margin-top: 0; }
+}
+@media (max-width: 760px) {
+  .world-nav-card :deep(.n-card__content) { grid-template-columns: 1fr; }
+  .world-nav-block + .world-nav-block { margin-top: 16px; }
 }
 </style>

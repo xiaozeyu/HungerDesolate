@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from "vue";
-import { ArrowUpCircle, Check, Eye, Library, Package, Pencil, Plus, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
-import { NButton, NCheckbox, NDataTable, NInput, NInputNumber, type DataTableColumns } from "naive-ui";
+import { ArrowUpCircle, Check, CircleHelp, Eye, Library, Package, Pencil, Plus, Power, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
+import { NButton, NCheckbox, NDataTable, NInput, NInputNumber, NTooltip, type DataTableColumns } from "naive-ui";
 import AppDialog from "../components/AppDialog.vue";
 import OptionSelect, { type OptionSelectItem } from "../components/OptionSelect.vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -781,11 +781,11 @@ const modColumns = computed<DataTableColumns<InstanceModSummary>>(() => {
     },
   },
   {
-    title: "期望状态",
+    title: "启用状态",
     key: "desiredEnabled",
     render: item => h(StatusLabel, {
       tone: item.desiredEnabled === null ? "warning" : item.desiredEnabled ? "success" : "muted",
-      label: item.desiredEnabled === null ? "已移出期望" : item.desiredEnabled ? "启用" : "禁用",
+      label: item.desiredEnabled === null ? "已移出" : item.desiredEnabled ? "启用" : "禁用",
     }),
   },
   {
@@ -802,12 +802,12 @@ const modColumns = computed<DataTableColumns<InstanceModSummary>>(() => {
     render: item => h(StatusLabel, { tone: statusTone(item.schema.status), label: statusLabel(item.schema.status) }),
   },
   {
-    title: "版本摘要",
+    title: "版本",
     key: "version",
     render: item => h("span", { class: "mono", title: schemaDiagnostic(item) }, displayVersion(instanceModVersion(item))),
   },
   {
-    title: "",
+    title: "操作",
     key: "actions",
     align: "center",
     render: item => {
@@ -944,38 +944,44 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
       </template>
     </AppDialog>
 
-    <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod ? instanceModName(editingMod) : ''}`" size="lg">
+    <AppDialog v-model:open="configEditorOpen" :title="`编辑配置 · ${editingMod ? instanceModName(editingMod) : ''}`" size="md">
       <div v-if="editingMod" class="mod-config-editor">
-        <div class="mod-config-meta">
-          <span class="mono">{{ editingMod.workshopId }}</span>
-          <span>{{ instanceModVersion(editingMod) ?? '版本未知' }}</span>
-          <span class="mono">{{ editingMod.preparedDigest?.slice(0, 12) }}</span>
-        </div>
         <div v-for="group in configFieldGroups" :key="group.name" class="mod-config-field">
-          <div class="mod-config-field-heading">
+          <div class="mod-config-field-label">
             <label :for="`mod-config-${group.name}`">{{ group.label }}<span v-if="group.shared" class="mod-config-shared">共用</span></label>
-            <button v-if="group.control !== 'unsupported'" class="icon-button" type="button"
-              :aria-label="`恢复 ${group.label} 的 MOD 默认值`" title="恢复 MOD 默认值"
-              :disabled="configSaving || !configChangedFields.includes(group.name) && !Object.hasOwn(configBase, group.name)"
-              @click="resetConfigurationField(group)"><RotateCcw :size="14"/></button>
+            <NTooltip v-if="group.hover" trigger="hover" placement="top-start" :style="{ maxWidth: '360px' }">
+              <template #trigger>
+                <button type="button" class="mod-config-help" :aria-label="`${group.label} 配置说明`">
+                  <CircleHelp :size="14"/>
+                </button>
+              </template>
+              {{ group.hover }}
+            </NTooltip>
           </div>
-          <OptionSelect v-if="group.control === 'choice'" :model-value="configOptionSelection[group.name] ?? ''"
-            :options="configOptionsFor(group)" :label="group.label" :disabled="configSaving"
-            @update:model-value="updateOptionSelection(group, $event)"/>
-          <NCheckbox v-else-if="group.control === 'boolean'" class="mod-config-toggle"
-            :checked="scalarFieldValue(group) === true" :disabled="configSaving"
-            @update:checked="value => setScalarField(group, value)">
-            {{ scalarFieldValue(group) === true ? '开启' : '关闭' }}
-          </NCheckbox>
-          <NInputNumber v-else-if="group.control === 'number'" :value="scalarNumberValue(group)" placeholder=""
-            :disabled="configSaving" :show-button="false" :input-props="{ id: `mod-config-${group.name}` }"
-            @update:value="value => setScalarField(group, value ?? '')"/>
-          <NInput v-else-if="group.control === 'text'" :value="String(scalarFieldValue(group) ?? '')" placeholder=""
-            :disabled="configSaving" :input-props="{ id: `mod-config-${group.name}` }"
-            @update:value="value => setScalarField(group, value)"/>
-          <div v-else class="mod-config-unsupported">{{ group.issue ?? group.fields[0]?.reason ?? '此配置项的类型无法安全编辑' }}</div>
-          <small v-if="group.hover" class="mod-config-hover">{{ group.hover }}</small>
-          <small v-if="fieldValueMismatch(group)" class="mod-config-warning">当前保存值与此版本可选值不匹配；保存其他项不会覆盖它</small>
+          <div class="mod-config-field-control">
+            <OptionSelect v-if="group.control === 'choice'" :model-value="configOptionSelection[group.name] ?? ''"
+              :options="configOptionsFor(group)" :label="group.label" :disabled="configSaving"
+              @update:model-value="updateOptionSelection(group, $event)"/>
+            <NCheckbox v-else-if="group.control === 'boolean'" class="mod-config-toggle"
+              :checked="scalarFieldValue(group) === true" :disabled="configSaving"
+              @update:checked="value => setScalarField(group, value)">
+              {{ scalarFieldValue(group) === true ? '开启' : '关闭' }}
+            </NCheckbox>
+            <NInputNumber v-else-if="group.control === 'number'" :value="scalarNumberValue(group)" placeholder=""
+              :disabled="configSaving" :show-button="false" :input-props="{ id: `mod-config-${group.name}` }"
+              @update:value="value => setScalarField(group, value ?? '')"/>
+            <NInput v-else-if="group.control === 'text'" :value="String(scalarFieldValue(group) ?? '')" placeholder=""
+              :disabled="configSaving" :input-props="{ id: `mod-config-${group.name}` }"
+              @update:value="value => setScalarField(group, value)"/>
+            <div v-else class="mod-config-unsupported">{{ group.issue ?? group.fields[0]?.reason ?? '此配置项的类型无法安全编辑' }}</div>
+            <small v-if="fieldValueMismatch(group)" class="mod-config-warning">当前保存值与此版本可选值不匹配；保存其他项不会覆盖它</small>
+          </div>
+          <IconButton v-if="group.control !== 'unsupported'" class="mod-config-reset"
+            :label="`恢复 ${group.label} 的 MOD 默认值`"
+            :disabled="configSaving || !configChangedFields.includes(group.name) && !Object.hasOwn(configBase, group.name)"
+            @click="resetConfigurationField(group)">
+            <RotateCcw :size="14"/>
+          </IconButton>
         </div>
       </div>
       <div v-if="configError" class="error-strip">{{ configError }}</div>

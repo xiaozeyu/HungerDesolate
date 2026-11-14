@@ -1,40 +1,46 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { useRouter } from "vue-router";
 import { NButton } from "naive-ui";
-import { notifySuccess, notifySuccessAction } from "../naive/notify";
+import { notifySuccess } from "../naive/notify";
 import AppDialog from "./AppDialog.vue";
 import ServerForm from "./ServerForm.vue";
 import SshConnectionPanel from "./SshConnectionPanel.vue";
+import FingerprintTrustDialog from "./FingerprintTrustDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useConnectionDialog } from "../composables/useConnectionDialog";
 import { useHostConnection } from "../composables/useHostConnection";
-import type { ServerSummary } from "../types/contracts";
+import type { HostConnection, ServerSummary, SshConnectionState } from "../types/contracts";
 
-const router = useRouter();
 const workspace = useWorkspace();
 const dialog = useConnectionDialog();
 const hostConnection = useHostConnection();
 const server = computed(() => workspace.servers.value.find(item => item.serverId === dialog.serverId.value) ?? null);
+const serverForm = ref<{testConnection: () => void} | null>(null);
 const saving = ref(false);
-const sshBusy = ref(false);
+const sshState = ref<SshConnectionState | null>(null);
+const sshStateLoaded = ref(false);
+const hostBusy = computed(() => !!server.value && hostConnection.busyServerId.value === server.value.serverId);
+const busy = computed(() => saving.value || hostBusy.value);
 
 function close() {
   dialog.closeConnection();
 }
-
+function sshStateChanged(value: SshConnectionState | null) {
+  sshState.value = value;
+  sshStateLoaded.value = true;
+}
 function saved(value: ServerSummary) {
   notifySuccess("连接已保存", value.displayName);
 }
-
-function connected() {
-  const current = server.value;
-  if (!current) return;
-  hostConnection.markVerified(current);
-  notifySuccessAction("登录验证通过", current.displayName, "进入主机环境", () => {
-    close();
-    void router.push(`/hosts/${current.serverId}/environment`);
-  });
+async function tested(value: ServerSummary) {
+  await hostConnection.connect(value, connected);
+}
+function connected(_connection: HostConnection, value: ServerSummary) {
+  notifySuccess("连接测试通过", value.displayName);
+}
+function testConnection() {
+  if (busy.value || workspace.preview.value || !server.value) return;
+  serverForm.value?.testConnection();
 }
 </script>
 
@@ -44,14 +50,31 @@ function connected() {
       <p v-if="workspace.error.value" class="error-strip" role="alert">{{ workspace.error.value }}</p>
       <section class="connection-block">
         <div class="section-heading"><div><h2>连接信息</h2></div></div>
-        <ServerForm :server="server" :readonly="workspace.preview.value || sshBusy" form-id="edit-server" @saved="saved" @busy="saving = $event">
-          <template #actions><NButton attr-type="submit" type="primary" :disabled="saving || sshBusy || workspace.preview.value">{{ saving ? "保存中…" : "保存连接信息" }}</NButton></template>
-        </ServerForm>
+        <ServerForm ref="serverForm" :server="server" :readonly="workspace.preview.value" form-id="edit-server"
+          :credential-configured="!!sshState?.credentialConfigured"
+          @saved="saved" @tested="tested" @busy="saving = $event"/>
       </section>
-      <SshConnectionPanel :server="server" :preview="workspace.preview.value" :disabled="saving" @busy="sshBusy = $event" @connected="connected"/>
+      <SshConnectionPanel :server="server" :preview="workspace.preview.value" @state="sshStateChanged"/>
+      <p v-if="hostConnection.error.value && hostConnection.errorServerId.value === server.serverId" class="error-strip" role="alert">
+        <strong>{{ hostConnection.error.value.message }}</strong>
+        <span v-if="hostConnection.error.value.recoverySteps.length"> {{ hostConnection.error.value.recoverySteps.join("；") }}</span>
+      </p>
+      <FingerprintTrustDialog :open="hostConnection.trustOpen.value"
+        :display-name="hostConnection.challengeServer.value?.displayName ?? ''"
+        :host="hostConnection.challengeServer.value?.host ?? ''"
+        :ssh-port="hostConnection.challengeServer.value?.sshPort ?? 22"
+        :challenge="hostConnection.challenge.value"
+        :busy="hostConnection.busyServerId.value === hostConnection.challengeServer.value?.serverId"
+        :error="hostConnection.trustError.value"
+        @update:open="value => { if (!value) hostConnection.closeTrust() }"
+        @confirm="hostConnection.confirmTrust"/>
     </div>
     <div v-else class="empty-state"><h2>连接记录不存在</h2><NButton @click="close">关闭</NButton></div>
-    <template #footer><NButton @click="close">关闭</NButton></template>
+    <template #footer>
+      <NButton :disabled="busy" @click="close">关闭</NButton>
+      <NButton :disabled="busy || !sshStateLoaded || workspace.preview.value" @click="testConnection">{{ hostBusy ? "测试中…" : "测试连接" }}</NButton>
+      <NButton attr-type="submit" form="edit-server" type="primary" :disabled="busy || !sshStateLoaded || workspace.preview.value">{{ saving ? "保存中…" : "保存" }}</NButton>
+    </template>
   </AppDialog>
 </template>
 

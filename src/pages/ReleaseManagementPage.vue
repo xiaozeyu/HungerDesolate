@@ -72,8 +72,6 @@ const deleteError = ref("");
 const cachePreview = ref<BuildCachePreview | null>(null);
 const updateStatus = ref<HostDstUpdateStatus | null>(null);
 const updateCheckBusy = ref(false);
-const updateCheckError = ref("");
-const updateCheckDetail = ref("");
 let updatePollTimer: number | undefined;
 let updatePollStartedAt = 0;
 let updateDisposed = false;
@@ -97,17 +95,6 @@ function isCurrent(target: { serverId: string; hostId: string; recordVersion: nu
 
 const updateNotifyPending = ref(false);
 
-const updateStageLabel = computed(() => {
-  if (!updateCheckBusy.value && !updateStatus.value?.checking) return "";
-  const detail = updateStatus.value?.stageDetail?.trim();
-  if (detail) return detail;
-  const stage = updateStatus.value?.stage;
-  if (stage === "image") return "正在选择检查镜像…";
-  if (stage === "steamcmd") return "正在通过 SteamCMD 查询…";
-  if (stage === "finalize") return "正在整理检查结果…";
-  return "正在检查 DST 更新…";
-});
-
 function notifyUpdateResult(status: HostDstUpdateStatus | null) {
   if (!updateNotifyPending.value) return;
   updateNotifyPending.value = false;
@@ -116,7 +103,19 @@ function notifyUpdateResult(status: HostDstUpdateStatus | null) {
     return;
   }
   if (status.lastCheckError) {
-    notification.error({ title: "DST 更新检查失败", content: `${status.lastCheckError.message}${status.lastCheckError.detail ? "（详细输出见页面）" : ""}`, duration: 0, closable: true });
+    const detail = status.lastCheckError.detail
+      ?.split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .slice(-3)
+      .map(line => line.slice(0, 160))
+      .join(" · ");
+    notification.error({
+      title: "DST 更新检查失败",
+      content: detail ? `${status.lastCheckError.message} · ${detail}` : status.lastCheckError.message,
+      duration: 0,
+      closable: true,
+    });
     return;
   }
   if (status.latest) {
@@ -169,8 +168,7 @@ function scheduleUpdatePoll() {
   if (updatePollStartedAt === 0) updatePollStartedAt = Date.now();
   if (Date.now() - updatePollStartedAt > 75 * 60 * 1000) {
     if (updateStatus.value) updateStatus.value = { ...updateStatus.value, checking: false, stage: null };
-    updateCheckError.value = "检查超时，请稍后刷新或重试";
-    notifyUpdateError(updateCheckError.value);
+    notifyUpdateError("检查超时，请稍后刷新或重试");
     stopUpdatePoll();
     return;
   }
@@ -199,8 +197,6 @@ async function loadUpdateStatus() {
       || server.value.recordVersion !== expectedRecordVersion || status.requestId !== requestId
       || status.target.serverId !== value.serverId || status.target.hostId !== value.hostId) return;
     updateStatus.value = status;
-    updateCheckError.value = status.lastCheckError?.message ?? "";
-    updateCheckDetail.value = status.lastCheckError?.detail ?? "";
     if (status.checking || updateCheckBusy.value) scheduleUpdatePoll();
     else {
       stopUpdatePoll();
@@ -208,8 +204,7 @@ async function loadUpdateStatus() {
     }
   } catch (cause) {
     if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
-      updateCheckError.value = describeError(cause).message;
-      notifyUpdateError(updateCheckError.value);
+      notifyUpdateError(describeError(cause).message);
       if (updateStatus.value?.checking || updateCheckBusy.value) scheduleUpdatePoll();
       else {
         updateStatus.value = null;
@@ -229,8 +224,6 @@ async function checkUpdates() {
   }
   updateCheckBusy.value = true;
   updateNotifyPending.value = true;
-  updateCheckError.value = "";
-  updateCheckDetail.value = "";
   scheduleUpdatePoll();
   const expectedRecordVersion = value.recordVersion;
   const requestId = crypto.randomUUID();
@@ -248,8 +241,7 @@ async function checkUpdates() {
     }
   } catch (cause) {
     if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
-      updateCheckError.value = describeError(cause).message;
-      notifyUpdateError(updateCheckError.value);
+      notifyUpdateError(describeError(cause).message);
       await loadUpdateStatus();
     }
   } finally {
@@ -514,8 +506,6 @@ watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordV
   cleanupError.value = "";
   updateStatus.value = null;
   updateCheckBusy.value = false;
-  updateCheckError.value = "";
-  updateCheckDetail.value = "";
   void loadUpdateStatus();
   buildStarting.value = false;
   buildStartError.value = "";
@@ -612,12 +602,6 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
         <IconButton label="刷新 Release" :disabled="loading || !server" @click="refresh"><RefreshCw :size="16"/></IconButton>
       </template>
     </PageHeader>
-
-    <div v-if="updateStageLabel" class="update-stage" role="status">{{ updateStageLabel }}</div>
-    <div v-if="updateCheckDetail" class="update-detail" role="alert">
-      <strong>{{ updateCheckError || "上次检查失败" }}</strong>
-      <pre>{{ updateCheckDetail }}</pre>
-    </div>
 
     <div v-if="error" class="environment-error release-feedback" role="alert">
       <strong>{{ error.message }}</strong>
@@ -740,9 +724,6 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
 .state-indicator.busy { background: var(--warning); animation: release-pulse 1.2s ease-in-out infinite; }
 .build-log { margin-top: 8px; }
 .release-feedback { margin-bottom: var(--space-3); }
-.update-stage { margin: -8px 0 18px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
-.update-detail { margin: 0 0 18px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border)); background: color-mix(in srgb, var(--danger) 4%, var(--surface)); color: var(--danger); font-size: 12px; }
-.update-detail pre { margin: 8px 0 0; max-height: 220px; overflow: auto; color: var(--text-secondary); font: 11px/1.5 "JetBrains Mono", "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .release-retention { color: var(--text-secondary); font-size: 11px; }
 .disk-cleanup-section { display: grid; gap: var(--space-2); }
 .disk-cleanup-section > strong { font-size: 12px; font-weight: 600; }

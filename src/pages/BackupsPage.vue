@@ -650,12 +650,11 @@ const rowKey = (item: BackupSummary) => item.backupId;
     </PageHeader>
     <PreviewNotice/>
     <div v-if="error" class="error-strip" role="alert">{{ error }}</div>
-    <template v-if="pageLoading || items.length">
-      <div class="table-wrap">
-        <NDataTable :columns="columns" :data="items" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="pageLoading"/>
-      </div>
-    </template>
-    <div v-else class="empty-state"><h2>暂无备份</h2></div>
+    <div class="table-wrap">
+      <NDataTable :columns="columns" :data="items" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="pageLoading">
+        <template #empty><span class="muted-text">暂无备份</span></template>
+      </NDataTable>
+    </div>
     <section v-if="downloadTasks.length" class="backup-task-list" aria-label="备份下载任务">
       <div v-for="task in downloadTasks" :key="task.operationId" class="download-task">
         <span>{{ task.status === "succeeded" ? "下载完成" : task.status === "running" ? "正在下载" : "下载中断" }}</span>

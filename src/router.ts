@@ -56,6 +56,8 @@ router.beforeEach(async to => {
     return true;
 });
 router.afterEach(to => {
+    if (to.path === "/settings")
+        return;
     const workspace = useWorkspace();
     const serverId = String(to.params.serverId ?? "");
     const instanceId = String(to.params.instanceId ?? "");

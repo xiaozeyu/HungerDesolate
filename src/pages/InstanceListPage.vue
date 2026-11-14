@@ -8,7 +8,7 @@ import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import IconButton from "../components/IconButton.vue";
-import { notifySuccessAction } from "../naive/notify";
+import { notifySuccess } from "../naive/notify";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useOperations } from "../composables/useOperations";
 import { useInstanceList } from "../composables/useInstanceList";
@@ -34,8 +34,7 @@ function playersLabel(item: InstanceSummary) {
 async function creationSucceeded(created:{serverId:string;hostId:string;instanceId:string}){
   await refresh();
   const instance=data.value?.instances.find(item=>item.instanceId===created.instanceId);
-  notifySuccessAction("专服已创建", instance?.displayName, "进入世界配置",
-    () => { void router.push(`/hosts/${created.serverId}/instances/${created.instanceId}/world`); });
+  notifySuccess("专服已创建", instance?.displayName);
 }
 function enter(instance:InstanceSummary){
   if (!server.value || stale.value || !canInspectInstance(instance)) return;
@@ -171,8 +170,9 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
     <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul></div>
     <template v-if="loading || data">
       <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
-      <div v-if="data && !instances.length" class="empty-state"><ServerCog :size="28"/><h2>暂无专服</h2></div>
-      <div v-else class="table-wrap"><NDataTable :columns="columns" :data="instances" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="loading"/></div>
+      <div class="table-wrap"><NDataTable :columns="columns" :data="instances" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="loading">
+        <template #empty><div class="table-empty"><ServerCog :size="20"/><strong>暂无专服</strong></div></template>
+      </NDataTable></div>
     </template>
     <div v-else-if="!error" class="empty-state"><ServerCog :size="28"/><h2>尚未读取专服</h2></div>
     <NModal :show="!!deleteTarget" preset="card" :bordered="false" :closable="!deleteBusy" :mask-closable="!deleteBusy" :close-on-esc="!deleteBusy" title="删除专服" aria-label="删除专服" :style="{ width: 'min(680px, calc(100vw - 48px))' }" @update:show="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">

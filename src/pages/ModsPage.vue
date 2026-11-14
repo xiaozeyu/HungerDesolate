@@ -935,7 +935,7 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
           <NDataTable :columns="hostLibraryColumns" :data="hostLibraryItems" :bordered="false" :single-line="true" size="medium" :row-key="hostLibraryRowKey"/>
         </div>
       </template>
-      <div v-else class="empty-state"><h2>主机 MOD 库为空</h2><p class="muted-text">请先在主机级“MOD 库”添加内容。</p></div>
+      <div v-else class="empty-state"><h2>主机 MOD 库为空</h2><p class="muted-text">请先在主机级MOD库添加内容</p></div>
       <template #footer>
         <NButton @click="hostLibraryOpen = false">关闭</NButton>
         <NButton type="primary" :disabled="savingWorkshopId !== null || !selectedHostLibraryItems.length" @click="addSelectedHostLibrary">

@@ -228,7 +228,7 @@ class TaskTests(unittest.TestCase):
             "class DockerRejected(Exception): pass",
             "def ensure_network(project, host_id, instance_id): return project + '_instance'",
             "def create_containers(path, project, root): return {'project': project, 'created': True, 'started': False}",
-            "def verify_containers(project, host_id, instance_id, manifest, root): return {'containerIds': ['a' * 64], 'roles': ['master'], 'mountsVerified': True, 'portsVerified': True}",
+            "def verify_containers(project, host_id, instance_id, manifest, root, dst_release_id=None): return {'containerIds': ['a' * 64], 'roles': ['master'], 'mountsVerified': True, 'portsVerified': True}",
         ]) + "\n"
         (task / "instance-docker.py").write_text(docker_stub)
         worker_source = PROJECT / "remote-scripts/actions/instance-create-worker.py"

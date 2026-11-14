@@ -157,7 +157,7 @@ defineExpose({testConnection});
       </div>
     </fieldset>
     <CredentialFields :model-value="credentials" :auth-kind="fields.authKind" :id-prefix="`${formId}-credential`" :disabled="busy || readonly || !!progress" :error="credentialFailure" :allow-paste="false" @update:model-value="editCredentials"/>
-    <p v-if="credentialOptional" class="form-hint">留空保持当前凭据；输入新值将替换。</p>
+    <p v-if="credentialOptional" class="form-hint">留空保持当前凭据；输入新值将替换</p>
     <div v-if="$slots.actions" class="form-actions"><slot name="actions" :busy="busy"/></div>
   </form>
 </template>

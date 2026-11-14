@@ -24,10 +24,10 @@ function confirm() {
 </script>
 
 <template>
-  <AppDialog :open="open" title="确认 SSH 主机指纹" description="请通过可信渠道核对以下主机指纹。" @update:open="emit('update:open', $event)">
+  <AppDialog :open="open" title="确认 SSH 主机指纹"  @update:open="emit('update:open', $event)">
     <template v-if="challenge">
       <p>{{ displayName }} · {{ host }}:{{ sshPort }}</p>
-      <p v-if="challenge.previousFingerprint && challenge.previousFingerprint !== challenge.fingerprint" class="field-error">指纹已变化：请先核实是否更换主机或重新安装 SSH 服务。</p>
+      <p v-if="challenge.previousFingerprint && challenge.previousFingerprint !== challenge.fingerprint" class="field-error">指纹已变化：请先核实是否更换主机或重新安装 SSH 服务</p>
       <dl class="fingerprint-details">
         <dt>原指纹</dt>
         <dd class="mono">{{ challenge.previousFingerprint ?? "尚未信任" }}</dd>

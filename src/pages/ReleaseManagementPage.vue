@@ -619,13 +619,10 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
     <template v-if="loading || data">
       <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
 
-      <div v-if="data && !releases.length" class="release-empty">
-        <Package :size="20" />
-        <div><strong>暂无 DST Release</strong></div>
-      </div>
-
-      <div v-else class="table-wrap">
-        <NDataTable :columns="releaseColumns" :data="releases" :bordered="false" :single-line="true" size="medium" :row-key="releaseRowKey" :loading="loading"/>
+      <div class="table-wrap">
+        <NDataTable :columns="releaseColumns" :data="releases" :bordered="false" :single-line="true" size="medium" :row-key="releaseRowKey" :loading="loading">
+          <template #empty><div class="table-empty"><Package :size="20"/><strong>暂无 DST Release</strong></div></template>
+        </NDataTable>
       </div>
     </template>
     <div v-else-if="!error" class="empty-state">尚未读取 Release</div>
@@ -747,8 +744,6 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
 .release-action-error, .release-action-success { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
 .release-action-error { color: var(--danger); }
 .release-action-success { color: var(--success); }
-.release-empty { display: flex; min-height: 88px; align-items: center; gap: var(--space-3); border-bottom: 1px solid var(--border); }
-.release-empty > div { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; }
 .release-feedback :deep(ul) { margin: var(--space-2) 0 0; }
 @keyframes release-pulse { 50% { opacity: .35; } }
 @media (max-width: 1099px) {

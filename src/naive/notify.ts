@@ -1,5 +1,5 @@
-import { NButton, createDiscreteApi, darkTheme, lightTheme, zhCN } from "naive-ui";
-import { computed, h } from "vue";
+import { createDiscreteApi, darkTheme, lightTheme, zhCN } from "naive-ui";
+import { computed } from "vue";
 import { useTheme } from "../composables/useTheme";
 import { buildThemeOverrides } from "./theme";
 
@@ -34,14 +34,5 @@ export function notifyBottomError(title: string, content?: string) {
 }
 export function notifyBottomInfo(title: string, content?: string) {
   bottomNotification.info({ title, content, duration: 3500, closable: true, keepAliveOnHover: true });
-}
-export function notifySuccessAction(title: string, content: string | undefined, actionLabel: string, onAction: () => void) {
-  notification.success({
-    title,
-    content: content ?? "",
-    duration: 6000,
-    keepAliveOnHover: true,
-    action: () => h(NButton, { size: "tiny", text: true, type: "primary", onClick: onAction }, () => actionLabel),
-  });
 }
 export { notification };

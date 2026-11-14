@@ -83,7 +83,7 @@ def create_containers(compose_path, project, root="/var/lib/famine-hub"):
     return {"project": project, "created": True, "started": False}
 
 
-def verify_containers(project, host_id, instance_id, manifest, root="/var/lib/famine-hub"):
+def verify_containers(project, host_id, instance_id, manifest, root="/var/lib/famine-hub", dst_release_id=None):
     if not safe_label(project) or not safe_label(host_id) or not safe_label(instance_id):
         reject("CREATE_DOCKER_LABEL_INVALID")
     listed = run(["docker", "container", "ls", "--all", "--quiet", "--no-trunc",
@@ -103,6 +103,15 @@ def verify_containers(project, host_id, instance_id, manifest, root="/var/lib/fa
         reject("CREATE_DOCKER_RESPONSE_INVALID")
     roles = set()
     expected_root = root + "/instances/" + instance_id + "/"
+    shared_dst = root + "/dst/" + dst_release_id if isinstance(dst_release_id, str) and re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", dst_release_id) else None
+    def mount_allowed(item):
+        if not isinstance(item, dict) or not isinstance(item.get("Source"), str):
+            return False
+        if item["Source"].startswith(expected_root):
+            return True
+        return (shared_dst is not None and item.get("Type") == "bind" and item.get("RW") is False
+                and item["Source"].rstrip("/") == shared_dst)
     for row in rows:
         parts = row.split("\t")
         if len(parts) != 3:
@@ -119,8 +128,7 @@ def verify_containers(project, host_id, instance_id, manifest, root="/var/lib/fa
         if role not in expected_roles or role in roles:
             reject("CREATE_CONTAINER_LABEL_INVALID")
         roles.add(role)
-        if not isinstance(mounts, list) or any(not isinstance(item, dict) or not isinstance(item.get("Source"), str)
-                                               or not item["Source"].startswith(expected_root) for item in mounts):
+        if not isinstance(mounts, list) or any(not mount_allowed(item) for item in mounts):
             reject("CREATE_CONTAINER_MOUNT_INVALID")
         if not isinstance(bindings, dict):
             reject("CREATE_CONTAINER_PORT_INVALID")

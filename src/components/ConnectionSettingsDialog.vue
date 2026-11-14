@@ -31,6 +31,7 @@ function sshStateChanged(value: SshConnectionState | null) {
 }
 function saved(value: ServerSummary) {
   notifySuccess("连接已保存", value.displayName);
+  close();
 }
 async function tested(value: ServerSummary) {
   await hostConnection.connect(value, connected);

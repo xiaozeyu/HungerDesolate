@@ -1,5 +1,6 @@
 """Test gated Docker network and container creation commands."""
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -12,6 +13,8 @@ SPEC.loader.exec_module(MODULE)
 HOST = "11111111-1111-4111-8111-111111111111"
 INSTANCE = "22222222-2222-4222-8222-222222222222"
 PROJECT_NAME = "fh_22222222222242228222222222222222"
+RELEASE = "44444444-4444-4444-8444-444444444444"
+OTHER_RELEASE = "55555555-5555-4555-8555-555555555555"
 
 
 class DockerTests(unittest.TestCase):
@@ -79,6 +82,32 @@ class DockerTests(unittest.TestCase):
         with patch.object(MODULE, "run", side_effect=command):
             result = MODULE.verify_containers(PROJECT_NAME, HOST, INSTANCE, {"cavesEnabled": True})
         self.assertEqual(result["roles"], ["caves", "master"])
+
+    def _verify_mounts(self, mounts, dst_release_id=RELEASE):
+        ids = "a" * 64 + "\n"
+        labels = '{"com.hungerdesolate.schemaVersion":"1","com.hungerdesolate.hostId":"' + HOST + '","com.hungerdesolate.instanceId":"' + INSTANCE + '","com.hungerdesolate.role":"master"}'
+        def command(args, **_kwargs):
+            if args[:3] == ["docker", "container", "ls"]:
+                return type("Result", (), {"returncode": 0, "stdout": ids})()
+            return type("Result", (), {"returncode": 0, "stdout": labels + "\t" + json.dumps(mounts) + "\t{}\n"})()
+        with patch.object(MODULE, "run", side_effect=command):
+            return MODULE.verify_containers(PROJECT_NAME, HOST, INSTANCE, {"cavesEnabled": False},
+                                            dst_release_id=dst_release_id)
+
+    def test_verification_accepts_the_release_shared_dst_mount_read_only(self):
+        mounts = [{"Type": "bind", "Source": "/var/lib/famine-hub/instances/" + INSTANCE + "/config", "RW": True},
+                  {"Type": "bind", "Source": "/var/lib/famine-hub/dst/" + RELEASE, "RW": False}]
+        self.assertEqual(self._verify_mounts(mounts)["roles"], ["master"])
+
+    def test_verification_rejects_other_external_or_writable_dst_mounts(self):
+        base = {"Type": "bind", "Source": "/var/lib/famine-hub/instances/" + INSTANCE + "/config", "RW": True}
+        for shared in ({"Type": "bind", "Source": "/var/lib/famine-hub/dst/" + RELEASE, "RW": True},
+                       {"Type": "bind", "Source": "/var/lib/famine-hub/dst/" + OTHER_RELEASE, "RW": False},
+                       {"Type": "bind", "Source": "/var/lib/famine-hub/dst", "RW": False},
+                       {"Type": "volume", "Source": "/var/lib/famine-hub/dst/" + RELEASE, "RW": False}):
+            with self.subTest(shared=shared), self.assertRaises(MODULE.DockerRejected) as failure:
+                self._verify_mounts([base, shared])
+            self.assertEqual(str(failure.exception), "CREATE_CONTAINER_MOUNT_INVALID")
 
 
 if __name__ == "__main__":

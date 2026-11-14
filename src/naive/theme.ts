@@ -154,8 +154,8 @@ export function buildThemeOverrides(isDark: boolean): GlobalThemeOverrides {
     Notification: {
       color: t.surface,
       textColor: t.text,
-      borderRadius: "2px",
-      boxShadow: t.shadow,
+      borderRadius: "10px",
+      boxShadow: "none",
       padding: "16px 20px",
       headerTextColor: t.text,
       descriptionTextColor: t.textSecondary,
@@ -163,7 +163,7 @@ export function buildThemeOverrides(isDark: boolean): GlobalThemeOverrides {
       fontSize: "12px",
       titleFontSize: "13px",
       descriptionFontSize: "12px",
-      closeBorderRadius: "2px",
+      closeBorderRadius: "6px",
     },
     Button: {
       borderRadiusTiny: "6px",

@@ -211,7 +211,7 @@ def main(task_path):
                       result=controller["recovery_result"](admission["hostId"], admission["instanceId"]))
         return 1
     try:
-        verification = docker_module["verify_containers"](manifest_value["composeProject"], admission["hostId"], admission["instanceId"], manifest_value, str(controller["ROOT"]))
+        verification = docker_module["verify_containers"](manifest_value["composeProject"], admission["hostId"], admission["instanceId"], manifest_value, str(controller["ROOT"]), release["releaseId"])
     except docker_module["DockerRejected"] as error:
         update_status(task_dir, "failed", "verify", last_completed="publish",
                       error=task_error(task_id, target, str(error), "verify", "容器挂载、标签或端口验证失败"),

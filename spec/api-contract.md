@@ -1,9 +1,9 @@
 # 前后端共享接口契约
 
-- 日期：2026-10-14
-- 契约版本：设计版 v1，DTO `schemaVersion: 1`
+- 日期：2026-10-14；更新：2026-11-17
+- 契约版本：v1，DTO `schemaVersion: 1`
 - 适用范围：Tauri command、前端 fixture、Rust DTO、远端协议转换
-- 依赖：[产品规划](../new-product-plan.md)、[后端实施](backend-implementation.md)、[前端实施](frontend-implementation.md)
+- 依赖：[后端实施](backend-implementation.md)、[前端实施](frontend-implementation.md)
 
 ## 1. 通信与命名
 
@@ -619,7 +619,7 @@ type GetInstanceCreationStatusResponse = {
 | preview_instance_update / previewInstanceUpdate | P | target、expectedRevision、targetReleaseId | 固定目标 Release、分片、保护点和回滚能力；只接受 build 高于当前的已验证 Release |
 | run_instance_update / runInstanceUpdate | T | target、planId、expectedRevision、operationId | 世界存档保护点后切换 Release 并验证 |
 
-当前已实现的 `get_workshop_metadata` 在桌面端通过 HTTPS 查询 Steam Workshop，并返回 `author`/`creatorSteamId` 供主机 MOD 添加前确认，最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，返回期望/已部署启用、期望/已部署配置、期望/已部署产物摘要、准备摘要/时间和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁。配置编辑请求的 `schemaBindings[]` 结构为 `{ workshopId, artifactDigest, modinfoSha256, changedFields[] }`；Rust 在 revision 未变化时重新读取实例快照，复求当前 schema，校验绑定摘要、可编辑字段、枚举候选值与基础类型，并确认未声明字段保持原值。游戏侧以 `name` 持久化配置，同名项会作为共享字段编辑；同名定义的共同候选集/类型由前后端共同校验，无法安全合并的组只读而不阻断其他字段。revision 已变化时由远端操作回执优先支持同一 operationId 幂等重放，新的过期操作仍由 CAS 拒绝。编辑保存会固定当前已准备 contentDigest，成功仅推进实例期望状态与全局 revision，不代表内容已部署或正在运行。配置表单只提交实际修改的字段；复杂/不支持字段与未知旧值保留不变。应用预览通过单一远端权威 probe 绑定 target/revision，列出变更、分片和阻断原因，不要求实例已有冷备份或主机恢复验收；提交时携带 `desiredDigest` 和 `createProtectionBackup` 并在远端重验。应用 worker 获取重型锁、世界配置锁和实例写锁，生成 Master/Caves 独立 UGC MOD Release，校验复制后各 Workshop 内容摘要与 setup 文件，冷停服后按 `createProtectionBackup` 决定是否创建冷保护备份，再原子发布活动 Release、`modoverrides.lua`、部署快照和确定性 Compose；按原状态重建分片，并对原本运行的实例验证游戏进程。请求备份时，失败使用该备份恢复完整原 MOD/配置/Compose/世界组合；未请求备份时不做自动恢复，任务失败并明确提示检查部署状态。worker 中断时 status 查询等待 admission grace 后进行对账。`disable` 和 `remove` 先只保存 desired，必须再预览并应用才会生效。保护备份与普通备份均纳入 MOD desired/deployed 状态和活动 MOD Release；恢复时 rebasing 到新全局 revision。MOD Release 的实际 UGC 下载参数和 Linux amd64 运行兼容仍需实机验收。MOD 应用前置保护点的完整回滚快照存放在 `mod-apply-tasks/<taskId>/protection/`，不再进入用户备份列表。
+当前已实现的 `get_workshop_metadata` 在桌面端通过 HTTPS 查询 Steam Workshop，并返回 `author`/`creatorSteamId` 供主机 MOD 添加前确认，最多 100 个显式 Workshop ID；结果只包含有界元数据，不包含秘密或实例启用状态。`list_instance_mods` 只读响应包含 `snapshotId/capturedAt/source/freshness/configRevision/items`。每项绑定 `workshopId`，返回期望/已部署启用、期望/已部署配置、期望/已部署产物摘要、准备摘要/时间和 `schema`。schema 状态区分 `available`、`partial`、`noOptions`、`unavailable`、`failed`；求值失败或产物未准备时不得返回空配置并标记成功。`save_instance_mods` 使用全局 `expectedRevision` CAS、`operationId` 重放和实例维护锁。配置编辑请求的 `schemaBindings[]` 结构为 `{ workshopId, artifactDigest, modinfoSha256, changedFields[] }`；Rust 在 revision 未变化时重新读取实例快照，复求当前 schema，校验绑定摘要、可编辑字段、枚举候选值与基础类型，并确认未声明字段保持原值。游戏侧以 `name` 持久化配置，同名项会作为共享字段编辑；同名定义的共同候选集/类型由前后端共同校验，无法安全合并的组只读而不阻断其他字段。revision 已变化时由远端操作回执优先支持同一 operationId 幂等重放，新的过期操作仍由 CAS 拒绝。编辑保存会固定当前已准备 contentDigest，成功仅推进实例期望状态与全局 revision，不代表内容已部署或正在运行。配置表单只提交实际修改的字段；复杂/不支持字段与未知旧值保留不变。应用预览通过单一远端权威 probe 绑定 target/revision，列出变更、分片和阻断原因，不要求实例已有冷备份或主机恢复验收；提交时携带 `desiredDigest` 和 `createProtectionBackup` 并在远端重验。应用 worker 获取重型锁、世界配置锁和实例写锁，生成 Master/Caves 独立 UGC MOD Release，校验复制后各 Workshop 内容摘要与 setup 文件，冷停服后按 `createProtectionBackup` 决定是否创建冷保护备份，再原子发布活动 Release、`modoverrides.lua`、部署快照和确定性 Compose；按原状态重建分片，并对原本运行的实例验证游戏进程。请求备份时，失败使用该备份恢复完整原 MOD/配置/Compose/世界组合；未请求备份时不做自动恢复，任务失败并明确提示检查部署状态。worker 中断时 status 查询等待 admission grace 后进行对账。`disable` 和 `remove` 先只保存 desired，必须再预览并应用才会生效。保护备份与普通备份均纳入 MOD desired/deployed 状态和活动 MOD Release；恢复时 rebasing 到新全局 revision。MOD Release 以 `content/322330/<workshopId>` + `appworkshop_322330.acf` 预置，并以 `-ugc_directory /srv/ugc -skip_update_server_mods` 启动；首次启动实际加载结果和 Linux amd64 运行兼容仍需实机验收。MOD 应用前置保护点的完整回滚快照存放在 `mod-apply-tasks/<taskId>/protection/`，不再进入用户备份列表。
 
 主机级 MOD 更新检查将 Workshop `contentHandle` 与主机库 manifest 的 `sourceHandle` 比较；变化时通过 `prepare_host_mods` 获取新内容并写入 `mods/prepared`，不自动改变实例 desired。实例从 `list_host_mods` 选择版本，`save_instance_mods` 只保存 `artifactDigest`。`prepare_host_mods` 使用 HostTarget 和主机任务，不接收实例目标；成功结果只证明内容固定在主机库。
 

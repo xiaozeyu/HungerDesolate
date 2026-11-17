@@ -1,7 +1,8 @@
 # 后端实施文档
 
-- 日期：2026-10-19
-- 状态：实施设计；B2 创建接纳内核、B3 持久任务基础设施和 B4 目录/manifest/release/Compose/资源计划/Docker 创建/runtime 验证内核已落地，真实 runtime/产物实验仍未完成，下一阶段为世界配置
+- 版本：1.3.8
+- 日期：2026-10-19；更新：2026-11-17
+- 状态：已实现主机、Release、专服、世界配置、MOD、备份、DST 更新和删除清理；真实主机验收项见各节与 [当前状态](../docs/current-status.md)
 - 接口依据：[共享接口契约](api-contract.md)
 - 范围：Rust/Tauri 桌面核心、SSH/SFTP、远端受控脚本与 Docker Compose
 
@@ -309,7 +310,7 @@ Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、ena
 
 当前代码已实现完整 desired → preview → 持久 apply task 路径：远端复核 revision/digest；按每实例独立 modsReleaseId 生成 Master/Caves UGC 内容和 setup 文件，逐分片复核内容 digest；停止后归档世界、MOD desired/deployed、活动 MOD Release、Compose 与配置，发布后重建容器。原来运行的实例需通过进程验证，原来停止的实例保持停止。请求冷保护备份时，失败或任务中断使用该保护点恢复原部署组合；未请求时不自动恢复。禁用和移除只改 desired，仍须走预览/应用才能部署。普通备份与恢复现已包含 MOD 状态和活动 MOD Release。
 
-MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有冷备份；即使实例已有世界数据，用户仍可直接应用。未请求备份时失败无法自动回滚，任务错误会明确提示检查部署状态。目标 DST 镜像接受 `-ugc_directory`、setup 文件挂载、UGC 数据可写性及进程实际加载正确 MOD 集合尚需 Linux amd64 主机验收；当前运行验证仅确认容器/DST 进程，不声称已从游戏内部证明有效 MOD 集合。
+MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有冷备份；即使实例已有世界数据，用户仍可直接应用。未请求备份时失败无法自动回滚，任务错误会明确提示检查部署状态。实例 MOD Release 以 `content/322330/<workshopId>` 和 `appworkshop_322330.acf` 预置，启动使用 `-ugc_directory /srv/ugc -skip_update_server_mods`；旧布局和旧 Compose 在启动预检迁移。当前运行验证仍只确认容器/DST 进程，首次启动实际加载的 MOD 集合仍需 Linux amd64 主机验收。
 
 ## 10. 备份与恢复
 

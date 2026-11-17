@@ -1,7 +1,8 @@
 # MOD 管理实现分析与建议
 
-- 分析日期：2026-10-21。
-- 状态：设计建议，未注册新 command，未改变生产行为；文中的新 DTO、目录和限额均为拟议值。
+- 版本：1.3.8
+- 分析日期：2026-10-21；更新：2026-11-17。
+- 状态：主机库、实例期望配置、Lua 求值、MOD 应用和更新已实现；真实主机的首次 UGC 加载仍需验收。
 - 范围：DST（饥荒联机版）服务端 Workshop MOD；沿用 Vue/Rust、SSH 与 Docker Compose 路线。
 - 依据：当前工作区、只读核对的旧项目 `../Famine-ECS`、Steam 官方文档和游戏 Lua 脚本镜像。代码完成、实验通过与发布放行分别记录。
 
@@ -325,4 +326,4 @@ ModsSnapshot 分离 desired、deployed、prepared、observed、updateCheck；至
 - 请求备份时，失败及任务中断对账恢复保护备份中的 MOD/世界配置、活动 Release、Compose 和数据目录；未请求备份时不做自动恢复，任务失败并提示检查部署状态。普通备份与恢复 worker 同步保存/恢复 MOD desired/deployed 快照及活动 MOD Release。
 - 列表支持启用、禁用和移除。禁用/移除仅修改 desired，用户需再次预览并应用；移除确认显示存档数据风险。
 - 隔离测试覆盖 MOD 内容副本校验、应用差异、desired-only MOD 恢复、备份与 MOD Release Compose。
-- **未完成实机验收**：Linux 主机恢复任务成功并写出主机级验收证据之前，应用仍被阻断。目标 DST build 的 `-ugc_directory`、setup 文件挂载、Master/Caves 实际 MOD 加载、网络/Workshop 更新行为以及应用失败注入仍需在 Linux amd64 主机验证。运行验证当前证明进程已启动，不证明游戏已加载期望 MOD 集合。
+- **未完成实机验收**：应用已按 `content/322330/<workshopId>` + `appworkshop_322330.acf` 预置，启动使用 `-ugc_directory /srv/ugc -skip_update_server_mods`；旧布局在启动预检迁移。首次启动实际加载的 Master/Caves MOD 集合、网络/Workshop 更新行为以及应用失败注入仍需在 Linux amd64 主机验证。运行验证当前证明进程已启动，不证明游戏已加载期望 MOD 集合。

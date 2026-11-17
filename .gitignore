@@ -9,3 +9,17 @@ src-tauri/gen/
 .env.local
 .env.*.local
 spec/evidence/screenshots/
+
+# 本地工具与生成物
+__pycache__/
+*.py[cod]
+.idea/
+.claude/
+.tmp*/
+poc/
+docs/video-*/
+
+# 测试源码（保留本地，不入库）
+scripts/test-*
+scripts/create-test-release.sh
+src/**/*.test.ts

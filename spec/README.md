@@ -1,7 +1,7 @@
 # 荒野中枢项目文档
 
-- 版本：1.0.5（Bate）
-- 产品规划：[新项目规划](../new-product-plan.md)
+- 版本：1.3.8
+- 更新：2026-11-17
 - 当前状态：[当前状态](../docs/current-status.md)
 
 本目录保存仍然有效的产品边界、接口契约、前后端实现说明和功能设计。
@@ -13,22 +13,20 @@
 | [接口契约](api-contract.md) | target、DTO、命令、任务、revision、幂等、错误和刷新范围 |
 | [前端实施](frontend-implementation.md) | 路由、页面、组件、状态归属、请求隔离、草稿和交互 |
 | [后端实施](backend-implementation.md) | Rust、SQLite、SSH、manifest、Compose、锁、任务、备份和 MOD |
-| [MOD 管理设计](mod-management-plan.md) | Workshop 获取、固定产物、配置解析、更新和移除 |
+| [MOD 管理设计](mod-management-plan.md) | Workshop 获取、固定产物、配置解析、UGC 目录、更新和移除 |
 | [世界配置设计](world-config-plan.md) | 世界选项、渲染、应用和验证 |
+| [DST 更新设计](dst-update-plan.md) | Release 页检查更新、专服切换版本、保护点、验证和回滚（已实现） |
 | [后续功能](next-features.md) | 尚未完成的真实功能与完成条件 |
 
 ## 规划中的功能
 
-以下文档只定义产品边界、流程、接口草案、难度和验收，不代表已经实现；未注册的 command 不会在界面提供可点击入口。
+以下文档定义剩余待实现能力；未实现前不注册 command，界面不提供可点击的假入口。
 
 | 文档 | 内容 |
 | --- | --- |
-| [运维增强规划](ops-enhancements-plan.md) | 三个功能的优先级、依赖、难度、里程碑和共同约束 |
-| [DST 更新设计](dst-update-plan.md) | Release 页检查更新、专服页切换版本、世界存档保护点、验证、回滚和磁盘治理 |
+| [运维增强规划](ops-enhancements-plan.md) | 剩余功能的优先级、依赖、难度和里程碑 |
 | [定时备份设计](scheduled-backup-plan.md) | 远端 scheduler、准热备份策略、幂等、保留和空间管理 |
 | [玩家列表设计](player-list-plan.md) | 服务端桥接 MOD、Master/Caves 合并、玩家列表和踢出 |
-| [Release 管理列表 UI 规划](release-management-ui-plan.md) | Release 列表字段、摘要、空状态、响应式与操作层级 |
-| [Element Plus 迁移影响评估](element-plus-migration-assessment.md) | 全站/局部/单组件迁移的体积、主题、测试和工期评估 |
 
 ## 冻结约束
 

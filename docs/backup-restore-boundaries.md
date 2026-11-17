@@ -1,6 +1,6 @@
 # 备份与恢复文件边界
 
-- 适用版本：1.0.5
+- 适用版本：1.3.8
 - 依据：`remote-scripts/actions/backup-task.py`、`backup-archive.py`、`restore-task.py`、`mods-apply.py`
 - 状态：已按下方边界实现
 
@@ -81,7 +81,7 @@ metadata 与归档分开保存，记录身份、采集模式、时间、checksum
 ## 5. 内部保护点
 
 - 恢复和 DST 更新创建的保护点是用户可见备份，按 §1 的世界存档边界保存。
-- MOD 应用的完整回滚快照存放在 `mod-apply-tasks/<taskId>/protection/`，不再写入用户备份目录；它属于任务事务，不进入备份列表。
+- MOD 应用的完整回滚快照存放在 `mod-apply-tasks/<taskId>/protection/`，不再写入用户备份目录；它属于任务事务，不进入备份列表。删除专服时会清理该实例的保护点归档。
 
 ## 6. 运行权限
 

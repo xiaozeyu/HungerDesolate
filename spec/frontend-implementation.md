@@ -1,7 +1,8 @@
 # 前端实施文档
 
-- 日期：2026-10-14
-- 状态：实施设计；UI 风格沿用旧产品，导航与数据所有权重建
+- 版本：1.3.8
+- 日期：2026-10-14；更新：2026-11-17
+- 状态：已实现并持续维护；UI 使用 Naive UI 与自有 CSS Token，导航与数据所有权按 target 重建
 - 技术：Vue 3 / TypeScript / Vite / Vue Router / Tauri 2、Naive UI、自有 CSS Token、`@lucide/vue`
 - 契约：[共享接口契约](api-contract.md)
 

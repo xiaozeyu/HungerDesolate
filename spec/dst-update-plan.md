@@ -1,6 +1,6 @@
 # 饥荒服务器更新功能设计
 
-- 版本：1.0.5（已实现核心流程）
+- 版本：1.3.8（已实现核心流程）
 - 日期：2026-11-02
 - 状态：主机检查、实例预览、`instanceUpdate` 切换任务和前端入口已实现；实现差异见 §19
 - 关联：[运维增强总规划](ops-enhancements-plan.md)、[接口契约](api-contract.md)、[后端实施](backend-implementation.md#111-更新)、[Release 准备](../docs/dst-release-setup.md)

@@ -44,6 +44,19 @@ Linux 主机 (serverId + hostId)
 services:
   master:
     image: hungerdesolate/dst-runtime@sha256:...
+    command:
+      - /srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64
+      - -persistent_storage_root
+      - /srv/data
+      - -conf_dir
+      - config
+      - -cluster
+      - Cluster_1
+      - -shard
+      - Master
+      - -ugc_directory
+      - /srv/ugc
+      - -skip_update_server_mods
     volumes:
       - /var/lib/famine-hub/instances/<instanceId>/config:/srv/data/config:rw
       - /var/lib/famine-hub/instances/<instanceId>/data/Master:/srv/data:rw
@@ -72,6 +85,8 @@ networks:
 - DST 二进制包含于 digest 固定的 runtime image，Master/Caves 使用同一 Release
 - 配置、存档、MOD 可写（分片独立）
 - 固定镜像 digest（不使用浮动 tag）
+- MOD 以 `content/322330/<workshopId>` 预置，并由 `appworkshop_322330.acf` 建立 Steam 索引；`-skip_update_server_mods` 保证首启直接加载，不访问 Steam 更新
+- 旧布局 `steamapps/workshop/content/322330` 与缺少跳过更新的 Compose 会在启动预检中自动迁移
 
 ## 端口分配策略
 
@@ -197,6 +212,15 @@ X 的迟到响应到达
 │  └─ <releaseId>/
 │     ├─ release-metadata.json
 │     └─ artifact.tar                  # Docker 镜像 tar
+├─ mods/
+│  ├─ prepared/<workshopId>/<contentDigest>/
+│  │  ├─ manifest.json
+│  │  └─ content/                      # 主机库只读内容
+│  └─ staging/<taskId>/
+├─ host-mod-tasks/<operationId>/       # 主机库下载任务
+├─ mod-apply-tasks/<operationId>/      # MOD 应用任务
+│  └─ protection/<backupId>/           # 应用保护点（删除专服时清理）
+├─ backups/<instanceId>/<backupId>/    # 用户备份（删除专服时一并删除）
 ├─ instances/
 │  └─ <instanceId>/
 │     ├─ manifest.json                 # 实例元数据
@@ -210,13 +234,18 @@ X 的迟到响应到达
 │     │  ├─ Master/                    # Master 存档
 │     │  └─ Caves/                     # Caves 存档
 │     ├─ mods/releases/<releaseId>/
-│     │  ├─ Master/                    # Master MOD
-│     │  └─ Caves/                     # Caves MOD
-│     ├─ backups/
+│     │  ├─ dedicated_server_mods_setup.lua
+│     │  ├─ Master/
+│     │  │  ├─ appworkshop_322330.acf # Steam 已安装索引
+│     │  │  └─ content/322330/<id>/   # Master MOD
+│     │  └─ Caves/
+│     │     ├─ appworkshop_322330.acf
+│     │     └─ content/322330/<id>/   # Caves MOD
 │     ├─ staging/
 │     ├─ tasks/
 │     └─ locks/
-└─ retired/                            # 删除后的归档
+├─ retired/                            # 退役归档（删除专服时一并清理）
+└─ trash/<operationId>/                # 删除回收的短暂中转目录
 ```
 
 ## 锁与并发
@@ -323,7 +352,7 @@ if (response.requestSeq !== latest.requestSeq) {
 
 ## 当前重点
 
-当前版本已完成主机连接、环境与 Docker 安装、Release 构建/导入/验证、专服生命周期、世界配置、主机/专服 MOD、备份恢复、诊断、磁盘清理和全局任务记录。
+当前版本已完成主机连接、环境与 Docker 安装、Release 构建/导入/验证、DST 更新、专服生命周期、世界配置、主机/专服 MOD、UGC 首次启动加载、备份恢复、诊断、删除遗留清理和全局任务记录。
 
 后续工作只保留真实功能缺口，不再维护阶段工作包。具体能力与边界见：
 

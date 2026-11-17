@@ -1,7 +1,7 @@
 # 主机级 MOD 库
 
-- 更新时间：2026-10-30
-- 状态：主机级 MOD 内容库已接入；备份策略仍保持现有实现
+- 更新时间：2026-11-17
+- 状态：主机级 MOD 内容库、实例 MOD 应用和 UGC 首次启动加载已接入；真实主机验收继续跟进
 
 ## 1. 设计边界
 
@@ -28,10 +28,28 @@
   instances/<instanceId>/
     desired/mods.json
     deployed-mods.json
+    config/Cluster_1/<Master|Caves>/modoverrides.lua
     mods/releases/<modsReleaseId>/
+      dedicated_server_mods_setup.lua
+      <Master|Caves>/
+        appworkshop_322330.acf
+        content/322330/<workshopId>/
 ```
 
 主库内容由 root 管理，内容目录只读；实例应用时复制到实例 Release，并设置运行 UID。
+
+## 2.1 UGC 运行布局
+
+实例的每个分片目录直接挂载为容器内 `/srv/ugc`，启动参数为：
+
+```text
+-ugc_directory /srv/ugc -skip_update_server_mods
+```
+
+- DST v2 加载器按 `content/322330/<workshopId>` 读取 MOD；
+- `appworkshop_322330.acf` 是 Steam 的已安装 Workshop 索引，跳过启动更新时必须存在，否则引擎枚举不到 MOD；
+- 新应用会直接生成索引；旧 Release 在启动预检时把 `steamapps/workshop/content/322330` 迁移到规范路径并补齐索引；
+- 升级前没有“跳过更新”的 Compose 会在启动预检中识别并重建，避免漂移报错。
 
 ## 3. 当前流程
 
@@ -95,34 +113,22 @@
 
 单个版本仍可通过现有删除操作处理。
 
+删除专服时：
+
+- `instances/<instanceId>` 内的活动/历史 MOD Release、索引、`modoverrides.lua` 和期望/已部署快照随实例目录删除；
+- 该实例的用户备份、退役目录和 MOD 应用/DST 更新保护点归档一并清理；
+- Compose 项目网络按项目名补充识别并删除；
+- 主机库 `mods/prepared` 是共享内容，不随实例删除；最新版本按设计保留，未被引用的旧版本在下一次主机库准备/更新时回收。
+
 ## 6. 备份策略
 
-按后续要求，备份将改为引用主机库：
+备份只记录实例的 MOD 引用，不重复保存 MOD 内容。
 
-- 备份只记录实例的 MOD 引用，不重复保存 MOD 内容。
-- 恢复时检查主机库是否存在对应 MOD。
-- 采用主机库当前最新版本，而不是备份中的旧版本。
-- 主机库已删除该 MOD 时，恢复前提示用户“MOD 缺失，恢复可能导致世界崩溃”，但不阻止恢复。
-
-实现前需要补齐：
-
-- 备份 metadata 记录 `workshopId + contentDigest/版本`；
-- 恢复预检读取主机库最新版本并返回差异；
-- 缺失时返回可确认的 warning，而不是直接拒绝；
-- 恢复任务使用选定的主机库版本；
-
-关键点：由于备份不再保存活动 MOD Release 内容，恢复不能直接恢复备份中的 MOD Release。恢复流程需要：
-
-1. 读取备份中的实例 MOD 期望列表和配置；
-2. 对每个 Workshop 选择主机库最新内容摘要；
-3. 从主机库重建实例 MOD Release、`modoverrides.lua` 和活动 Release 引用；
-4. 更新 `desired-mods`/`deployed-mods` 到新摘要；
-5. 对主机库缺失的 MOD 给出 warning，并允许用户继续；
-6. 继续恢复世界存档和运行容器。
-
-如果主机库版本比备份版本新，MOD 配置 schema 或行为可能变化；恢复预检需要展示版本差异和风险，但不能阻止用户。
-
-当前实现已经按上述方向接入：备份不再保存活动 MOD Release 内容，metadata 记录 MOD 引用；恢复读取主机库最新内容并重建 MOD Release，缺失时返回 `modsWarnings`，仍允许恢复。
+- metadata 记录 `workshopId + artifactDigest`；
+- 恢复读取备份中的期望列表与配置，选择主机库当前最新内容；
+- 从主机库重建实例 MOD Release、`modoverrides.lua` 和活动 Release；
+- 主机库缺失对应 MOD 时返回 `modsWarnings`，提示可能导致世界异常，但不阻止恢复；
+- 主机库版本比备份新时只展示版本差异与风险，不阻断恢复。
 
 ## 7. 验证
 
@@ -148,3 +154,6 @@ Rust：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`carg
 - 复用相同内容摘要时更新 manifest 的名称、作者、预览图和来源 handle。
 - 图片 URL 带内容摘要缓存参数，版本变化后刷新预览图。
 - `modinfo.lua` 的数字选项描述会转换为文本；解析失败时保留已读取的元数据，并回退主机库名称/版本。
+- 主机库列表会取回每个 MOD 最新版本的 `modinfo.lua`，由桌面端沙箱 Lua 求值（locale=zh）生成名称/作者/版本；函数、条件表达式和表索引不再显示为配置项名称。
+- 实例 MOD Release 采用 `content/322330` + `appworkshop_322330.acf`，首次启动直接加载预置内容；旧布局自动迁移。
+- 删除专服会清理实例 MOD 数据、保护点归档和 Compose 网络；主机库内容按共享库策略保留。

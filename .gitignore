@@ -21,5 +21,6 @@ docs/video-*/
 
 # 测试源码（保留本地，不入库）
 scripts/test-*
+!scripts/test-player-bridge-files.py
 scripts/create-test-release.sh
 src/**/*.test.ts

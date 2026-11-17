@@ -1,11 +1,17 @@
 """Persistent instance-create worker until game deployment is validated."""
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import uuid
 from datetime import datetime, timezone
+
+BRIDGE_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+BRIDGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def task_error(task_id, target, code="DEPLOYMENT_VALIDATION_REQUIRED", category="stagingVerify",
@@ -32,9 +38,11 @@ def captured_at():
 
 def resource_plan(manifest, release):
     project = manifest["composeProject"]
-    mounts = ["config", "data/Master", "mods/releases/" + release["releaseId"] + "/Master"]
+    mounts = ["config", "data/Master", "mods/releases/" + release["releaseId"] + "/Master",
+              "bridge/Master"]
     if manifest.get("cavesEnabled"):
-        mounts.extend(["data/Caves", "mods/releases/" + release["releaseId"] + "/Caves"])
+        mounts.extend(["data/Caves", "mods/releases/" + release["releaseId"] + "/Caves",
+                       "bridge/Caves"])
     return {"schemaVersion": 1, "instanceId": manifest["instanceId"],
             "composeProject": project, "network": project + "_default",
             "bindMounts": mounts, "publishedPorts": manifest["ports"],
@@ -82,7 +90,7 @@ def safe_directory(path, controller, create=False, allow_runtime=False):
     return info
 
 
-def manifest(admission, request_record):
+def manifest(admission, request_record, player_bridge):
     settings = request_record.get("input")
     if not isinstance(settings, dict) or not isinstance(settings.get("cavesEnabled"), bool):
         reject("CREATE_REQUEST_INVALID")
@@ -94,7 +102,80 @@ def manifest(admission, request_record):
             "ports": admission["ports"],
             "desiredDigests": {"world": None, "mods": None},
             "deploymentId": None, "dstReleaseId": None, "modsReleaseId": None,
+            "playerBridge": player_bridge,
             "worldAppliedRevision": None, "modsAppliedRevision": None}
+
+
+def bridge_build(request_record):
+    build = request_record.get("bridge")
+    if (not isinstance(build, dict) or set(build) != {"version", "digest", "files"}
+            or not isinstance(build.get("version"), str)
+            or BRIDGE_VERSION_RE.fullmatch(build["version"]) is None
+            or not isinstance(build.get("digest"), str)
+            or BRIDGE_DIGEST_RE.fullmatch(build["digest"]) is None
+            or not isinstance(build.get("files"), dict)
+            or set(build["files"]) != {"modinfo.lua", "modmain.lua"}):
+        reject("CREATE_BRIDGE_PAYLOAD_INVALID")
+    decoded = {}
+    for name in ("modinfo.lua", "modmain.lua"):
+        value = build["files"][name]
+        if not isinstance(value, str):
+            reject("CREATE_BRIDGE_PAYLOAD_INVALID")
+        try:
+            data = base64.b64decode(value, validate=True)
+            data.decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            reject("CREATE_BRIDGE_PAYLOAD_INVALID")
+        if not data or len(data) > 256 * 1024:
+            reject("CREATE_BRIDGE_PAYLOAD_INVALID")
+        decoded[name] = data
+    hasher = hashlib.sha256()
+    for name in ("modinfo.lua", "modmain.lua"):
+        hasher.update(name.encode("ascii") + b"\0" + decoded[name])
+    if "sha256:" + hasher.hexdigest() != build["digest"]:
+        reject("CREATE_BRIDGE_DIGEST_MISMATCH")
+    return build["version"], build["digest"], decoded
+
+
+def prepare_bridge(task_dir, instance, caves, request_record, controller, existing_manifest):
+    version, digest, files = bridge_build(request_record)
+    overrides_ns = {"__name__": "mods_overrides"}
+    exec(compile((task_dir / "overrides-source.py").read_text(),
+                "<mods-overrides>", "exec"), overrides_ns)
+    bridge_root = instance / "bridge"
+    safe_directory(bridge_root, controller, create=True, allow_runtime=True)
+    os.chown(bridge_root, 1000, 1000)
+    os.chmod(bridge_root, 0o700)
+    for shard in ("Master", "Caves") if caves else ("Master",):
+        bridge = bridge_root / shard
+        safe_directory(bridge, controller, create=True, allow_runtime=True)
+        os.chown(bridge, 1000, 1000)
+        os.chmod(bridge, 0o700)
+        for name in ("modinfo.lua", "modmain.lua"):
+            path = bridge / name
+            controller["atomic_bytes"](path, files[name], 0o644, allow_runtime=True)
+            os.chown(path, 0, 0)
+            os.chmod(path, 0o644)
+        config = instance / "config" / "Cluster_1" / shard
+        for current in (instance / "config", instance / "config" / "Cluster_1", config):
+            safe_directory(current, controller, create=True, allow_runtime=True)
+            os.chown(current, 1000, 1000)
+            os.chmod(current, 0o700)
+        overrides = config / "modoverrides.lua"
+        controller["atomic_bytes"](overrides, overrides_ns["modoverrides"]([], True), 0o600,
+                                   allow_runtime=True)
+        os.chown(overrides, 1000, 1000)
+        os.chmod(overrides, 0o600)
+    installed_at = None
+    if isinstance(existing_manifest, dict):
+        previous = existing_manifest.get("playerBridge")
+        if (isinstance(previous, dict) and previous.get("version") == version
+                and previous.get("digest") == digest
+                and isinstance(previous.get("installedAt"), str)
+                and previous["installedAt"]):
+            installed_at = previous["installedAt"]
+    return {"enabled": True, "version": version, "digest": digest,
+            "installedAt": installed_at or captured_at()}
 
 
 def prepare_instance(task_dir, admission, request_record, controller):
@@ -107,18 +188,22 @@ def prepare_instance(task_dir, admission, request_record, controller):
     directories = [
         "config", "desired", "desired-secrets",
         "mods", "mods/releases", "data", "data/Master", "data/Master/config", "logs", "staging",
-        "staging/" + task_dir.name, "tasks", "tasks/" + task_dir.name, "locks",
+        "staging/" + task_dir.name, "tasks", "tasks/" + task_dir.name, "locks", "bridge",
     ]
     if caves:
-        directories.extend(["data/Caves", "data/Caves/config", "mods/releases/Master", "mods/releases/Caves"])
+        directories.extend(["data/Caves", "data/Caves/config", "mods/releases/Master",
+                            "mods/releases/Caves", "bridge/Caves"])
     else:
         directories.append("mods/releases/Master")
+    directories.append("bridge/Master")
     for relative in directories:
-        safe_directory(instance / relative, controller, create=True, allow_runtime=relative.startswith("data/"))
-    expected = manifest(admission, request_record)
+        safe_directory(instance / relative, controller, create=True,
+                       allow_runtime=relative.startswith("data/") or relative.startswith("bridge"))
     manifest_path = instance / "manifest.json"
-    if manifest_path.exists():
-        existing = controller["read_json"](manifest_path, 65536)
+    existing = controller["read_json"](manifest_path, 65536) if manifest_path.exists() else None
+    player_bridge = prepare_bridge(task_dir, instance, caves, request_record, controller, existing)
+    expected = manifest(admission, request_record, player_bridge)
+    if existing is not None:
         if existing != expected:
             reject("CREATE_MANIFEST_CONFLICT")
     else:
@@ -152,8 +237,9 @@ def main(task_path):
     update_status(task_dir, "running", "prepareDirectories", last_completed="reserve", cancel_allowed=False)
     try:
         prepare_instance(task_dir, admission, request_record, controller)
-    except RuntimeError as error:
-        code = str(error)
+    except Exception as error:
+        code = str(error) if type(error).__name__ in ("RuntimeError", "TaskRejected") \
+            else "CREATE_PREPARE_FAILED"
         update_status(task_dir, "failed", "prepareDirectories", last_completed="reserve",
                       error={"schemaVersion": 1, "code": code, "category": "prepareDirectories",
                              "operation": "instanceCreate", "requestId": None,

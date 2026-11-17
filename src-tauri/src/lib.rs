@@ -20,6 +20,7 @@ mod managed_files;
 mod mod_parser;
 mod mods;
 mod persistence;
+mod players;
 mod registry;
 mod release_catalog;
 mod release_import;
@@ -104,6 +105,9 @@ pub fn run() -> tauri::Result<()> {
             commands::save_instance_mods,
             commands::preview_apply_instance_mods,
             commands::apply_instance_mods,
+            commands::get_instance_players,
+            commands::preview_instance_player_bridge,
+            commands::install_instance_player_bridge,
             commands::cancel_instance_mod_apply,
             commands::get_instance_mod_apply_task,
             commands::list_instance_mod_apply_tasks,

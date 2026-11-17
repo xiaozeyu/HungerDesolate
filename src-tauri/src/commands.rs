@@ -342,6 +342,48 @@ pub async fn apply_instance_mods(
 }
 
 #[tauri::command]
+pub async fn get_instance_players(
+    state: State<'_, AppState>,
+    request: crate::players::PlayersRequest,
+) -> CommandResult<crate::players::PlayersResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "getInstancePlayers",
+        safe_request_id(&request.request_id),
+        move || crate::players::list(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_instance_player_bridge(
+    state: State<'_, AppState>,
+    request: crate::players::BridgeRequest,
+) -> CommandResult<crate::players::BridgeStatusResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "previewInstancePlayerBridge",
+        safe_request_id(&request.request_id),
+        move || crate::players::preview_bridge(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn install_instance_player_bridge(
+    state: State<'_, AppState>,
+    request: crate::players::BridgeRequest,
+) -> CommandResult<crate::players::BridgeStatusResponse> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "installInstancePlayerBridge",
+        safe_request_id(&request.request_id),
+        move || crate::players::apply_bridge(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn cancel_instance_mod_apply(
     state: State<'_, AppState>,
     request: crate::mods::ApplyTaskRequest,

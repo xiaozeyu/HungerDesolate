@@ -17,6 +17,21 @@ const availableReleases=computed(()=>releaseOptions().filter(item=>item.verified
   value:item.releaseId,label:`DST ${item.dstBuild} · ${item.releaseId.slice(0,8)}`,
 })));
 const selectedRelease=computed(()=>releaseOptions().find(item=>item.releaseId===selectedReleaseId.value));
+const taskTone=computed(()=>task.value?.status==="failed"?"danger":task.value?.status==="succeeded"?"success":"warning");
+const taskStatusLabel=computed(()=>{
+  const labels:Record<string,string>={failed:"创建失败",succeeded:"容器已验证",interrupted:"待核实",cancelled:"已取消"};
+  return labels[task.value?.status??""]??"创建容器中";
+});
+const taskProgressLabel=computed(()=>{
+  const current=task.value;
+  if(!current)return "";
+  if(current.status==="failed")return creationTaskErrorLabel(current.error?.code);
+  if(current.status==="succeeded")return "容器环境已完成验证，可进入世界配置";
+  if(current.status==="interrupted")return "创建任务进程已结束，请核对现场后继续或清理";
+  if(current.status==="cancelled")return "创建任务已取消";
+  return creationTaskStageLabel(current.stage);
+});
+const taskErrorVisible=computed(()=>!!task.value?.error&&["failed","interrupted"].includes(task.value.status));
 const blockers=computed(()=>{
   const value=error.value?.details?.blockers;
   return Array.isArray(value)?value.filter((item):item is string=>typeof item==="string"):[];
@@ -43,13 +58,13 @@ function goRelease(){if(!props.server)return;emit("update:open",false);void rout
     <template v-else>
       <div class="creation-preview-heading">
         <div><span class="eyebrow">创建专服</span><h3>{{fields.displayName}}</h3></div>
-        <StatusLabel :tone="task.status==='failed'?'danger':task.status==='succeeded'?'success':'warning'" :label="task.status==='failed'?'创建失败':task.status==='succeeded'?'容器已验证':'创建容器中'"/>
+        <StatusLabel :tone="taskTone" :label="taskStatusLabel"/>
       </div>
       <div class="creation-task-state" :class="task.status">
-        <StatusLabel :tone="task.status==='failed'?'danger':task.status==='succeeded'?'success':'warning'" :label="task.status==='failed'?'创建失败':task.status==='succeeded'?'容器已验证':'创建容器中'"/>
-        <span>{{task.status==='failed'?creationTaskErrorLabel(task.error?.code):task.status==='succeeded'?'容器环境已完成验证，可进入世界配置':creationTaskStageLabel(task.stage)}}</span>
+        <StatusLabel :tone="taskTone" :label="taskStatusLabel"/>
+        <span>{{taskProgressLabel}}</span>
       </div>
-      <div v-if="task.status==='failed' && task.error" class="environment-error" role="alert">
+      <div v-if="taskErrorVisible && task.error" class="environment-error" role="alert">
         <strong>{{creationTaskStageLabel(task.stage)}} · {{task.error.code}}</strong>
         <p>{{task.error.message}}</p>
         <pre v-if="typeof task.error.details.composeDiagnostic==='string'">{{task.error.details.composeDiagnostic}}</pre>

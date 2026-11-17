@@ -26,7 +26,7 @@
 | --- | --- |
 | [运维增强规划](ops-enhancements-plan.md) | 剩余功能的优先级、依赖、难度和里程碑 |
 | [定时备份设计](scheduled-backup-plan.md) | 远端 scheduler、准热备份策略、幂等、保留和空间管理 |
-| [玩家列表设计](player-list-plan.md) | 服务端桥接 MOD、Master/Caves 合并、玩家列表和踢出 |
+| [玩家列表设计](player-list-plan.md) | 服务端桥接 MOD、Master/Caves 合并、只读玩家列表；踢出未实现 |
 
 ## 冻结约束
 

@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowLeft, Cpu, FileText, Gauge, Globe2, HardDrive, List, Moon, Package, Server, Settings, Sun, TerminalSquare, Wrench } from "@lucide/vue";
+import { ArrowLeft, Cpu, FileText, Gauge, Globe2, HardDrive, List, Moon, Package, Server, Settings, Sun, TerminalSquare, Users, Wrench } from "@lucide/vue";
 import { NButton, NConfigProvider, NLayout, NLayoutContent, NLayoutFooter, NLayoutHeader, NLayoutSider, darkTheme, lightTheme, zhCN } from "naive-ui";
 import { useWorkspace } from "./composables/useWorkspace";
 import { buildThemeOverrides } from "./naive/theme";
@@ -41,9 +41,9 @@ const activeInstanceId = computed(() => String(contextRoute.value.params.instanc
 const activeServer = computed(() => workspace.servers.value.find(server => server.serverId === activeServerId.value));
 const activeInstance = computed(() => activeServer.value?.hostId ? workspace.instances(activeServer.value.hostId).find(instance => instance.instanceId === activeInstanceId.value) : undefined);
 const instancePages = [
-    { name: "overview", label: "概览", icon: Gauge }, { name: "world", label: "世界", icon: Globe2 },
-    { name: "mods", label: "MOD", icon: Wrench }, { name: "backups", label: "备份", icon: HardDrive },
-    { name: "diagnostics", label: "诊断", icon: TerminalSquare },
+    { name: "overview", label: "概览", icon: Gauge }, { name: "players", label: "玩家", icon: Users },
+    { name: "world", label: "世界", icon: Globe2 }, { name: "mods", label: "MOD", icon: Wrench },
+    { name: "backups", label: "备份", icon: HardDrive }, { name: "diagnostics", label: "诊断", icon: TerminalSquare },
 ];
 function hostRoute(page: string) { void router.push(activeServerId.value ? `/hosts/${activeServerId.value}/${page}` : "/hosts"); }
 

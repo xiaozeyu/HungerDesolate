@@ -28,6 +28,8 @@ Docker 安装预检只读 `/etc/os-release`、管理身份、dpkg/source 配置�
 
 `actions/instance-delete.py` 提供删除预览与确认执行：planId 绑定 registry revision、停止容器身份、网络端点和实例目录快照；执行时重新核验，只在容器全部停止后移除归属明确的容器/网络，并永久删除实例目录、实例备份和旧 `retired` 数据，不再保留归档、不要求删除前备份。测试入口为 `python3 scripts/test-instance-delete.py`。
 
+`player-bridge/` 是只读服务端 MOD：每 5 秒把在线玩家和角色写入 TheSim 持久键 `hungerhub_bridge_state`，不读取命令、不执行踢出。新建实例由创建 worker 写入桥接文件和 `modoverrides.lua`；已有实例由玩家页调用 `actions/player-bridge-apply.py` 安装，运行中的实例需下次重启后加载。查询探针 `probes/instance-players.py` 只读取固定状态键，合并 Master/Caves、去重并按 30/120 秒判断新鲜度；状态键排除在备份归档之外。测试入口 `python3 scripts/test-player-bridge-files.py`、`python3 scripts/test-player-bridge-apply.py`、`python3 scripts/test-instance-players.py`。
+
 当前 worker 已实现实例目录树和初始 manifest 的安全发布；目录/manifest 完成后在 `download` 阶段等待已验证 release，不生成未验证的 Compose，不创建网络/卷，不启动游戏容器。
 
 `actions/instance-release.py` 负责校验固定 Linux amd64 release 和 digest pin Compose 渲染。worker 只把结果写入 `staging/<taskId>`，执行 `docker compose config --quiet` 并生成资源计划；随后在 `publish` 等待阶段 0 的真实产物和容器验证，不执行 `up` 或创建容器。测试入口为 `python3 scripts/test-instance-release.py`。

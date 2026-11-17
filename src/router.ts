@@ -10,6 +10,7 @@ import HostEnvironmentPage from "./pages/HostEnvironmentPage.vue";
 import HostModsPage from "./pages/HostModsPage.vue";
 import ReleaseManagementPage from "./pages/ReleaseManagementPage.vue";
 import InstanceOverviewPage from "./pages/InstanceOverviewPage.vue";
+import PlayersPage from "./pages/PlayersPage.vue";
 import WorldPage from "./pages/WorldPage.vue";
 import ModsPage from "./pages/ModsPage.vue";
 import BackupsPage from "./pages/BackupsPage.vue";
@@ -26,6 +27,7 @@ export const router = createRouter({
         { path: "/hosts/:serverId/releases", component: ReleaseManagementPage, meta: { title: "Release 管理" } },
         ...[
             { name: "overview", title: "概览", component: InstanceOverviewPage },
+            { name: "players", title: "玩家", component: PlayersPage },
             { name: "world", title: "世界", component: WorldPage },
             { name: "mods", title: "MOD", component: ModsPage },
             { name: "backups", title: "备份", component: BackupsPage },

@@ -36,6 +36,7 @@
 | 备份 | 恢复失败直接显示 `BACKUP_RESTORE_*` 或归档内部错误 | 不知道世界有没有被改动 | “恢复未完成；当前世界未替换/已回滚”+ 下一步 |
 | 主机 MOD 库 | `artifactDigest`、`sourceHandle`、`workshop metadata`、`staging` | 不知道 MOD 文件是否已准备好 | “MOD 文件版本”“创意工坊信息”“暂存目录” |
 | 专服 MOD | `desiredDigest`、`schemaBindings`、`modinfoSha256`、`modApply` | 不知道配置是否已应用 | “保存的 MOD 配置”“配置项校验”“应用 MOD” |
+| 玩家 | `PLAYER_BRIDGE_LAYOUT_UNSUPPORTED`、`PLAYER_STATE_INVALID`、`PLAYER_BRIDGE_OVERRIDES_UNMANAGED` | 不知道为何不能启用或没有数据 | “当前实例布局不支持玩家桥接”“玩家状态暂不可用”“现有 MOD 覆盖文件不是应用生成的格式” |
 | 世界配置 | `revision conflict`、`desired/deployed`、`digest` | 不知道哪份配置生效 | “配置已在其他窗口更新”“已保存/已应用”“配置指纹” |
 | 概览 | `blocker` 代码、`processOnly`、`verificationLevel` | 不知道阻断含义和验证程度 | “待处理项”“仅确认进程，尚未验证玩家可连接” |
 | 专服创建 | `CREATE_BLOCKED details.blockers`、`COMPOSE_DIAGNOSTIC` | 需要自己翻译大写下划线代码 | 显示白名单中文阻断项；诊断代码放入详情 |

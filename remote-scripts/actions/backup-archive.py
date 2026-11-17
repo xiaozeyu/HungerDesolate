@@ -13,7 +13,8 @@ MAX_FILES = 200_000
 MAX_BYTES = 64 * 1024 * 1024 * 1024
 MAX_METADATA = 2 * 1024 * 1024
 EXCLUDED_NAMES = {"cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt",
-                  "server_log.txt", "server_chat_log.txt", "client_log.txt"}
+                  "server_log.txt", "server_chat_log.txt", "client_log.txt",
+                  "hungerhub_bridge_state", "hungerhub_bridge_command", "hungerhub_bridge_result"}
 
 
 class BackupRejected(Exception):

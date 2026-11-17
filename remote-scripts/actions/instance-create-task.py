@@ -39,7 +39,7 @@ def valid_uuid(value):
         return False
 
 
-def safe_directory(path, create=False):
+def safe_directory(path, create=False, allow_runtime=False):
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -47,7 +47,8 @@ def safe_directory(path, create=False):
             raise
         path.mkdir(mode=0o700)
         info = path.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+    owners = (0, os.geteuid(), 1000) if allow_runtime else (0, os.geteuid())
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
             or info.st_mode & 0o077):
         reject("CREATE_TASK_PATH_UNSAFE")
     return info
@@ -79,8 +80,8 @@ def read_json(path, limit):
         reject("CREATE_TASK_STATE_INVALID")
 
 
-def atomic_bytes(path, payload, mode=0o600):
-    safe_directory(path.parent, create=True)
+def atomic_bytes(path, payload, mode=0o600, allow_runtime=False):
+    safe_directory(path.parent, create=True, allow_runtime=allow_runtime)
     temporary = path.parent / ("." + path.name + "." + str(uuid.uuid4()) + ".tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
@@ -301,11 +302,12 @@ def recovery_result(host_id, instance_id):
                                  {"action": "inspectLogs", "label": "查看任务日志", "requiresPreview": False}]}
 
 
-def start(request, worker_source, runtime_source, release_source, docker_source):
+def start(request, worker_source, runtime_source, release_source, docker_source, overrides_source):
     operation_id = request.get("operationId")
     if not valid_uuid(operation_id) or request.get("action") != "start":
         reject("CREATE_TASK_INPUT_INVALID")
-    if not worker_source or not runtime_source or not release_source or not docker_source:
+    if (not worker_source or not runtime_source or not release_source
+            or not docker_source or not overrides_source):
         reject("CREATE_CONTROLLER_BUNDLE_INVALID")
     if os.geteuid() != 0:
         reject("ROOT_REQUIRED")
@@ -345,7 +347,7 @@ def start(request, worker_source, runtime_source, release_source, docker_source)
         request_record = {"schemaVersion": 1, "requestDigest": request_digest(request),
                           "operationId": operation_id, "planId": request.get("planId"),
                           "hostId": request.get("hostId"), "input": request.get("input"),
-                          "admission": admitted}
+                          "bridge": request.get("bridge"), "admission": admitted}
         write_json(directory / "request.json", request_record)
         write_json(directory / "admission.json", admitted)
         write_json(directory / "release.json", release)
@@ -355,6 +357,7 @@ def start(request, worker_source, runtime_source, release_source, docker_source)
         atomic_bytes(directory / "controller-runtime.py", runtime_source.encode(), 0o600)
         atomic_bytes(directory / "instance-release.py", release_source.encode(), 0o600)
         atomic_bytes(directory / "instance-docker.py", docker_source.encode(), 0o600)
+        atomic_bytes(directory / "overrides-source.py", overrides_source.encode(), 0o600)
         unit = "famine-instance-" + operation_id.replace("-", "")
         launch = subprocess.run(
             ["/usr/bin/systemd-run", "--quiet", "--no-block", "--collect", "--unit", unit,
@@ -402,7 +405,8 @@ def main(request):
         action = request.get("action")
         if action == "start":
             data = start(request, globals().get("WORKER_SOURCE", ""), globals().get("RUNTIME_SOURCE", ""),
-                         globals().get("RELEASE_SOURCE", ""), globals().get("DOCKER_SOURCE", ""))
+                         globals().get("RELEASE_SOURCE", ""), globals().get("DOCKER_SOURCE", ""),
+                         globals().get("OVERRIDES_SOURCE", ""))
         elif action == "status":
             data = status(request.get("taskId"))
         else:

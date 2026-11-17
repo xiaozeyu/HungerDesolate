@@ -20,6 +20,7 @@ const TASK: &str = include_str!("../../remote-scripts/actions/instance-create-ta
 const WORKER: &str = include_str!("../../remote-scripts/actions/instance-create-worker.py");
 const RELEASE: &str = include_str!("../../remote-scripts/actions/instance-release.py");
 const DOCKER: &str = include_str!("../../remote-scripts/actions/instance-docker.py");
+const OVERRIDES: &str = include_str!("../../remote-scripts/actions/mods-overrides.py");
 const MAX_OUTPUT: usize = 256 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -319,8 +320,9 @@ fn execute(session: &Session, request: &Value) -> CommandResult<Option<RemoteTas
             .map_err(|_| error("CREATE_TASK_PROTOCOL_INVALID", "远端脚本无法编码"))
     };
     let source = format!(
-        "import base64\n{ADMISSION}\n{TASK}\nWORKER_SOURCE={worker}\nRUNTIME_SOURCE={runtime}\nRELEASE_SOURCE={release}\nDOCKER_SOURCE={docker}\nmain(json.loads(base64.b64decode('{request_source}').decode('utf-8')))\n",
-        worker = py(WORKER)?, runtime = py(TASK)?, release = py(RELEASE)?, docker = py(DOCKER)?
+        "import base64\n{ADMISSION}\n{TASK}\nWORKER_SOURCE={worker}\nRUNTIME_SOURCE={runtime}\nRELEASE_SOURCE={release}\nDOCKER_SOURCE={docker}\nOVERRIDES_SOURCE={overrides}\nmain(json.loads(base64.b64decode('{request_source}').decode('utf-8')))\n",
+        worker = py(WORKER)?, runtime = py(TASK)?, release = py(RELEASE)?, docker = py(DOCKER)?,
+        overrides = py(OVERRIDES)?
     );
     let mut channel = session
         .channel_session()
@@ -405,7 +407,7 @@ pub fn start(database: &Path, request: StartRequest) -> CommandResult<TaskRespon
         })
         .map_err(|_| error("CREATE_TASK_PROTOCOL_INVALID", "创建容器请求无法编码"))?;
         let operation_id = &request.operation_id;
-        let task = execute(session, &json!({"action":"start","schemaVersion":1,"operationId":operation_id,"planId":operation_id,"hostId":&request.target.host_id,"expectedRegistryRevision":request.expected_registry_revision,"input":input}))?
+        let task = execute(session, &json!({"action":"start","schemaVersion":1,"operationId":operation_id,"planId":operation_id,"hostId":&request.target.host_id,"expectedRegistryRevision":request.expected_registry_revision,"input":input,"bridge":crate::players::bridge_payload()}))?
             .ok_or_else(|| error("CREATE_TASK_PROTOCOL_INVALID", "创建任务响应为空"))?;
         Ok(TaskResponse {
             schema_version: 1,

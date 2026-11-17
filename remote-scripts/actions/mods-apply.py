@@ -359,50 +359,6 @@ def validate_desired(instance, request):
     return desired, mods, digest(mods)
 
 
-def lua_string(value):
-    pieces = []
-    for character in value:
-        code = ord(character)
-        if character == "\\": pieces.append("\\\\")
-        elif character == '"': pieces.append('\\"')
-        elif character == "\n": pieces.append("\\n")
-        elif character == "\r": pieces.append("\\r")
-        elif character == "\t": pieces.append("\\t")
-        elif code < 32 or code == 127: pieces.append("\\%03d" % code)
-        else: pieces.append(character)
-    return '"' + "".join(pieces) + '"'
-
-
-def lua_value(value, depth=0):
-    if depth > 12: reject("MOD_CONFIG_UNSUPPORTED")
-    if value is None: reject("MOD_CONFIG_UNSUPPORTED")
-    if type(value) is bool: return "true" if value else "false"
-    if type(value) is int: return str(value)
-    if isinstance(value, float):
-        if not __import__("math").isfinite(value): reject("MOD_CONFIG_UNSUPPORTED")
-        return repr(value)
-    if isinstance(value, str): return lua_string(value)
-    if isinstance(value, list): return "{" + ",".join(lua_value(item, depth + 1) for item in value) + "}"
-    if isinstance(value, dict):
-        if not all(isinstance(key, str) for key in value): reject("MOD_CONFIG_UNSUPPORTED")
-        return "{" + ",".join("[" + lua_string(key) + "]=" + lua_value(value[key], depth + 1)
-                              for key in sorted(value)) + "}"
-    reject("MOD_CONFIG_UNSUPPORTED")
-
-
-def modoverrides(mods):
-    enabled = [item for item in mods if item["enabled"]]
-    rows = []
-    for item in enabled:
-        rows.append("  [" + lua_string("workshop-" + item["workshopId"]) + "]={enabled=true,configuration_options="
-                    + lua_value(item["configurationOptions"]) + "}")
-    return ("return {\n" + ",\n".join(rows) + ("\n" if rows else "") + "}\n").encode()
-
-
-def setup_script(mods):
-    return "".join('ServerModSetup("' + item["workshopId"] + '")\n' for item in mods if item["enabled"]).encode()
-
-
 def appworkshop_entries(mods):
     entries = []
     for item in mods:
@@ -455,7 +411,9 @@ def load_task_sources(directory):
     exec(compile((directory / "restore-source.py").read_text(), "<mod-apply-restore>", "exec"), restore_ns)
     download_ns = {"__name__": "mods_download"}
     exec(compile((directory / "download-source.py").read_text(), "<mod-apply-download>", "exec"), download_ns)
-    return archive_ns, release_ns, runtime_ns, restore_ns, download_ns
+    overrides_ns = {"__name__": "mods_overrides"}
+    exec(compile((directory / "overrides-source.py").read_text(), "<mods-overrides>", "exec"), overrides_ns)
+    return archive_ns, release_ns, runtime_ns, restore_ns, download_ns, overrides_ns
 
 
 def build_mod_release(instance, mods, mod_release_id, task_id, download_ns, release_ns):
@@ -485,9 +443,9 @@ def build_mod_release(instance, mods, mod_release_id, task_id, download_ns, rele
     return stage_root
 
 
-def verify_mod_release(release_root, mods, roles, download_ns):
+def verify_mod_release(release_root, mods, roles, download_ns, overrides_ns):
     enabled = {item["workshopId"]: item for item in mods if item["enabled"]}
-    expected_setup = setup_script(mods)
+    expected_setup = overrides_ns["setup_script"](mods)
     for shard in roles:
         shard_root = release_root / shard.title()
         workshop_root = shard_root / "content" / "322330"
@@ -718,7 +676,7 @@ def worker(task_id):
     if state["status"] in ("succeeded", "failed", "interrupted"): return state
     request = read_json(directory / "request.json")
     instance, manifest = verify_identity(request)
-    archive_ns, release_ns, runtime_ns, restore_ns, download_ns = load_task_sources(directory)
+    archive_ns, release_ns, runtime_ns, restore_ns, download_ns, overrides_ns = load_task_sources(directory)
     heavy = maintenance = mods_lock = None
     protection_id = str(uuid.uuid4())
     backup_id = None
@@ -756,7 +714,7 @@ def worker(task_id):
         setup_release.mkdir(mode=0o700)
         for shard in roles:
             shutil.copytree(release_stage / shard.title(), setup_release / shard.title(), symlinks=False)
-        setup = setup_script(mods)
+        setup = overrides_ns["setup_script"](mods)
         atomic_bytes(setup_release / "dedicated_server_mods_setup.lua", setup, 0o644)
         for current, dirs, files in os.walk(setup_release):
             os.chown(current, 1000, 1000); os.chmod(current, 0o755)
@@ -764,12 +722,16 @@ def worker(task_id):
                 path = Path(current) / filename
                 os.chown(path, 1000, 1000); os.chmod(path, 0o644)
         os.chown(setup_release, 0, 0); os.chmod(setup_release, 0o755)
+        (stage_root / "config").mkdir(mode=0o700)
         staged_config = stage_root / "config" / "Cluster_1"
-        shutil.copytree(instance / "config" / "Cluster_1", staged_config, symlinks=False)
+        staged_config.mkdir(mode=0o700)
+        bridge_enabled = isinstance(manifest.get("playerBridge"), dict) \
+            and manifest["playerBridge"].get("enabled") is True
         for shard in roles:
             shard_config = staged_config / shard.title()
-            safe_dir(shard_config, runtime=True)
-            atomic_bytes(shard_config / "modoverrides.lua", modoverrides(mods), 0o600)
+            shard_config.mkdir(mode=0o700)
+            atomic_bytes(shard_config / "modoverrides.lua",
+                         overrides_ns["modoverrides"](mods, bridge_enabled), 0o600)
             os.chown(shard_config / "modoverrides.lua", 1000, 1000)
         release_metadata = {"schemaVersion": 1, "modsReleaseId": mod_release_id,
             "hostId": request["hostId"], "instanceId": request["instanceId"],
@@ -779,7 +741,7 @@ def worker(task_id):
             "createdAt": now(),
             "sourceDigests": sorted({item["artifactDigest"] for item in mods if item["enabled"]})}
         atomic_json(setup_release / "manifest.json", release_metadata)
-        verify_mod_release(setup_release, mods, roles, download_ns)
+        verify_mod_release(setup_release, mods, roles, download_ns, overrides_ns)
 
         if cancel_path.exists(): raise Cancelled()
         CURRENT_STAGE = "stop"
@@ -942,7 +904,7 @@ def preview(request):
         "shards": roles, "changes": changes, "blockers": blockers, "allowed": bool(changes) and not blockers}
 
 
-def start(request, worker_source, archive_source, release_source, runtime_source, restore_source, download_source):
+def start(request, worker_source, archive_source, release_source, runtime_source, restore_source, download_source, overrides_source):
     if os.geteuid() != 0: reject("ROOT_REQUIRED")
     safe_dir(ROOT); safe_dir(TASKS, create=True)
     admission = os.open(TASKS / "admit.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -972,7 +934,8 @@ def start(request, worker_source, archive_source, release_source, runtime_source
         atomic_bytes(directory / "journal.jsonl", canonical({"sequence": 1, "status": "queued", "stage": "queued", "at": created}) + b"\n")
         for filename, source in (("worker.py", worker_source), ("archive-source.py", archive_source),
                                  ("release-source.py", release_source), ("runtime-source.py", runtime_source),
-                                 ("restore-source.py", restore_source), ("download-source.py", download_source)):
+                                 ("restore-source.py", restore_source), ("download-source.py", download_source),
+                                 ("overrides-source.py", overrides_source)):
             atomic_bytes(directory / filename, source.encode(), 0o700 if filename == "worker.py" else 0o600)
         unit = "famine-queue-controller"
         admit_queue(request)
@@ -1041,7 +1004,7 @@ def reconcile_interrupted(request, state):
         roles, _ = container_roles(request["instanceId"], current_manifest)
         backup_id = transaction.get("protectionBackupId")
         if backup_id:
-            archive_ns, _, _, restore_ns, _ = load_task_sources(directory)
+            archive_ns, _, _, restore_ns, _, _ = load_task_sources(directory)
             if transaction.get("runtimeBefore") == "running":
                 compose(instance, current_manifest, "stop", *roles)
             backup_path = directory / "protection" / backup_id
@@ -1080,14 +1043,14 @@ def reconcile_interrupted(request, state):
 
 
 def main(request, worker_source=None, archive_source=None, release_source=None, runtime_source=None,
-         restore_source=None, download_source=None):
+         restore_source=None, download_source=None, overrides_source=None):
     global CURRENT_STAGE
     try:
         valid_request(request)
         action = request["action"]
         if action == "preview": data = preview(request)
         elif action == "start": data = {"task": start(request, worker_source, archive_source, release_source,
-            runtime_source, restore_source, download_source)}
+            runtime_source, restore_source, download_source, overrides_source)}
         elif action == "status": data = {"task": status(request)}
         elif action == "cancel": data = {"task": cancel(request)}
         elif action == "list":

@@ -159,6 +159,32 @@ def render_compose(manifest, release, instance_root, skip_mod_update=True):
         reject("CREATE_MANIFEST_INVALID")
     dst_root = Path(instance_root).parent.parent / "dst" / release["releaseId"]
     shared_dst = dst_root.is_dir()
+    bridge = isinstance(manifest.get("playerBridge"), dict) \
+        and manifest["playerBridge"].get("enabled") is True
+    if bridge:
+        if not shared_dst:
+            reject("CREATE_BRIDGE_LAYOUT_UNSUPPORTED")
+        if dst_root.is_symlink():
+            reject("CREATE_BRIDGE_MOUNTPOINT_UNSAFE")
+        mods_dir = dst_root / "mods"
+        try:
+            mods_info = mods_dir.lstat()
+        except FileNotFoundError:
+            mods_dir.mkdir(mode=0o755)
+            mods_info = mods_dir.lstat()
+        if (not stat.S_ISDIR(mods_info.st_mode) or stat.S_ISLNK(mods_info.st_mode)
+                or mods_info.st_uid not in (0, os.geteuid(), 1000)
+                or mods_info.st_mode & 0o022):
+            reject("CREATE_BRIDGE_MOUNTPOINT_UNSAFE")
+        mountpoint = mods_dir / "hungerhub_bridge"
+        try:
+            mountpoint.mkdir(mode=0o755)
+        except FileExistsError:
+            pass
+        info = mountpoint.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid(), 1000)
+                or info.st_mode & 0o022):
+            reject("CREATE_BRIDGE_MOUNTPOINT_UNSAFE")
     services = ["master"] + (["caves"] if caves else [])
     lines = ["services:"]
     for shard in services:
@@ -181,6 +207,9 @@ def render_compose(manifest, release, instance_root, skip_mod_update=True):
                       "      - " + quote(instance_root + "/mods/releases/" + mods_release_id + "/" + ("Caves" if shard == "caves" else "Master") + ":/srv/ugc:rw")])
         if manifest.get("modsReleaseId"):
             lines.append("      - " + quote(instance_root + "/mods/releases/" + mods_release_id + "/dedicated_server_mods_setup.lua:/srv/dst/mods/dedicated_server_mods_setup.lua:ro"))
+        if bridge:
+            lines.append("      - " + quote(instance_root + "/bridge/" + ("Caves" if shard == "caves" else "Master")
+                                             + ":/srv/dst/mods/hungerhub_bridge:rw"))
         ports = port_lines(manifest, shard)
         if ports:
             lines.append("    ports:")

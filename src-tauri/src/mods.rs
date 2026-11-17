@@ -25,6 +25,7 @@ const ARCHIVE_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-a
 const RELEASE_SCRIPT: &str = include_str!("../../remote-scripts/actions/instance-release.py");
 const RUNTIME_SCRIPT: &str = include_str!("../../remote-scripts/actions/instance-runtime-start.py");
 const RESTORE_SCRIPT: &str = include_str!("../../remote-scripts/actions/restore-task.py");
+const OVERRIDES_SCRIPT: &str = include_str!("../../remote-scripts/actions/mods-overrides.py");
 const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -417,11 +418,12 @@ fn invoke_apply(session: &Session, payload: &Value) -> CommandResult<Value> {
         RUNTIME_SCRIPT,
         RESTORE_SCRIPT,
         DOWNLOAD_SCRIPT,
+        OVERRIDES_SCRIPT,
     ]
     .map(|source| STANDARD.encode(source.as_bytes()));
     let source = format!(
-        "import base64,json\nAPPLY_SOURCE=base64.b64decode('{}').decode('utf-8')\nARCHIVE_SOURCE=base64.b64decode('{}').decode('utf-8')\nRELEASE_SOURCE=base64.b64decode('{}').decode('utf-8')\nRUNTIME_SOURCE=base64.b64decode('{}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{}').decode('utf-8')\nDOWNLOAD_SOURCE=base64.b64decode('{}').decode('utf-8')\nnamespace={{'__name__':'mods_apply','__file__':'<mods-apply>','ARCHIVE_SOURCE':ARCHIVE_SOURCE}}\nexec(compile(APPLY_SOURCE,'<mods-apply>','exec'),namespace)\ntry:\n    namespace['main'](json.loads(base64.b64decode('{}').decode('utf-8')),APPLY_SOURCE,ARCHIVE_SOURCE,RELEASE_SOURCE,RUNTIME_SOURCE,RESTORE_SOURCE,DOWNLOAD_SOURCE)\nexcept SystemExit:\n    raise\nexcept Exception:\n    print(json.dumps({{'ok':False,'code':'MOD_APPLY_CONTROLLER_FAILED'}},separators=(',',':')))\n",
-        encoded_sources[0], encoded_sources[1], encoded_sources[2], encoded_sources[3], encoded_sources[4], encoded_sources[5], encoded_request);
+        "import base64,json\nAPPLY_SOURCE=base64.b64decode('{}').decode('utf-8')\nARCHIVE_SOURCE=base64.b64decode('{}').decode('utf-8')\nRELEASE_SOURCE=base64.b64decode('{}').decode('utf-8')\nRUNTIME_SOURCE=base64.b64decode('{}').decode('utf-8')\nRESTORE_SOURCE=base64.b64decode('{}').decode('utf-8')\nDOWNLOAD_SOURCE=base64.b64decode('{}').decode('utf-8')\nOVERRIDES_SOURCE=base64.b64decode('{}').decode('utf-8')\nnamespace={{'__name__':'mods_apply','__file__':'<mods-apply>','ARCHIVE_SOURCE':ARCHIVE_SOURCE}}\nexec(compile(APPLY_SOURCE,'<mods-apply>','exec'),namespace)\ntry:\n    namespace['main'](json.loads(base64.b64decode('{}').decode('utf-8')),APPLY_SOURCE,ARCHIVE_SOURCE,RELEASE_SOURCE,RUNTIME_SOURCE,RESTORE_SOURCE,DOWNLOAD_SOURCE,OVERRIDES_SOURCE)\nexcept SystemExit:\n    raise\nexcept Exception:\n    print(json.dumps({{'ok':False,'code':'MOD_APPLY_CONTROLLER_FAILED'}},separators=(',',':')))\n",
+        encoded_sources[0], encoded_sources[1], encoded_sources[2], encoded_sources[3], encoded_sources[4], encoded_sources[5], encoded_sources[6], encoded_request);
     let mut channel = session
         .channel_session()
         .map_err(|_| error("MOD_APPLY_CHANNEL_FAILED", "无法建立 MOD 应用通道"))?;

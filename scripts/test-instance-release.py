@@ -70,6 +70,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("working_dir: '/srv/dst/bin64'", result)
         self.assertNotIn("token", result.lower())
         self.assertNotIn("password", result.lower())
+        self.assertNotIn("-skip_update_server_mods", result)
 
     def test_disabled_caves_do_not_render_caves_service_or_ports(self):
         result = MODULE.render_compose(manifest(False), release(), "/var/lib/famine-hub/instances/" + INSTANCE_ID)
@@ -83,6 +84,7 @@ class ReleaseTests(unittest.TestCase):
         result = MODULE.render_compose({**manifest(), "modsReleaseId": mod_release_id}, release(), instance_root)
         self.assertEqual(result.count("- '-ugc_directory'"), 2)
         self.assertEqual(result.count("- '/srv/ugc'"), 2)
+        self.assertEqual(result.count("- '-skip_update_server_mods'"), 2)
         self.assertIn(instance_root + "/mods/releases/" + mod_release_id + "/Master:/srv/ugc:rw", result)
         self.assertIn(instance_root + "/mods/releases/" + mod_release_id
                       + "/dedicated_server_mods_setup.lua:/srv/dst/mods/dedicated_server_mods_setup.lua:ro", result)
@@ -113,6 +115,26 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(chown.call_count, 4)
             self.assertEqual(save.read_bytes(), b"keep existing world")
             self.assertFalse((root / "data" / "Master" / "save.bin").is_symlink())
+
+    def test_runtime_paths_migrate_legacy_steamcmd_ugc_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "instances" / INSTANCE_ID
+            legacy = (root / "mods" / "releases" / RELEASE_ID / "Master"
+                      / "steamapps" / "workshop" / "content" / "322330" / "123")
+            legacy.mkdir(parents=True, mode=0o700)
+            (legacy / "modinfo.lua").write_text("name='x'\n")
+            original_fstat = os.fstat
+            def root_owned(fd):
+                values = list(original_fstat(fd))
+                values[4] = 0
+                return os.stat_result(values)
+            with patch.object(MODULE.os, "fstat", side_effect=root_owned), \
+                 patch.object(MODULE.os, "fchown"):
+                MODULE.prepare_runtime_paths(str(root), RELEASE_ID, False)
+            canonical = (root / "mods" / "releases" / RELEASE_ID / "Master"
+                         / "content" / "322330" / "123")
+            self.assertEqual((canonical / "modinfo.lua").read_text(), "name='x'\n")
+            self.assertFalse(legacy.exists())
 
     def test_runtime_paths_reject_symlinks_before_changing_owners(self):
         with tempfile.TemporaryDirectory() as temporary:

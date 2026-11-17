@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import os
@@ -67,6 +68,39 @@ class HostModsTests(unittest.TestCase):
         self.assertEqual(len(data["items"]), 1)
         self.assertEqual(data["items"][0]["workshopId"], "123")
         self.assertEqual(data["items"][0]["usedBy"], [{"instanceId": INSTANCE, "displayName": "生存一服"}])
+
+    def test_modinfo_reads_top_level_fields_not_option_names(self):
+        (self.artifact / "content" / "modinfo.lua").write_text(
+            "local L = locale ~= \"zh\" and locale ~= \"zhr\"\n"
+            "name = L and \"CookDiary (Controller Fix)\" or \"馨食记（手柄修复）\"\n"
+            "author = \"棒打鲜橙\"\n"
+            "configuration_options = {\n"
+            "    L and {\n"
+            "        name = \"Language\",\n"
+            "        label = \"Language\",\n"
+            "    } or {\n"
+            "        name = \"Language\",\n"
+            "        label = \"语言\",\n"
+            "    },\n"
+            "}\n")
+        self.write_json(self.artifact / "manifest.json", {
+            "schemaVersion": 1, "workshopId": "123", "contentDigest": DIGEST,
+            "sizeBytes": 9, "fileCount": 1, "preparedAt": "2026-01-01T00:00:00Z",
+            "name": "Language", "author": "Language",
+        })
+        item = MODULE.list_items(self.request("list"))["items"][0]
+        self.assertEqual(item["name"], "馨食记（手柄修复）")
+        self.assertEqual(item["author"], "棒打鲜橙")
+
+    def test_modinfo_returns_the_latest_artifact_source(self):
+        request = self.request("modinfo")
+        request["workshopIds"] = ["123"]
+        data = MODULE.modinfo_source(request)
+        self.assertEqual([item["workshopId"] for item in data["items"]], ["123"])
+        self.assertIn("name='x'", base64.b64decode(data["items"][0]["source"]).decode())
+        request["workshopIds"] = ["not-a-number"]
+        with self.assertRaises(MODULE.Rejected):
+            MODULE.modinfo_source(request)
 
     def test_refuses_to_delete_used_artifact(self):
         request = self.request("delete")

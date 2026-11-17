@@ -388,8 +388,8 @@ async function applyWorld() {
   }
   const result = outcome.result!;
   notifySuccess("世界配置已应用", [result.runningShards.length
-    ? "已部署并重启原运行分片；隔离运行验证仍待完成。"
-    : "已部署，专服保持停止；隔离运行验证仍待完成。", ...result.warnings].join(" "));
+    ? "已部署并重启原运行分片；隔离运行验证仍待完成"
+    : "已部署，专服保持停止；隔离运行验证仍待完成", ...result.warnings].join(" "));
   await refresh();
 }
 

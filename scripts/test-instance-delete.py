@@ -163,6 +163,59 @@ class DeleteTests(unittest.TestCase):
         self.assertFalse((self.root / "backups" / INSTANCE).exists())
         self.assertFalse((self.root / "retired" / INSTANCE).exists())
 
+    def test_compose_network_without_instance_labels_is_accepted(self):
+        project = "fh_" + INSTANCE.replace("-", "")
+        row = "\t".join([project + "_instance",
+                         json.dumps({"com.docker.compose.project": project,
+                                     "com.docker.compose.network": "instance"}),
+                         json.dumps({CONTAINER: {}})])
+        with patch.object(MODULE, "docker_run", return_value=row + "\n"):
+            networks = MODULE.inspect_networks([NETWORK], HOST, INSTANCE, {CONTAINER})
+        self.assertEqual(networks[0]["name"], project + "_instance")
+        self.assertEqual(networks[0]["endpointIds"], [CONTAINER])
+
+    def test_compose_network_from_another_project_is_rejected(self):
+        row = "\t".join(["fh_other_instance",
+                         json.dumps({"com.docker.compose.project": "fh_other"}),
+                         json.dumps({CONTAINER: {}})])
+        with patch.object(MODULE, "docker_run", return_value=row + "\n"):
+            with self.assertRaises(MODULE.Rejected):
+                MODULE.inspect_networks([NETWORK], HOST, INSTANCE, {CONTAINER})
+
+    def test_deletion_prunes_trash_and_instance_protection_archives(self):
+        stale = self.root / "trash" / "99999999-9999-4999-8999-999999999999"
+        stale.mkdir(parents=True, mode=0o700)
+        (stale / "leftover").write_bytes(b"stale")
+        task = self.root / "mod-apply-tasks" / TASK
+        protection = task / "protection" / "88888888-8888-4888-8888-888888888888"
+        protection.mkdir(parents=True, mode=0o700)
+        (protection / "archive.tar.gz").write_bytes(b"mods")
+        (task / "status.json").write_text(json.dumps({"schemaVersion": 1,
+            "target": {"instanceId": INSTANCE}}))
+        other_task = self.root / "mod-apply-tasks" / "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        other_protection = other_task / "protection" / "99999999-9999-4999-8999-999999999999"
+        other_protection.mkdir(parents=True, mode=0o700)
+        (other_protection / "archive.tar.gz").write_bytes(b"other")
+        (other_task / "status.json").write_text(json.dumps({"schemaVersion": 1,
+            "target": {"instanceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}}))
+
+        containers, networks = self.resources()
+        self.mock_inventory([CONTAINER], [NETWORK], containers, networks)
+        plan = MODULE.locked_operation(self.request())
+        container_scans = iter(([CONTAINER], [], []))
+        network_scans = iter(([NETWORK], [], []))
+        with patch.object(MODULE, "docker_ids", side_effect=lambda kind, _id: next(container_scans if kind == "container" else network_scans)), \
+             patch.object(MODULE, "inspect_containers", side_effect=lambda ids, *_args: containers if ids else []), \
+             patch.object(MODULE, "inspect_networks", side_effect=lambda ids, *_args: networks if ids else []), \
+             patch.object(MODULE, "docker_run", return_value=""):
+            request = self.request("delete")
+            request.update({"planId": plan["planId"], "operationId": OPERATION, "typedName": "测试专服"})
+            MODULE.locked_operation(request, commit=True)
+        self.assertFalse(protection.exists())
+        self.assertTrue((task / "status.json").exists())
+        self.assertTrue(other_protection.exists())
+        self.assertFalse(stale.exists())
+
     def test_runtime_owned_private_files_are_safe_to_archive(self):
         data = self.root / "instances" / INSTANCE / "data" / "Master"
         data.mkdir(parents=True)

@@ -38,6 +38,23 @@ class HostModsDownloadTests(unittest.TestCase):
             self.assertGreater(total, 0)
             self.assertEqual(len(digest), 64)
 
+    def test_modinfo_ignores_indented_option_names(self):
+        with tempfile.TemporaryDirectory(prefix="host-mod-modinfo-") as temporary:
+            root = Path(temporary)
+            (root / "modinfo.lua").write_text(
+                "local L = locale ~= \"zh\" and locale ~= \"zhr\"\n"
+                "name = L and \"CookDiary (Controller Fix)\" or \"馨食记（手柄修复）\"\n"
+                "author = \"棒打鲜橙\"\n"
+                "configuration_options = {\n"
+                "    L and {\n"
+                "        name = \"Language\",\n"
+                "    } or {\n"
+                "        name = \"Language\",\n"
+                "    },\n"
+                "}\n")
+            self.assertEqual(MODULE.modinfo_fields(root),
+                             {"name": "馨食记（手柄修复）", "author": "棒打鲜橙"})
+
     def test_worker_entrypoint_dispatches_systemd_worker_arguments(self):
         source = (PROJECT / "remote-scripts/actions/host-mods-download.py").read_text()
         self.assertIn('sys.argv[1] == "worker"', source)

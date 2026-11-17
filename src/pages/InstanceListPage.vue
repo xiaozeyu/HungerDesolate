@@ -185,7 +185,7 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
             <div class="delete-error-head"><AlertTriangle :size="16"/><strong>暂不能删除</strong></div>
             <ul><li v-for="blocker in deletePlan.blockers" :key="blocker">{{deleteBlockerLabel(blocker)}}</li></ul>
           </div>
-          <label v-if="deletePlan.allowed">输入专服名称确认<NInput v-model:value="deleteName" placeholder="" :input-props="{ autocomplete: 'off' }" :disabled="deleteBusy"/></label>
+          <label v-if="deletePlan.allowed">输入专服名称确认(该专服的备份也会一并删除)<NInput v-model:value="deleteName" placeholder="" :input-props="{ autocomplete: 'off' }" :disabled="deleteBusy"/></label>
         </template>
         <div v-if="deleteError" class="delete-error" role="alert">
           <div class="delete-error-head"><AlertTriangle :size="16"/><strong>删除未完成</strong></div>
@@ -202,7 +202,7 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
           </div>
         </div>
       </div>
-      <template #footer><div class="dialog-footer-actions"><NButton :disabled="deleteBusy" @click="deleteTarget=null;deletePlan=null">取消</NButton><NButton v-if="deletePlan?.allowed" type="error" ghost :disabled="deleteBusy || deleteName!==deleteTarget?.displayName" @click="deleteSelectedInstance">{{deleteBusy?'正在删除…':'确认并归档删除'}}</NButton></div></template>
+      <template #footer><div class="dialog-footer-actions"><NButton :disabled="deleteBusy" @click="deleteTarget=null;deletePlan=null">取消</NButton><NButton v-if="deletePlan?.allowed" type="error" ghost :disabled="deleteBusy || deleteName!==deleteTarget?.displayName" @click="deleteSelectedInstance">{{deleteBusy?'正在删除…':'确认永久删除'}}</NButton></div></template>
     </NModal>
   </div>
 </template>

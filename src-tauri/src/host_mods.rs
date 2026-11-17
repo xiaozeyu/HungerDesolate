@@ -17,6 +17,7 @@ const OP: &str = "hostMods";
 const PROBE_SCRIPT: &str = include_str!("../../remote-scripts/probes/host-mods.py");
 const DOWNLOAD_SCRIPT: &str = include_str!("../../remote-scripts/actions/host-mods-download.py");
 const MAX_OUTPUT: usize = 4 * 1024 * 1024;
+const MAX_MODINFO_SOURCE: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -108,6 +109,31 @@ pub struct ModItem {
     pub author: Option<String>,
     pub preview_url: Option<String>,
     pub version: Option<String>,
+}
+
+fn apply_modinfo(items: &mut [ModItem], sources: &[(String, String)]) {
+    for (workshop_id, source) in sources {
+        if source.len() > MAX_MODINFO_SOURCE {
+            continue;
+        }
+        let metadata =
+            crate::mod_parser::parse_modinfo(source, &format!("workshop-{workshop_id}"), "zh")
+                .metadata;
+        for item in items
+            .iter_mut()
+            .filter(|item| &item.workshop_id == workshop_id)
+        {
+            if let Some(value) = &metadata.name {
+                item.name = Some(value.clone());
+            }
+            if let Some(value) = &metadata.author {
+                item.author = Some(value.clone());
+            }
+            if let Some(value) = &metadata.version {
+                item.version = Some(value.clone());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -387,6 +413,58 @@ pub fn list(database: &Path, request: ListRequest) -> CommandResult<ListResponse
                         .map(str::to_string),
                 });
             }
+            let ids: Vec<String> = items
+                .iter()
+                .map(|item| item.workshop_id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            for chunk in ids.chunks(100) {
+                let payload = serde_json::json!({"action":"modinfo","schemaVersion":1,
+                    "requestId":request.request_id,"serverId":request.target.server_id,
+                    "hostId":request.target.host_id,
+                    "expectedRecordVersion":request.expected_record_version,
+                    "workshopIds":chunk});
+                let Ok(value) = invoke_probe(session, &payload) else {
+                    break;
+                };
+                let Ok(info) = serde_json::from_value::<Value>(value) else {
+                    continue;
+                };
+                if info.get("requestId").and_then(Value::as_str)
+                    != Some(request.request_id.as_str())
+                    || info.get("recordVersion").and_then(Value::as_u64)
+                        != Some(request.expected_record_version)
+                    || info
+                        .get("target")
+                        .and_then(|value| value.get("hostId"))
+                        .and_then(Value::as_str)
+                        != Some(request.target.host_id.as_str())
+                {
+                    continue;
+                }
+                let sources: Vec<(String, String)> = info
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|entry| {
+                                let workshop_id =
+                                    entry.get("workshopId").and_then(Value::as_str)?;
+                                let encoded = entry.get("source").and_then(Value::as_str)?;
+                                let source =
+                                    String::from_utf8(STANDARD.decode(encoded).ok()?).ok()?;
+                                Some((workshop_id.to_string(), source))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                apply_modinfo(&mut items, &sources);
+                if info.get("truncated").and_then(Value::as_bool) == Some(true) {
+                    break;
+                }
+            }
             Ok(ListResponse {
                 schema_version: 1,
                 request_id: request.request_id,
@@ -611,4 +689,50 @@ pub fn tasks(database: &Path, request: TaskListRequest) -> CommandResult<TaskLis
             })
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(name: Option<&str>) -> ModItem {
+        ModItem {
+            workshop_id: "3732511659".to_string(),
+            content_digest: "a".repeat(64),
+            source_handle: None,
+            prepared_at: None,
+            size_bytes: None,
+            file_count: None,
+            used_by: Vec::new(),
+            name: name.map(str::to_string),
+            author: None,
+            preview_url: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn parsed_modinfo_replaces_manually_read_metadata() {
+        let source = r#"
+local is_zh = locale == "zh" or locale == "zhr"
+local function T(zh, en)
+    if is_zh then
+        return zh
+    end
+    return en
+end
+name = T("快捷种植布局", "Quick Plant Layout")
+author = "Code_xu"
+version = "1.2.2"
+configuration_options = {
+    { name = "Language" },
+}
+"#;
+        let mut items = vec![item(Some("Language"))];
+        let id = items[0].workshop_id.clone();
+        apply_modinfo(&mut items, &[(id, source.to_string())]);
+        assert_eq!(items[0].name.as_deref(), Some("快捷种植布局"));
+        assert_eq!(items[0].author.as_deref(), Some("Code_xu"));
+        assert_eq!(items[0].version.as_deref(), Some("1.2.2"));
+    }
 }

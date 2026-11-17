@@ -96,6 +96,37 @@ def prepare_runtime_paths(instance_root, release_id, caves_enabled):
                 os.fchown(fd, 1000, 1000)
         finally:
             os.close(fd)
+    for shard in ("Master", "Caves") if caves_enabled else ("Master",):
+        shard_root = instance / "mods" / "releases" / mods_release_id / shard
+        legacy = shard_root / "steamapps" / "workshop" / "content" / "322330"
+        canonical = shard_root / "content" / "322330"
+        if legacy.is_dir() and not legacy.is_symlink() and not canonical.exists():
+            canonical.parent.mkdir(mode=0o755)
+            os.rename(legacy, canonical)
+
+
+def appworkshop_bytes(entries, stamp):
+    """Render Steam's appworkshop ACF for pre-installed V2 mods."""
+    lines = ['"AppWorkshop"', "{", '\t"appid"\t\t"322330"',
+             '\t"SizeOnDisk"\t\t"' + str(sum(size for _id, size, _handle in entries)) + '"',
+             '\t"NeedsUpdate"\t\t"0"', '\t"NeedsDownload"\t\t"0"',
+             '\t"TimeLastUpdated"\t\t"' + str(stamp) + '"', '\t"TimeLastAppRan"\t\t"' + str(stamp) + '"',
+             '\t"WorkshopItemsInstalled"', "\t{"]
+    for workshop_id, size, handle in entries:
+        lines.extend(["\t\t\"" + workshop_id + "\"", "\t\t{",
+                      "\t\t\t\"size\"\t\t\"" + str(size) + "\"",
+                      "\t\t\t\"timeupdated\"\t\t\"" + str(stamp) + "\"",
+                      "\t\t\t\"manifest\"\t\t\"" + handle + "\"",
+                      "\t\t}"])
+    lines.extend(["\t}", '\t"WorkshopItemDetails"', "\t{"])
+    for workshop_id, _size, handle in entries:
+        lines.extend(["\t\t\"" + workshop_id + "\"", "\t\t{",
+                      "\t\t\t\"manifest\"\t\t\"" + handle + "\"",
+                      "\t\t\t\"timeupdated\"\t\t\"" + str(stamp) + "\"",
+                      "\t\t\t\"timetouched\"\t\t\"" + str(stamp) + "\"",
+                      "\t\t}"])
+    lines.extend(["\t}", "}", ""])
+    return "\n".join(lines).encode()
 
 
 def port_lines(manifest, shard):
@@ -110,7 +141,7 @@ def port_lines(manifest, shard):
     return rows
 
 
-def render_compose(manifest, release, instance_root):
+def render_compose(manifest, release, instance_root, skip_mod_update=True):
     release = validate_release(release)
     if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1:
         reject("CREATE_MANIFEST_INVALID")
@@ -134,6 +165,9 @@ def render_compose(manifest, release, instance_root):
         command_value = release["commands"][shard]
         if manifest.get("modsReleaseId") or shared_dst:
             command_value = command_value + ["-ugc_directory", "/srv/ugc"]
+        if manifest.get("modsReleaseId") and skip_mod_update:
+            # 内容已在主机库固定并预置到 UGC 目录，启动时不再向 Steam 更新。
+            command_value = command_value + ["-skip_update_server_mods"]
         lines.extend(["  " + shard + ":", "    image: " + quote(release["image"] + "@" + release["imageDigest"]),
                       "    init: true", "    restart: " + quote("unless-stopped" if manifest.get("autostart") else "no"),
                       "    command:"])

@@ -1,4 +1,5 @@
 """List, import, delete and clean host-level Workshop artifacts."""
+import base64
 import fcntl
 import json
 import os
@@ -83,16 +84,93 @@ def read_manifest(path):
     return manifest
 
 
+MODINFO_FIELDS = ("name", "author", "version")
+MODINFO_ASSIGNMENT = re.compile(r"^\s*(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
+MODINFO_LITERAL = re.compile(r"\"([^\"]*)\"|'([^']*)'|\[\[([^\n]*?)\]\]")
+MODINFO_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+MODINFO_CONCAT = re.compile(
+    r"^(?:\s*(?:\"[^\"]*\"|'[^']*'|\[\[[^\n]*?\]\])\s*(?:\.\.\s*)?)+$")
+
+
+def strip_lua_comment(line):
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in ("\"", "'"):
+            quote = char
+        elif char == "-" and line.startswith("--", index):
+            return line[:index]
+        index += 1
+    return line
+
+
+def modinfo_value(expression, strings):
+    expression = strip_lua_comment(expression).strip()
+    if not expression or expression.startswith("{"):
+        return None
+    if MODINFO_IDENTIFIER.fullmatch(expression):
+        return strings.get(expression)
+    if " or " in expression:
+        values = [next(group for group in match.groups() if group is not None)
+                  for match in MODINFO_LITERAL.finditer(expression)]
+        return values[-1] if values else None
+    if not MODINFO_CONCAT.fullmatch(expression):
+        return None
+    return "".join(next(group for group in match.groups() if group is not None)
+                   for match in MODINFO_LITERAL.finditer(expression))
+
+
+def lua_line_depth(line):
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in ("\"", "'"):
+            quote = char
+        elif char == "-" and line.startswith("--", index):
+            break
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return depth
+
+
 def modinfo_fields(content):
     try:
         text = (content / "modinfo.lua").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
+    strings = {}
     values = {}
-    for name in ("name", "author", "version"):
-        match = re.search(r"(?mi)^\s*" + name + r"\s*=\s*\"([^\"]*)\"", text)
-        if match:
-            values[name] = match.group(1).strip()[:200]
+    depth = 0
+    for line in text.splitlines():
+        if depth == 0:
+            match = MODINFO_ASSIGNMENT.match(line)
+            if match:
+                key, raw = match.group(1), match.group(2)
+                value = modinfo_value(raw, strings)
+                if value is not None:
+                    if key in MODINFO_FIELDS:
+                        values.setdefault(key, value.strip()[:200])
+                    elif MODINFO_CONCAT.fullmatch(strip_lua_comment(raw).strip()):
+                        strings[key] = value
+        depth = max(0, depth + lua_line_depth(line))
     return values
 
 
@@ -213,10 +291,10 @@ def collect_items():
                     "sizeBytes": manifest.get("sizeBytes"),
                     "fileCount": manifest.get("fileCount"),
                     "usedBy": usage(workshop.name, artifact.name, references),
-                    "name": manifest.get("name") or info.get("name"),
-                    "author": manifest.get("author") or info.get("author"),
+                    "name": info.get("name") or manifest.get("name"),
+                    "author": info.get("author") or manifest.get("author"),
                     "previewUrl": manifest.get("previewUrl"),
-                    "version": manifest.get("version") or info.get("version"),
+                    "version": info.get("version") or manifest.get("version"),
                 })
     return items
 
@@ -224,6 +302,62 @@ def collect_items():
 def list_items(request):
     target_from(request)
     return {"schemaVersion": 1, "items": collect_items(), "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
+            "requestId": request["requestId"], "recordVersion": request["expectedRecordVersion"]}
+
+
+def modinfo_source(request):
+    target_from(request)
+    ids = request.get("workshopIds")
+    if (not isinstance(ids, list) or not ids or len(ids) > 100 or len(set(ids)) != len(ids)
+            or any(not isinstance(item, str) or not WORKSHOP.fullmatch(item) for item in ids)):
+        reject("HOST_MOD_INPUT_INVALID")
+    sources = []
+    total = 0
+    truncated = False
+    for workshop_id in ids:
+        latest = None
+        directory = PREPARED / workshop_id
+        if directory.is_dir():
+            for artifact in directory.iterdir():
+                if not artifact.is_dir() or not DIGEST.fullmatch(artifact.name):
+                    continue
+                try:
+                    manifest = read_manifest(artifact)
+                except Rejected:
+                    continue
+                stamp = manifest.get("preparedAt") or ""
+                if latest is None or stamp > latest[0]:
+                    latest = (stamp, artifact)
+        if latest is None:
+            continue
+        path = latest[1] / "content" / "modinfo.lua"
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
+                or info.st_uid not in (0, os.geteuid()) or info.st_size > 2 * 1024 * 1024):
+            continue
+        if total + info.st_size > 2 * 1024 * 1024:
+            truncated = True
+            break
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            with os.fdopen(fd, "rb", closefd=False) as source:
+                data = source.read(info.st_size + 1)
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
+        if len(data) != info.st_size:
+            continue
+        total += len(data)
+        sources.append({"workshopId": workshop_id, "source": base64.b64encode(data).decode("ascii")})
+    return {"schemaVersion": 1, "items": sources, "truncated": truncated,
+            "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
             "requestId": request["requestId"], "recordVersion": request["expectedRecordVersion"]}
 
 
@@ -304,6 +438,8 @@ def main(request):
         action = request.get("action")
         if action == "list":
             data = list_items(request)
+        elif action == "modinfo":
+            data = modinfo_source(request)
         elif action == "delete":
             data = delete_item(request)
         elif action == "cleanup":

@@ -14,6 +14,8 @@ PROJECT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("mods_apply", PROJECT / "remote-scripts/actions/mods-apply.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+RELEASE_HELPERS = {}
+exec((PROJECT / "remote-scripts/actions/instance-release.py").read_text(), RELEASE_HELPERS)
 
 HOST = "11111111-1111-4111-8111-111111111111"
 INSTANCE = "22222222-2222-4222-8222-222222222222"
@@ -149,13 +151,33 @@ class ModsApplyTests(unittest.TestCase):
                 "configurationOptions": {"unsupported": None}}])
         self.assertEqual(failure.exception.code, "MOD_CONFIG_UNSUPPORTED")
 
+    def test_mod_release_uses_the_v2_ugc_layout(self):
+        digest = hashlib.sha256(b"version = '1.0'\n").hexdigest()
+        mods = [{"workshopId": "123", "enabled": True, "configurationOptions": {}, "artifactDigest": digest}]
+        download = {"content_files": lambda _path: ([], 0, digest)}
+        prepared = self.root / "mods" / "prepared" / "123" / digest / "content"
+        prepared.mkdir(parents=True, mode=0o700)
+        (prepared / "modinfo.lua").write_text("version = '1.0'\n")
+        (self.instance / "staging" / "mod-apply").mkdir(parents=True, mode=0o700)
+        with patch.object(MODULE, "ROOT", self.root), patch.object(MODULE.os, "chown", return_value=None):
+            stage = MODULE.build_mod_release(self.instance, mods, MOD_RELEASE, REQUEST, download, RELEASE_HELPERS)
+        content = stage / "Master" / "content" / "322330" / "123"
+        self.assertEqual((content / "modinfo.lua").read_text(), "version = '1.0'\n")
+        self.assertFalse((stage / "Master" / "steamapps").exists())
+        self.assertFalse((stage / "Master" / "dedicated_server_mods_setup.lua").exists())
+        acf = (stage / "Master" / "appworkshop_322330.acf").read_text()
+        self.assertIn('"WorkshopItemsInstalled"', acf)
+        self.assertIn('"123"', acf)
+
     def test_release_verification_rejects_changed_copy_and_setup(self):
         release_root = Path(self.temp.name) / "release"
-        content = release_root / "Master" / "steamapps" / "workshop" / "content" / "322330" / "123"
+        content = release_root / "Master" / "content" / "322330" / "123"
         content.mkdir(parents=True)
         (content / "modinfo.lua").write_text("version = '1.0'\n")
         setup = MODULE.setup_script([{"workshopId": "123", "enabled": True}])
         (release_root / "dedicated_server_mods_setup.lua").write_bytes(setup)
+        (release_root / "Master" / "appworkshop_322330.acf").write_text(
+            '"AppWorkshop"\n{\n"WorkshopItemsInstalled"\n{\n"123"\n{\n}\n}\n}\n')
         artifact_digest = hashlib.sha256((content / "modinfo.lua").read_bytes()).hexdigest()
         mods = [{"workshopId": "123", "enabled": True,
                  "configurationOptions": {}, "artifactDigest": artifact_digest}]

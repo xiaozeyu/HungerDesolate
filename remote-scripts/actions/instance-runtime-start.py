@@ -119,6 +119,65 @@ def compose(instance, project, arguments, timeout=30):
     return output
 
 
+def ensure_mod_ugc_index(instance, manifest, shards):
+    """Older MOD releases lack the ACF; without it a skip-update launch enumerates no mods."""
+    release_id = manifest.get("modsReleaseId")
+    render = RELEASE_HELPERS.get("appworkshop_bytes")
+    if not release_id or not callable(render):
+        return
+    release_root = instance / "mods" / "releases" / release_id
+    metadata_path = release_root / "manifest.json"
+    if not metadata_path.exists():
+        return
+    try:
+        metadata = read_json(metadata_path, 4 * 1024 * 1024)
+    except Rejected:
+        return
+    mods = metadata.get("mods") if isinstance(metadata, dict) else None
+    if not isinstance(mods, list):
+        return
+    entries = []
+    for item in mods:
+        if not isinstance(item, dict) or item.get("enabled") is not True:
+            continue
+        workshop_id, digest = str(item.get("workshopId", "")), str(item.get("artifactDigest", ""))
+        if re.fullmatch(r"[0-9]{1,20}", workshop_id) is None or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            continue
+        size, handle = 0, "0"
+        artifact_manifest = ROOT / "mods" / "prepared" / workshop_id / digest / "manifest.json"
+        if artifact_manifest.exists():
+            try:
+                supplied = read_json(artifact_manifest, 4 * 1024 * 1024)
+            except Rejected:
+                supplied = {}
+            if isinstance(supplied, dict):
+                if type(supplied.get("sizeBytes")) is int and supplied["sizeBytes"] >= 0:
+                    size = supplied["sizeBytes"]
+                if isinstance(supplied.get("sourceHandle"), str) and supplied["sourceHandle"].isdigit():
+                    handle = supplied["sourceHandle"]
+        entries.append((workshop_id, size, handle))
+    if not entries:
+        return
+    payload = render(entries, int(time.time()))
+    for shard in shards:
+        content = release_root / shard.title() / "content" / "322330"
+        target = release_root / shard.title() / "appworkshop_322330.acf"
+        if not content.is_dir() or target.exists():
+            continue
+        temporary = target.with_name("." + target.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(fd, "wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(temporary, 0o644)
+            os.chown(temporary, 1000, 1000)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def repair_runtime_layout(instance, manifest, release, project, shards):
     """Migrate only the exact generated legacy Compose; reject unrelated manual edits."""
     global CURRENT_STAGE
@@ -139,6 +198,13 @@ def repair_runtime_layout(instance, manifest, release, project, shards):
             variants.add(legacy_compose)
             variants.add(legacy_compose.replace("    working_dir: '/srv/dst/bin64'", "    working_dir: '/srv'"))
         except (ValueError, RELEASE_HELPERS["ReleaseRejected"]):
+            pass
+        try:
+            # 升级前生成的 MOD Compose 没有跳过 MOD 更新，仍需识别并迁移。
+            previous_mods = RELEASE_HELPERS["render_compose"](manifest, release, str(instance), False)
+            variants.add(previous_mods)
+            variants.add(previous_mods.replace("    working_dir: '/srv/dst/bin64'", "    working_dir: '/srv'"))
+        except (TypeError, ValueError, RELEASE_HELPERS["ReleaseRejected"]):
             pass
     if previous not in variants:
         reject("INSTANCE_START_COMPOSE_DRIFT")
@@ -167,6 +233,7 @@ def repair_runtime_layout(instance, manifest, release, project, shards):
             str(instance), manifest.get("modsReleaseId") or release["releaseId"], manifest["cavesEnabled"])
     except (OSError, RELEASE_HELPERS["ReleaseRejected"]):
         reject("INSTANCE_START_RUNTIME_PATH_INVALID")
+    ensure_mod_ugc_index(instance, manifest, shards)
     if previous != desired:
         compose(instance, project, ["create", "--force-recreate", *shards], timeout=60)
 

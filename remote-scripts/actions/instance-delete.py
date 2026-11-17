@@ -115,13 +115,17 @@ def docker_run(command, timeout=10):
 
 
 def docker_ids(kind, instance_id):
-    noun = "container" if kind == "container" else "network"
-    command = ["docker", noun, "ls"]
     if kind == "container":
-        command.append("--all")
-    command.extend(["--quiet", "--no-trunc", "--filter",
-                    "label=com.hungerdesolate.instanceId=" + instance_id])
-    values = docker_run(command).splitlines()
+        values = docker_run(["docker", "container", "ls", "--all", "--quiet", "--no-trunc",
+                             "--filter", "label=com.hungerdesolate.instanceId=" + instance_id]).splitlines()
+    else:
+        project = "fh_" + instance_id.replace("-", "")
+        values = []
+        for selector in ("label=com.hungerdesolate.instanceId=" + instance_id,
+                         "label=com.docker.compose.project=" + project):
+            values.extend(docker_run(["docker", "network", "ls", "--quiet", "--no-trunc",
+                                      "--filter", selector]).splitlines())
+        values = list(dict.fromkeys(values))
     if len(values) > 32 or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in values):
         reject("INSTANCE_DELETE_STATE_INVALID")
     return values
@@ -163,6 +167,7 @@ def inspect_networks(ids, host_id, instance_id, container_ids):
                        "{{.Name}}\t{{json .Labels}}\t{{json .Containers}}", *ids]).splitlines()
     if len(rows) != len(ids):
         reject("INSTANCE_DELETE_STATE_INVALID")
+    project = "fh_" + instance_id.replace("-", "")
     resources = []
     for network_id, row in zip(ids, rows):
         parts = row.split("\t")
@@ -172,10 +177,14 @@ def inspect_networks(ids, host_id, instance_id, container_ids):
             labels, endpoints = json.loads(parts[1]), json.loads(parts[2]) or {}
         except ValueError:
             reject("INSTANCE_DELETE_STATE_INVALID")
-        if (labels.get("com.hungerdesolate.hostId") != host_id
-                or labels.get("com.hungerdesolate.instanceId") != instance_id
-                or labels.get("com.hungerdesolate.schemaVersion") != "1"
-                or labels.get("com.hungerdesolate.role") != "network"
+        instance_labels = (labels.get("com.hungerdesolate.hostId") == host_id
+                           and labels.get("com.hungerdesolate.instanceId") == instance_id
+                           and labels.get("com.hungerdesolate.schemaVersion") == "1"
+                           and labels.get("com.hungerdesolate.role") == "network")
+        compose_labels = (labels.get("com.docker.compose.project") == project
+                          and parts[0] == project + "_instance")
+        if ((not instance_labels and not compose_labels)
+                or labels.get("com.hungerdesolate.instanceId") not in (None, instance_id)
                 or not isinstance(endpoints, dict)
                 or any(container_id not in container_ids for container_id in endpoints)):
             reject("INSTANCE_DELETE_RESOURCE_IDENTITY_INVALID")
@@ -338,6 +347,61 @@ def acquire_delete_locks(instance_id):
         raise
 
 
+PROTECTION_ROOTS = ("mod-apply-tasks", "update-tasks")
+
+
+def prune_trash(trash_root):
+    try:
+        for child in trash_root.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def remove_protection(instance_id):
+    for name in PROTECTION_ROOTS:
+        root = ROOT / name
+        try:
+            info = root.lstat()
+        except OSError:
+            continue
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                or info.st_mode & 0o022):
+            continue
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.is_symlink() or not valid_uuid(child.name):
+                continue
+            owner = None
+            for candidate in ("status.json", "request.json"):
+                try:
+                    value = read_json(child / candidate, 65536)
+                except (OSError, Rejected, ValueError, TypeError):
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                target = value.get("target")
+                if isinstance(target, dict) and isinstance(target.get("instanceId"), str):
+                    owner = target["instanceId"]
+                    break
+                if isinstance(value.get("instanceId"), str):
+                    owner = value["instanceId"]
+                    break
+            if owner != instance_id:
+                continue
+            protection = child / "protection"
+            try:
+                info = protection.lstat()
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode) and not protection.is_symlink():
+                shutil.rmtree(protection, ignore_errors=True)
+
+
 def locked_operation(request, commit=False):
     if request.get("schemaVersion") != 1:
         reject("SCHEMA_UNSUPPORTED")
@@ -419,6 +483,7 @@ def locked_operation(request, commit=False):
             safe_directory(trash_root)
         else:
             trash_root.mkdir(mode=0o700)
+        prune_trash(trash_root)
         trash_path = trash_root / operation_id
         if trash_path.exists():
             reject("INSTANCE_DELETE_STATE_INVALID")
@@ -481,7 +546,11 @@ def locked_operation(request, commit=False):
                     os.rename(target, source)
                 shutil.rmtree(trash_path, ignore_errors=True)
             raise
-        shutil.rmtree(trash_path)
+        shutil.rmtree(trash_path, ignore_errors=True)
+        try:
+            remove_protection(instance_id)
+        except (OSError, ValueError, TypeError):
+            pass
         return result
     finally:
         for extra in reversed(extra_locks):

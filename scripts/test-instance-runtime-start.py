@@ -430,6 +430,37 @@ class InstanceRuntimeStartTests(unittest.TestCase):
         self.assertEqual((self.instance / "compose.yaml").read_text(), desired)
         self.assertEqual(compose.call_args_list[-1].args[2], ["create", "--force-recreate", "master", "caves"])
 
+    def test_previous_mod_compose_without_skip_updates_is_migrated(self):
+        current_manifest = dict(self.manifest, modsReleaseId="66666666-6666-4666-8666-666666666666")
+        previous = HELPERS["render_compose"](current_manifest, self.release, str(self.instance), False)
+        self.assertNotIn("-skip_update_server_mods", previous)
+        (self.instance / "compose.yaml").write_text(previous)
+        with patch.object(MODULE, "compose") as compose:
+            MODULE.repair_runtime_layout(self.instance, current_manifest, self.release,
+                current_manifest["composeProject"], ["master", "caves"])
+        desired = HELPERS["render_compose"](current_manifest, self.release, str(self.instance))
+        self.assertEqual((self.instance / "compose.yaml").read_text(), desired)
+        self.assertEqual(desired.count("- '-skip_update_server_mods'"), 2)
+        self.assertEqual(compose.call_args_list[-1].args[2], ["create", "--force-recreate", "master", "caves"])
+
+    def test_start_generates_missing_workshop_index_for_existing_release(self):
+        mod_release = "66666666-6666-4666-8666-666666666666"
+        manifest = dict(self.manifest, modsReleaseId=mod_release)
+        release_root = self.instance / "mods" / "releases" / mod_release
+        (release_root / "Master" / "content" / "322330" / "123").mkdir(parents=True, mode=0o700)
+        (release_root / "manifest.json").write_text(json.dumps({"mods": [
+            {"workshopId": "123", "enabled": True, "artifactDigest": "a" * 64}]}))
+        artifact = self.root / "mods" / "prepared" / "123" / ("a" * 64)
+        artifact.mkdir(parents=True)
+        (artifact / "manifest.json").write_text(json.dumps({"sizeBytes": 42, "sourceHandle": "987654321"}))
+        with patch.object(MODULE.os, "chown", return_value=None):
+            MODULE.ensure_mod_ugc_index(self.instance, manifest, ["master", "caves"])
+        acf = (release_root / "Master" / "appworkshop_322330.acf").read_text()
+        self.assertIn('"123"', acf)
+        self.assertIn('"42"', acf)
+        self.assertIn('"987654321"', acf)
+        self.assertFalse((release_root / "Caves" / "appworkshop_322330.acf").exists())
+
     def containers(self, state="running"):
         return [{"id": ("a" if role == "master" else "b") * 64, "imageId": "sha256:" + "a" * 64,
                  "labels": {"com.hungerdesolate.hostId": HOST, "com.hungerdesolate.instanceId": INSTANCE,

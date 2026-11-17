@@ -68,6 +68,8 @@ const hostMetadataFor = (item: InstanceModSummary) => {
   return versions.find(entry => entry.contentDigest === item.artifactDigest) ?? hostModMetadata.value.get(item.workshopId);
 };
 const instanceModName = (item: InstanceModSummary) => item.schema.metadata.name ?? hostMetadataFor(item)?.name ?? item.workshopId;
+const modNameFor = (workshopId: string) => items.value.find(item => item.workshopId === workshopId)?.schema.metadata.name
+  ?? hostModMetadata.value.get(workshopId)?.name ?? workshopId;
 const instanceModVersion = (item: InstanceModSummary) => item.schema.metadata.version ?? hostMetadataFor(item)?.version ?? null;
 const schemaDiagnostic = (item: InstanceModSummary) => item.schema.diagnostics[0]?.message ?? "";
 const versionedPreview = (url: string | null, digest: string | null) => {
@@ -116,7 +118,6 @@ const serverApplyPreview = ref<import("../api/mods").ModApplyPreviewResponse | n
 const applyBusy = ref(false);
 const createProtectionBackup = ref(false);
 const applyPreviewRevision = ref<number | null>(null);
-const applyPreviewRuntime = ref<string | null>(null);
 let epoch = 0;
 let sequence = 0;
 let latestRequestId = "";
@@ -198,7 +199,6 @@ function resetContext() {
   applyPreviewError.value = "";
   applyPreview.value = null;
   applyPreviewRevision.value = null;
-  applyPreviewRuntime.value = null;
   finalizedPrepareTasks.clear();
 }
 async function openHostLibrary() {
@@ -609,7 +609,6 @@ async function openApplyPreview() {
     applyPreview.value = preview;
     serverApplyPreview.value = serverPreview;
     applyPreviewRevision.value = expectedRevision;
-    applyPreviewRuntime.value = overview.data.runtime?.status ?? overview.data.identity.runtimeStatus;
   } catch (cause) {
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
@@ -745,10 +744,6 @@ async function refreshAll() {
   await loadHostLibrary();
 }
 
-function runtimeLabel(status: string | null) {
-  return status === "running" ? "运行中" : status === "stopped" ? "已停止"
-    : status === "degraded" ? "部分异常" : status === "starting" ? "启动中" : "未知";
-}
 watch(() => `${server.value?.serverId ?? ""}:${server.value?.recordVersion ?? ""}:${target.value?.hostId ?? ""}:${target.value?.instanceId ?? ""}:${workspace.preview.value}`, () => {
   resetContext();
   void refresh();
@@ -860,17 +855,19 @@ const hostLibraryColumns = computed<DataTableColumns<HostModItem>>(() => {
   {
     title: "图片",
     key: "preview",
+    width: 56,
     render: item => item.previewUrl
       ? h("img", { class: "host-library-thumb", src: item.previewUrl, alt: item.name ?? item.workshopId, width: 40, height: 40, loading: "lazy" })
       : h("span", { class: "host-library-thumb host-library-placeholder" }, [h(Package, { size: 16 })]),
   },
-  { title: "名称", key: "name", render: item => h("strong", { class: "host-library-name" }, item.name ?? "—") },
-  { title: "ID", key: "workshopId", render: item => h("span", { class: "mono" }, item.workshopId) },
-  { title: "作者", key: "author", render: item => item.author ?? "未知" },
-  { title: "版本", key: "version", render: item => h("span", { class: "mono" }, item.version ?? "—") },
+  { title: "名称", key: "name", width: 250, ellipsis: { tooltip: true }, render: item => h("strong", item.name ?? "—") },
+  { title: "ID", key: "workshopId", width: 140, ellipsis: { tooltip: true }, render: item => h("span", { class: "mono" }, item.workshopId) },
+  { title: "作者", key: "author", width: 150, ellipsis: { tooltip: true }, render: item => item.author ?? "未知" },
+  { title: "版本", key: "version", width: 80, ellipsis: { tooltip: true }, render: item => h("span", { class: "mono" }, item.version ?? "—") },
   {
     title: "",
     key: "actions",
+    width: 56,
     align: "center",
     render: item => {
       const current = isHostLibraryCurrent(item);
@@ -994,23 +991,18 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
       </template>
     </AppDialog>
 
-    <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容、分片与恢复条件" size="lg">
+    <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容与恢复条件" size="lg">
       <LoadingState v-if="applyPreviewLoading" compact description="正在核对应用条件"/>
       <div v-else-if="applyPreviewError" class="inline-error">{{ applyPreviewError }}</div>
       <div v-else-if="applyPreview" class="mod-apply-preview">
-        <div class="mod-apply-summary">
-          <div><span>专服状态</span><strong>{{ runtimeLabel(applyPreviewRuntime) }}</strong></div>
-          <div><span>目标分片</span><strong>{{ applyPreview.shards.map(shard => shard === 'master' ? 'Master' : 'Caves').join(' / ') || '无待应用变更' }}</strong></div>
-        </div>
         <div v-if="applyPreviewStale" class="error-strip">MOD 配置已变化，此预览已失效。请重新生成。</div>
         <section class="mod-apply-section">
           <h3>MOD 变更 <span class="muted-text">{{ applyPreview.changes.length }}</span></h3>
           <p v-if="!applyPreview.changes.length" class="muted-text">期望与已部署状态一致</p>
           <div v-for="change in applyPreview.changes" :key="change.workshopId" class="mod-apply-change">
-            <span class="mono">{{ change.workshopId }}</span>
+            <span>{{ modNameFor(change.workshopId) }}</span>
             <StatusLabel tone="warning" :label="modActionChangeLabel(change)" />
             <span v-if="change.configurationKeys.length" class="muted-text">配置：{{ change.configurationKeys.join('、') }}</span>
-            <span v-if="change.contentDigest" class="mono muted-text">{{ change.contentDigest.slice(0, 12) }}</span>
           </div>
         </section>
         <section v-if="applyPreview.changes.length" class="mod-apply-section">
@@ -1061,19 +1053,9 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
 .instance-mod-copy { display: grid; min-width: 0; gap: 3px; }
 .instance-mod-copy strong { overflow-wrap: anywhere; font-weight: 500; }
 .instance-mod-copy .table-sub { margin: 0; }
-.host-library-table { table-layout: fixed; }
-.host-library-table th:nth-child(1) { width: 34px; }
-.host-library-table th:nth-child(2) { width: 56px; }
-.host-library-table th:nth-child(3) { width: 26%; }
-.host-library-table th:nth-child(4) { width: 16%; }
-.host-library-table th:nth-child(5) { width: 20%; }
-.host-library-table th:nth-child(6) { width: 64px; }
-.host-library-table th:nth-child(7) { width: 82px; }
 .host-library-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 12px; }
 .host-library-check { width: 34px; padding-right: 0 !important; }
 .host-library-check input { width: 14px; height: 14px; accent-color: var(--accent); }
-.host-library-table td { vertical-align: middle; }
-.host-library-table td:nth-child(3) { overflow-wrap: anywhere; }
 .host-library-thumb {
   display: block;
   width: 40px;
@@ -1088,5 +1070,4 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
   background: var(--surface-muted);
 }
 .host-library-placeholder { display: grid; place-items: center; color: var(--text-tertiary); }
-.host-library-name { display: block; font-weight: 500; overflow-wrap: anywhere; }
 </style>

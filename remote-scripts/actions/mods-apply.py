@@ -403,6 +403,23 @@ def setup_script(mods):
     return "".join('ServerModSetup("' + item["workshopId"] + '")\n' for item in mods if item["enabled"]).encode()
 
 
+def appworkshop_entries(mods):
+    entries = []
+    for item in mods:
+        if not item["enabled"]:
+            continue
+        manifest = read_json(ROOT / "mods" / "prepared" / item["workshopId"] / item["artifactDigest"] / "manifest.json",
+                             4 * 1024 * 1024, missing={})
+        if not isinstance(manifest, dict):
+            manifest = {}
+        size = manifest.get("sizeBytes")
+        size = size if type(size) is int and size >= 0 else 0
+        handle = manifest.get("sourceHandle")
+        handle = handle if isinstance(handle, str) and handle.isdigit() else "0"
+        entries.append((item["workshopId"], size, handle))
+    return entries
+
+
 def container_roles(instance_id, manifest):
     roles = ["master"] + (["caves"] if manifest.get("cavesEnabled") else [])
     ids = docker(["container", "ls", "--all", "--quiet", "--no-trunc",
@@ -441,12 +458,12 @@ def load_task_sources(directory):
     return archive_ns, release_ns, runtime_ns, restore_ns, download_ns
 
 
-def build_mod_release(instance, mods, mod_release_id, task_id, download_ns):
+def build_mod_release(instance, mods, mod_release_id, task_id, download_ns, release_ns):
     stage_root = instance / "staging" / "mod-apply" / task_id / "release"
     safe_dir(stage_root.parent, create=True)
     for shard in ("Master", "Caves") if (instance / "data" / "Caves").exists() else ("Master",):
         shard_root = stage_root / shard
-        workshop_root = shard_root / "steamapps" / "workshop" / "content" / "322330"
+        workshop_root = shard_root / "content" / "322330"
         workshop_root.mkdir(mode=0o700, parents=True)
         for item in mods:
             if not item["enabled"]: continue
@@ -462,9 +479,9 @@ def build_mod_release(instance, mods, mod_release_id, task_id, download_ns):
                 path = Path(current) / filename
                 if path.is_symlink() or not path.is_file(): reject("MOD_ARTIFACT_INVALID")
                 os.chown(path, 1000, 1000); os.chmod(path, 0o644)
-        setup = setup_script(mods)
-        atomic_bytes(shard_root / "dedicated_server_mods_setup.lua", setup, 0o644)
-        os.chown(shard_root / "dedicated_server_mods_setup.lua", 1000, 1000)
+        atomic_bytes(shard_root / "appworkshop_322330.acf",
+                     release_ns["appworkshop_bytes"](appworkshop_entries(mods), int(time.time())), 0o644)
+        os.chown(shard_root / "appworkshop_322330.acf", 1000, 1000)
     return stage_root
 
 
@@ -473,7 +490,7 @@ def verify_mod_release(release_root, mods, roles, download_ns):
     expected_setup = setup_script(mods)
     for shard in roles:
         shard_root = release_root / shard.title()
-        workshop_root = shard_root / "steamapps" / "workshop" / "content" / "322330"
+        workshop_root = shard_root / "content" / "322330"
         safe_dir(shard_root, runtime=True)
         safe_dir(workshop_root, runtime=True)
         actual_ids = {entry.name for entry in workshop_root.iterdir()}
@@ -489,6 +506,13 @@ def verify_mod_release(release_root, mods, roles, download_ns):
         info = setup_path.lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024 * 1024
                 or setup_path.read_bytes() != expected_setup):
+            reject("MOD_RELEASE_CONTENT_INVALID")
+        acf_path = shard_root / "appworkshop_322330.acf"
+        info = acf_path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 1024 * 1024):
+            reject("MOD_RELEASE_CONTENT_INVALID")
+        acf = acf_path.read_bytes()
+        if any(('"' + workshop_id + '"').encode() not in acf for workshop_id in enabled):
             reject("MOD_RELEASE_CONTENT_INVALID")
 
 
@@ -725,7 +749,7 @@ def worker(task_id):
         set_status(directory, "running", "preflight")
         CURRENT_STAGE = "prepare"
         stage_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-        release_stage = build_mod_release(instance, mods, mod_release_id, task_id, download_ns)
+        release_stage = build_mod_release(instance, mods, mod_release_id, task_id, download_ns, release_ns)
         release_destination = instance / "mods" / "releases" / mod_release_id
         if release_destination.exists(): reject("MOD_RELEASE_CONFLICT")
         setup_release = release_stage.parent / "release-publish"

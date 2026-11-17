@@ -505,16 +505,93 @@ def content_files(root):
     return entries, total, digest
 
 
+MODINFO_FIELDS = ("name", "author", "version")
+MODINFO_ASSIGNMENT = re.compile(r"^\s*(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
+MODINFO_LITERAL = re.compile(r"\"([^\"]*)\"|'([^']*)'|\[\[([^\n]*?)\]\]")
+MODINFO_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+MODINFO_CONCAT = re.compile(
+    r"^(?:\s*(?:\"[^\"]*\"|'[^']*'|\[\[[^\n]*?\]\])\s*(?:\.\.\s*)?)+$")
+
+
+def strip_lua_comment(line):
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in ("\"", "'"):
+            quote = char
+        elif char == "-" and line.startswith("--", index):
+            return line[:index]
+        index += 1
+    return line
+
+
+def modinfo_value(expression, strings):
+    expression = strip_lua_comment(expression).strip()
+    if not expression or expression.startswith("{"):
+        return None
+    if MODINFO_IDENTIFIER.fullmatch(expression):
+        return strings.get(expression)
+    if " or " in expression:
+        values = [next(group for group in match.groups() if group is not None)
+                  for match in MODINFO_LITERAL.finditer(expression)]
+        return values[-1] if values else None
+    if not MODINFO_CONCAT.fullmatch(expression):
+        return None
+    return "".join(next(group for group in match.groups() if group is not None)
+                   for match in MODINFO_LITERAL.finditer(expression))
+
+
+def lua_line_depth(line):
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in ("\"", "'"):
+            quote = char
+        elif char == "-" and line.startswith("--", index):
+            break
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return depth
+
+
 def modinfo_fields(content):
     try:
         text = (content / "modinfo.lua").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
+    strings = {}
     values = {}
-    for name in ("name", "author", "version"):
-        match = re.search(r"(?mi)^\s*" + name + r"\s*=\s*\"([^\"]*)\"", text)
-        if match:
-            values[name] = match.group(1).strip()[:200]
+    depth = 0
+    for line in text.splitlines():
+        if depth == 0:
+            match = MODINFO_ASSIGNMENT.match(line)
+            if match:
+                key, raw = match.group(1), match.group(2)
+                value = modinfo_value(raw, strings)
+                if value is not None:
+                    if key in MODINFO_FIELDS:
+                        values.setdefault(key, value.strip()[:200])
+                    elif MODINFO_CONCAT.fullmatch(strip_lua_comment(raw).strip()):
+                        strings[key] = value
+        depth = max(0, depth + lua_line_depth(line))
     return values
 
 

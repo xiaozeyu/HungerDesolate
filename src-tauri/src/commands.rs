@@ -509,13 +509,41 @@ pub async fn list_instance_backup_tasks(
     .await
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PickBackupPathRequest {
+    pub suggested_name: Option<String>,
+}
+
+fn backup_archive_name(value: Option<String>) -> String {
+    let candidate = value.unwrap_or_default();
+    let name = std::path::Path::new(&candidate)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 160 && !value.chars().any(char::is_control)
+        })
+        .unwrap_or("backup.tar.gz");
+    if name.contains('.') {
+        name.to_string()
+    } else {
+        format!("{name}.tar.gz")
+    }
+}
+
 #[tauri::command]
-pub async fn pick_backup_download_path(app: tauri::AppHandle) -> CommandResult<Option<String>> {
+pub async fn pick_backup_download_path(
+    app: tauri::AppHandle,
+    request: PickBackupPathRequest,
+) -> CommandResult<Option<String>> {
+    let name = backup_archive_name(request.suggested_name);
     ssh_blocking("pickBackupDownloadPath", None, move || {
         Ok(app
             .dialog()
             .file()
             .set_title("保存备份归档")
+            .set_file_name(name)
+            .add_filter("备份归档", &["gz", "tgz"])
             .blocking_save_file()
             .and_then(|file| {
                 file.into_path()
@@ -564,6 +592,52 @@ pub async fn list_backup_download_tasks(
         "listBackupDownloadTasks",
         safe_request_id(&request.request_id),
         move || crate::backups::list_download_tasks(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn pick_backup_import_path(app: tauri::AppHandle) -> CommandResult<Option<String>> {
+    ssh_blocking("pickBackupImportPath", None, move || {
+        Ok(app
+            .dialog()
+            .file()
+            .set_title("选择备份归档")
+            .add_filter("备份归档", &["gz", "tgz"])
+            .blocking_pick_file()
+            .and_then(|file| {
+                file.into_path()
+                    .ok()
+                    .and_then(|path| path.into_os_string().into_string().ok())
+            }))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn import_instance_backup(
+    state: State<'_, AppState>,
+    request: crate::backups::ImportRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "importInstanceBackup",
+        safe_request_id(&request.request_id),
+        move || crate::backups::import_backup(&path, request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn update_instance_backup_note(
+    state: State<'_, AppState>,
+    request: crate::backups::NoteRequest,
+) -> CommandResult<serde_json::Value> {
+    let path = state.database_path.clone();
+    ssh_blocking(
+        "updateInstanceBackupNote",
+        safe_request_id(&request.request_id),
+        move || crate::backups::update_note(&path, request),
     )
     .await
 }
@@ -1142,4 +1216,26 @@ pub async fn get_build_status(
         move || crate::image_build::get_build_status(&path, request),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backup_archive_name;
+
+    #[test]
+    fn backup_archive_name_is_a_safe_tar_gz_file_name() {
+        assert_eq!(backup_archive_name(None), "backup.tar.gz");
+        assert_eq!(backup_archive_name(Some("001".into())), "001.tar.gz");
+        assert_eq!(
+            backup_archive_name(Some("backup-1234.tar.gz".into())),
+            "backup-1234.tar.gz"
+        );
+        assert_eq!(backup_archive_name(Some("../evil".into())), "evil.tar.gz");
+        assert_eq!(backup_archive_name(Some("a/b/c".into())), "c.tar.gz");
+        assert_eq!(
+            backup_archive_name(Some("bad\nname".into())),
+            "backup.tar.gz"
+        );
+        assert_eq!(backup_archive_name(Some("x".repeat(200))), "backup.tar.gz");
+    }
 }

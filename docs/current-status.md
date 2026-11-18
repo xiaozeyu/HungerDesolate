@@ -44,6 +44,9 @@
 - 恢复使用当前活动 Release，只替换世界存档；兼容旧归档。
 - 备份 `dstBuild` 高于当前 build 时阻断恢复；MOD 差异只返回 warning。
 - MOD 应用的完整回滚快照保存在任务目录，不进入备份列表。
+- 已下载归档可在同一 host + 同一 instance 导入；远端校验 manifest 身份、归档结构和 checksum 后按 manifest 重建 metadata 并原子发布，跨实例明确拒绝。
+- 备份备注创建时可填、创建后可编辑；写入 `metadata.reason`，不重写归档。
+- 下载状态以右上角临时进度通知显示，不内嵌在备份列表；失败可在通知内重试，保存对话框默认建议 `.tar.gz` 文件名。
 
 ### DST 更新
 

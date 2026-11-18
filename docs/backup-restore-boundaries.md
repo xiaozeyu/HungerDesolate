@@ -38,6 +38,8 @@ client_log.txt
 
 metadata 与归档分开保存，记录身份、采集模式、时间、checksum、大小、`dstBuild` 和 MOD 引用。旧 metadata 中的 `dstReleaseId`、`modsReleaseId`、`configRevision` 只作历史信息，不参与恢复门禁。
 
+导入（仅限同一 host + 同一 instance）沿用同一归档边界：归档 manifest 的 `hostId`/`instanceId` 必须匹配，`inspect_archive` 通过后才重建 metadata 并原子发布。导入 metadata 的 `dstBuild` 为 null、`mods` 为空，恢复时按“信息未知”处理，不伪造版本或 MOD 引用。备注写入 `metadata.reason`，只改 metadata、不重写归档；下载后再导入会回退到归档 manifest 中的创建时备注。
+
 ## 2. 恢复行为
 
 恢复只替换世界存档，始终使用当前活动 Release：

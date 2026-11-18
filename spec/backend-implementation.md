@@ -348,6 +348,10 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 
 下载 task/status 与 operationId 在本地持久化，桌面退出不能承诺继续传输。重启后检查临时文件与摘要、恢复/重下该备份，不对远端世界执行任何写入。所有其他远端维护任务仍按 controller/worker 模型持续和对账。
 
+导入由 SFTP 从本地授权文件上传到 `/var/lib/famine-hub/backup-imports/<operationId>/` 暂存；远端先校验实例身份、revision 和空间，再执行与列表/恢复相同的 `inspect_archive`。归档 manifest 的 hostId/instanceId/backupId 必须匹配当前 target；metadata 按 manifest 重建（`dstBuild=null`、`mods=[]`），原子写入后 rename 进备份目录。相同 backupId 且 checksum 相同按幂等成功，不同则拒绝覆盖。导入不获取重型锁、不停服，暂存目录 24 小时后清理。
+
+备注更新是短写入：实例身份与 revision 校验后，在非阻塞重型锁下以 `expectedNote` CAS 改写 `metadata.reason`，不重写归档、不影响 checksum 与恢复能力。
+
 普通备份删除通过实例 target 和 expectedChecksum 绑定对象，获取主机重任务锁后复核 metadata 并原子移入删除现场，再清理归档；恢复前保护点不再受“最新一份不可删”限制。删除期间若维护锁被占用则拒绝，避免与备份/恢复并发。
 
 ## 11. 更新、回滚与删除

@@ -13,6 +13,7 @@
 | [接口契约](api-contract.md) | target、DTO、命令、任务、revision、幂等、错误和刷新范围 |
 | [前端实施](frontend-implementation.md) | 路由、页面、组件、状态归属、请求隔离、草稿和交互 |
 | [后端实施](backend-implementation.md) | Rust、SQLite、SSH、manifest、Compose、锁、任务、备份和 MOD |
+| [备份导入与备注设计](backup-import-note-plan.md) | 本地归档回传、身份校验、暂存发布与可编辑备注（已实现） |
 | [MOD 管理设计](mod-management-plan.md) | Workshop 获取、固定产物、配置解析、UGC 目录、更新和移除 |
 | [世界配置设计](world-config-plan.md) | 世界选项、渲染、应用和验证 |
 | [DST 更新设计](dst-update-plan.md) | Release 页检查更新、专服切换版本、保护点、验证和回滚（已实现） |

@@ -2,15 +2,19 @@
 import json
 import fcntl
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
 import stat
 import subprocess
+import time
 import uuid
 
 ROOT = Path("/var/lib/famine-hub")
 MAX_BYTES = 1024 * 1024
+MAX_ARCHIVE_BYTES = 64 * 1024 * 1024 * 1024
+IMPORT_STALE_SECONDS = 24 * 60 * 60
 RUNTIME_UID = 1000
 WORLD_ROOTS = ("data/Master", "data/Caves")
 EXCLUDED_NAMES = {"cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt",
@@ -62,6 +66,65 @@ def safe_directory(path, allow_runtime=False):
             or info.st_mode & 0o022):
         reject("BACKUP_PATH_UNSAFE")
     return info
+
+
+def ensure_directory(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        path.mkdir(mode=0o700)
+        info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+            or info.st_mode & 0o022):
+        reject("BACKUP_PATH_UNSAFE")
+    return info
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def atomic_json(path, value):
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    temporary = path.with_name("." + path.name + "." + uuid.uuid4().hex + ".tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(fd)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        os.close(fd)
+        temporary.unlink(missing_ok=True)
+
+
+def acquire_heavy_lock():
+    lock_fd = os.open(ROOT / "locks" / "heavy.lock",
+                      os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(lock_fd)
+        reject("INSTANCE_BUSY")
+    return lock_fd
+
+
+def inspect_backup_archive(path, host_id, instance_id, checksum=None):
+    source = globals().get("ARCHIVE_SOURCE")
+    if not isinstance(source, str):
+        reject("BACKUP_ARCHIVE_INVALID")
+    module = {}
+    exec(compile(source, "<backup-archive>", "exec"), module)
+    try:
+        return module["inspect_archive"](path, host_id, instance_id, checksum)
+    except module["BackupRejected"] as failure:
+        reject(failure.code)
 
 
 def identity(request):
@@ -207,12 +270,9 @@ def assess_restorability(backup, metadata, host_id, instance_id):
         info = archive.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             return "incompatible"
-        source = globals().get("ARCHIVE_SOURCE")
-        if not isinstance(source, str):
+        if not isinstance(globals().get("ARCHIVE_SOURCE"), str):
             return "unknown"
-        archive_module = {}
-        exec(compile(source, "<backup-archive>", "exec"), archive_module)
-        archive_module["inspect_archive"](archive, host_id, instance_id, metadata.get("checksum"))
+        inspect_backup_archive(archive, host_id, instance_id, metadata.get("checksum"))
         return "restorable"
     except FileNotFoundError:
         return "missingArtifacts"
@@ -296,12 +356,7 @@ def restore_preflight(request):
     archive_info = archive.lstat()
     if not stat.S_ISREG(archive_info.st_mode) or archive_info.st_nlink != 1:
         reject("BACKUP_ARCHIVE_INVALID")
-    archive_module = {}
-    source = globals().get("ARCHIVE_SOURCE")
-    if not isinstance(source, str):
-        reject("BACKUP_ARCHIVE_INVALID")
-    exec(compile(source, "<backup-archive>", "exec"), archive_module)
-    inspected = archive_module["inspect_archive"](archive, host_id, instance_id, metadata["checksum"])
+    inspected = inspect_backup_archive(archive, host_id, instance_id, metadata["checksum"])
     archive_manifest = inspected["manifest"]
     runtime, runtime_verified = runtime_state(instance_id, manifest)
     available = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
@@ -347,13 +402,8 @@ def delete_backup(request):
     if (not valid_uuid(backup_id) or not isinstance(checksum, str)
             or re.fullmatch(r"[0-9a-fA-F]{64}", checksum) is None):
         reject("BACKUP_INPUT_INVALID")
-    lock_path = ROOT / "locks" / "heavy.lock"
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    lock_fd = acquire_heavy_lock()
     try:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            reject("INSTANCE_BUSY")
         parent = ROOT / "backups" / instance_id
         safe_directory(ROOT / "backups")
         safe_directory(parent)
@@ -391,6 +441,176 @@ def delete_backup(request):
         os.close(lock_fd)
 
 
+def update_note(request):
+    host_id, instance_id, _, _ = identity(request)
+    backup_id = request.get("backupId")
+    note = request.get("note")
+    expected = request.get("expectedNote")
+    if (not valid_uuid(backup_id) or not isinstance(note, str) or not isinstance(expected, str)
+            or len(note) > 96 or len(expected) > 96
+            or any(ord(character) < 32 or ord(character) == 127 for character in note)
+            or any(ord(character) < 32 or ord(character) == 127 for character in expected)):
+        reject("BACKUP_INPUT_INVALID")
+    lock_fd = acquire_heavy_lock()
+    try:
+        backup = ROOT / "backups" / instance_id / backup_id
+        safe_directory(backup)
+        metadata_path = backup / "metadata.json"
+        metadata = read_json(metadata_path, 262144)
+        if (metadata.get("backupId") != backup_id or metadata.get("hostId") != host_id
+                or metadata.get("instanceId") != instance_id):
+            reject("BACKUP_TARGET_MISMATCH")
+        if (metadata.get("reason") or "") != expected:
+            reject("BACKUP_CHANGED")
+        metadata["reason"] = note
+        atomic_json(metadata_path, metadata)
+        return {"schemaVersion": 1, "requestId": request["requestId"],
+                "target": {"serverId": request["serverId"], "hostId": host_id,
+                           "instanceId": instance_id},
+                "backupId": backup_id, "reason": note}
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def import_staging(operation_id):
+    return ROOT / "backup-imports" / operation_id
+
+
+def import_prepare(request):
+    host_id, instance_id, _, _ = identity(request)
+    operation_id = request.get("operationId")
+    size = request.get("sizeBytes")
+    if (not valid_uuid(operation_id) or type(size) is not int
+            or size <= 0 or size > MAX_ARCHIVE_BYTES):
+        reject("BACKUP_INPUT_INVALID")
+    ensure_directory(ROOT / "backup-imports")
+    root = ROOT / "backup-imports"
+    current = time.time()
+    for child in root.iterdir():
+        if child.name == operation_id or not valid_uuid(child.name):
+            continue
+        try:
+            info = safe_directory(child)
+        except (FileNotFoundError, Rejected):
+            continue
+        if current - info.st_mtime > IMPORT_STALE_SECONDS:
+            shutil.rmtree(child, ignore_errors=True)
+    staging = import_staging(operation_id)
+    try:
+        info = staging.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None:
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                or info.st_mode & 0o022):
+            reject("BACKUP_IMPORT_STAGING_INVALID")
+        shutil.rmtree(staging)
+    staging.mkdir(mode=0o700)
+    filesystem = os.statvfs(ROOT)
+    available = filesystem.f_bavail * filesystem.f_frsize
+    if available < size + 64 * 1024 * 1024:
+        shutil.rmtree(staging, ignore_errors=True)
+        reject("BACKUP_SPACE_INSUFFICIENT")
+    return {"schemaVersion": 1, "requestId": request["requestId"],
+            "target": {"serverId": request["serverId"], "hostId": host_id,
+                       "instanceId": instance_id},
+            "operationId": operation_id, "stagingPath": str(staging / "archive.tar.gz"),
+            "availableBytes": available}
+
+
+def import_finalize(request):
+    host_id, instance_id, _, _ = identity(request)
+    operation_id = request.get("operationId")
+    checksum = request.get("sourceChecksum")
+    size = request.get("sizeBytes")
+    if (not valid_uuid(operation_id) or not isinstance(checksum, str)
+            or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+            or type(size) is not int or size <= 0 or size > MAX_ARCHIVE_BYTES):
+        reject("BACKUP_INPUT_INVALID")
+    staging = import_staging(operation_id)
+    safe_directory(staging)
+    published = False
+    try:
+        if {entry.name for entry in staging.iterdir()} != {"archive.tar.gz"}:
+            reject("BACKUP_IMPORT_STAGING_INVALID")
+        archive = staging / "archive.tar.gz"
+        info = archive.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid not in (0, os.geteuid()) or info.st_size != size):
+            reject("BACKUP_ARCHIVE_INVALID")
+        inspected = inspect_backup_archive(archive, host_id, instance_id, checksum)
+        manifest = inspected["manifest"]
+        backup_id = manifest.get("backupId")
+        capture_mode = manifest.get("captureMode")
+        if not valid_uuid(backup_id) or capture_mode not in ("cold", "quasiHot"):
+            reject("BACKUP_ARCHIVE_INVALID")
+        capture_semantics = manifest.get("captureSemantics")
+        if capture_semantics not in ("stoppedBeforeRead", "onDiskBestEffort"):
+            capture_semantics = ("stoppedBeforeRead" if capture_mode == "cold"
+                                 else "onDiskBestEffort")
+        runtime_status = manifest.get("runtimeStatus")
+        if runtime_status not in ("running", "stopped", "degraded", "unknown"):
+            runtime_status = "unknown"
+        created_at = manifest.get("captureCompletedAt")
+        if (not isinstance(created_at, str) or not 0 < len(created_at) <= 64
+                or any(ord(character) < 32 for character in created_at)):
+            created_at = now()
+        reason = manifest.get("reason")
+        if (not isinstance(reason, str) or len(reason) > 96
+                or any(ord(character) < 32 or ord(character) == 127 for character in reason)):
+            reason = "本地导入"
+        metadata = {"schemaVersion": 1, "backupId": backup_id, "hostId": host_id,
+                    "instanceId": instance_id, "createdAt": created_at, "reason": reason,
+                    "captureMode": capture_mode, "captureSemantics": capture_semantics,
+                    "runtimeStatusAtCapture": runtime_status,
+                    "sizeBytes": inspected["archiveSizeBytes"],
+                    "checksum": inspected["checksum"], "verification": "verified",
+                    "restorability": "restorable", "dstBuild": None,
+                    "mods": [], "containsSecrets": False}
+        parent = ROOT / "backups" / instance_id
+        ensure_directory(ROOT / "backups")
+        ensure_directory(parent)
+        backup_dir = parent / backup_id
+        try:
+            backup_dir.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            try:
+                existing = read_json(backup_dir / "metadata.json", 262144)
+            except (FileNotFoundError, Rejected):
+                existing = None
+            if (isinstance(existing, dict) and existing.get("checksum") == metadata["checksum"]
+                    and existing.get("verification") == "verified"):
+                shutil.rmtree(staging, ignore_errors=True)
+                return {"schemaVersion": 1, "requestId": request["requestId"],
+                        "target": {"serverId": request["serverId"], "hostId": host_id,
+                                   "instanceId": instance_id},
+                        "operationId": operation_id, "backup": existing}
+            reject("BACKUP_ID_EXISTS")
+        atomic_json(staging / "metadata.json", metadata)
+        if {entry.name for entry in staging.iterdir()} != {"archive.tar.gz", "metadata.json"}:
+            reject("BACKUP_IMPORT_STAGING_INVALID")
+        os.rename(staging, backup_dir)
+        published = True
+        try:
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except OSError:
+            pass
+        return {"schemaVersion": 1, "requestId": request["requestId"],
+                "target": {"serverId": request["serverId"], "hostId": host_id,
+                           "instanceId": instance_id},
+                "operationId": operation_id, "backup": metadata}
+    finally:
+        if not published:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
 def main(request):
     try:
         action = request.get("action")
@@ -402,6 +622,12 @@ def main(request):
             data = restore_preflight(request)
         elif action == "delete":
             data = delete_backup(request)
+        elif action == "updateNote":
+            data = update_note(request)
+        elif action == "importPrepare":
+            data = import_prepare(request)
+        elif action == "importFinalize":
+            data = import_finalize(request)
         else:
             reject("BACKUP_ACTION_INVALID")
         print(json.dumps({"ok": True, "data": data}, separators=(",", ":")), flush=True)

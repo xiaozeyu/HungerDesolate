@@ -220,6 +220,8 @@ rollback 只在失败恢复分支执行，cancelled/interrupted 为状态而非�
 
 backupDownload 是本地传输任务：远端仅只读提供固定备份，本地 task/journal/operation 索引作为下载执行权威，关闭桌面后可 interrupted，重开按本地临时文件/摘要对账。它不承诺像远端安装/更新/恢复一样在桌面退出后继续；重试关联原 operationId，恢复传输是否支持续传必须真实验证。
 
+backupImport 是本地发起的同步传输，不进入 TaskOperation：先由远端 prepare 校验身份/revision/空间并创建暂存目录，再从本地 SFTP 上传；最后由远端重新 inspect 归档、重建 metadata 并原子发布。manifest 身份只允许同 host + 同 instance；上传中断后重试从 0 开始，暂存目录按 24 小时清理。只有 inspect 与 checksum 通过且 metadata 已发布才返回成功。
+
 事件名固定 `famine://task-updated`，payload 为 TaskSnapshot，单条不超过 64 KiB，不含全量业务数组和日志正文。Tauri 事件只承担通知；客户端启动先订阅再 list_tasks/reconcile，按 sequence 合并，漏事件通过 get_task 获取持久状态。页面卸载不能解绑应用级任务监听，应用监听只注册一次。
 
 任务状态规则：queued → running → succeeded/failed/cancelled；queued 可 cancelled。只有安全边界允许 running → cancelled。远端执行进程已确认消失且无法断言结果时转 interrupted；普通 SSH 断线仅 observation=stale，不擅自改远端状态。
@@ -638,6 +640,8 @@ type GetInstanceCreationStatusResponse = {
 | preview_instance_backup / previewInstanceBackup | P | target、captureMode(cold/quasiHot)、expectedRevision | 一致性语义、停服影响、空间估算；准热备份不满足破坏性操作保护点 |
 | create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；归档只含世界存档（`data/Master`、`data/Caves`），不保存服务器身份、配置、Compose 或 Release 引用；metadata 保留采集模式、运行状态、`dstBuild`、`mods[]`（workshopId/enabled/artifactDigest）引用作为提示；`BackupSummary.mods` 返回引用 |
 | download_instance_backup / downloadInstanceBackup | T | target、backupId、operationId、本地授权 destinationHandle | SFTP 下载及本地 checksum；不允许前端随意传远端路径 |
+| import_instance_backup / importInstanceBackup | M | target、expectedRevision、operationId、本地授权 sourceHandle | SFTP 上传既有归档到同一 host+instance；manifest 身份必须匹配，远端 inspect 与 checksum 通过后才重建 metadata 并发布；同 backupId 同 checksum 幂等，不同 checksum 返回 `BACKUP_ID_EXISTS`；不进入远端任务队列、不停服 |
+| update_instance_backup_note / updateInstanceBackupNote | M | target、expectedRevision、backupId、note、expectedNote | 以 CAS 更新 metadata.reason（≤96 Unicode 字符），只改 metadata、不重写归档；不一致返回 `BACKUP_CHANGED`；备注不进入归档 |
 | restore_instance_backup / restoreInstanceBackup | T | target、backupId、expectedRevision、operationId、createProtectionBackup | 用户确认恢复后检查归属、checksum、空间与运行状态；只恢复世界存档到当前活动 Release，不切换 Release、不覆盖配置/Compose/MOD/凭据；备份 build 高于当前 build 时返回 `BACKUP_BUILD_NEWER_THAN_INSTANCE`；从主机库最新内容重建 MOD Release，缺失 MOD 返回 `modsWarnings` 但继续恢复；跨实例明确拒绝。`createProtectionBackup=false` 时不创建恢复前保护点 |
 | delete_instance_backup / deleteInstanceBackup | M | target、expectedRevision、backupId、expectedChecksum | checksum CAS、实例归属和维护锁校验后删除备份；恢复前保护点与普通备份一样可删除，不再保留“最新一份不可删”的限制 |
 | read_instance_logs / readInstanceLogs | Q | target、shardKind、cursor、limit | LogPage，游标绑定 stream/target |

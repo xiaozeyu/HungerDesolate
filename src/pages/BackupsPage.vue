@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, ref, watch } from "vue";
-import { Download, Plus, RefreshCw, RotateCcw, Trash2 } from "@lucide/vue";
-import { NButton, NCheckbox, NDataTable, type DataTableColumns } from "naive-ui";
+import { computed, h, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { Download, Pencil, Plus, RefreshCw, RotateCcw, Trash2, Upload } from "@lucide/vue";
+import { NButton, NCheckbox, NDataTable, NInput, type DataTableColumns } from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import AppDialog from "../components/AppDialog.vue";
@@ -9,11 +9,14 @@ import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import IconButton from "../components/IconButton.vue";
 import TaskPanel from "../components/TaskPanel.vue";
+import DownloadProgressNotice from "../components/DownloadProgressNotice.vue";
 import { listHostMods } from "../api/hostMods";
-import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, listInstances, pickBackupDownloadPath, previewInstanceBackup, restoreInstanceBackup, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
+import { notification } from "../naive/notify";
+import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, getBackupDownloadTask, importInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, listInstances, pickBackupDownloadPath, pickBackupImportPath, previewInstanceBackup, restoreInstanceBackup, updateInstanceBackupNote, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { describeError } from "../lib/commandError";
+import { formatBytes } from "../lib/environmentView";
 import { useTasks } from "../composables/useTasks";
 import type { TaskSnapshot } from "../types/contracts";
 import { createSerialQueue } from "../lib/serialQueue";
@@ -52,9 +55,29 @@ const deleteTarget = ref<BackupSummary | null>(null);
 const deleteBusy = ref(false);
 const cancelBusy = ref(false);
 const cancelMessage = ref("");
-const downloadTasks = ref<BackupDownloadResponse[]>([]);
+interface DownloadNoticeState {
+  status: "running" | "succeeded" | "interrupted" | "failed";
+  bytesTransferred: number;
+  sizeBytes: number | null;
+  error: string;
+}
+const downloadCleanups = new Map<string, () => void>();
+const shownInterrupted = new Set<string>();
+const activeDownloadIds = reactive(new Set<string>());
+const downloading = computed(() => activeDownloadIds.size > 0);
+const importTask = ref<{ path: string; operationId: string; status: "running" | "succeeded" | "failed" } | null>(null);
+const importing = computed(() => importTask.value?.status === "running");
+const importFileName = computed(() => fileName(importTask.value?.path));
+function fileName(value: string | undefined) {
+  return value ? value.split(/[\\/]/).pop() || value : "";
+}
+const createNote = ref("");
+const noteTarget = ref<BackupSummary | null>(null);
+const noteDraft = ref("");
+const noteBusy = ref(false);
+const noteError = ref("");
 let pendingOperationId = "";
-let pendingCreate: { requestId: string; backupId: string; captureMode: BackupCaptureMode; revision: number } | null = null;
+let pendingCreate: { requestId: string; backupId: string; captureMode: BackupCaptureMode; revision: number; reason: string } | null = null;
 let epoch = 0;
 let listSequence = 0;
 let previewSequence = 0;
@@ -127,11 +150,15 @@ async function refresh() {
       return;
     }
     const tasksRequestId = crypto.randomUUID();
-    const downloads = await queueSsh(() => listBackupDownloadTasks({ schemaVersion: 1, requestId: tasksRequestId,
-      target: instanceTarget, expectedRecordVersion: connection.recordVersion }));
-    if (!isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) return;
-    downloadTasks.value = downloads.filter(task => task.target.serverId === instanceTarget.serverId
-      && task.target.hostId === instanceTarget.hostId && task.target.instanceId === instanceTarget.instanceId);
+    if (!downloading.value) {
+      const downloads = await queueSsh(() => listBackupDownloadTasks({ schemaVersion: 1, requestId: crypto.randomUUID(),
+        target: instanceTarget, expectedRecordVersion: connection.recordVersion }));
+      if (!isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) return;
+      const interrupted = downloads.find(task => task.status === "interrupted" && task.destination
+        && task.target.serverId === instanceTarget.serverId && task.target.hostId === instanceTarget.hostId
+        && task.target.instanceId === instanceTarget.instanceId);
+      if (interrupted) surfaceInterruptedDownload(interrupted);
+    }
     const tasks = await queueSsh(() => listInstanceBackupTasks({ schemaVersion: 1, requestId: tasksRequestId,
       target: instanceTarget, expectedRecordVersion: connection.recordVersion }));
     if (!isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) return;
@@ -215,11 +242,11 @@ function taskBelongsHere(task: TaskSnapshot, key: string) {
 }
 
 async function downloadBackup(item: BackupSummary) {
-  if (workspace.preview.value) return;
+  if (workspace.preview.value || downloading.value) return;
   const selectionKey = targetKey.value;
   const recordVersion = server.value?.recordVersion;
   const requestEpoch = epoch;
-  const destination = await pickBackupDownloadPath();
+  const destination = await pickBackupDownloadPath(`backup-${item.backupId.slice(0, 8)}.tar.gz`);
   const connection = server.value; const instanceTarget = target.value;
   if (!destination || !connection || !instanceTarget || connection.recordVersion !== recordVersion
     || targetKey.value !== selectionKey || requestEpoch !== epoch) return;
@@ -229,26 +256,183 @@ async function downloadBackup(item: BackupSummary) {
 
 async function retryDownload(task: BackupDownloadResponse) {
   const connection = server.value; const instanceTarget = target.value;
-  if (!connection || !instanceTarget || !task.destination || workspace.preview.value) return;
+  if (!connection || !instanceTarget || !task.destination || workspace.preview.value || downloading.value) return;
   await runDownload(task.backupId, task.operationId, task.destination, connection.recordVersion, instanceTarget);
+}
+
+function destroyDownloadNotices() {
+  for (const cleanup of [...downloadCleanups.values()]) cleanup();
+  downloadCleanups.clear();
+}
+
+function showDownloadNotice(operationId: string, destination: string, progress: DownloadNoticeState,
+  onRetry: () => void, onClose: () => void) {
+  let destroyed = false;
+  let notice: { destroy: () => void } | null = null;
+  const close = () => {
+    if (destroyed) return;
+    destroyed = true;
+    notice?.destroy();
+    notice = null;
+    downloadCleanups.delete(operationId);
+    onClose();
+  };
+  notice = notification.open({
+    title: "下载备份",
+    content: () => h(DownloadProgressNotice, {
+      name: fileName(destination),
+      progress,
+      onRetry: () => { close(); onRetry(); },
+      onClose: close,
+    }),
+    duration: 0,
+    closable: true,
+    keepAliveOnHover: true,
+    onClose: close,
+  });
+  downloadCleanups.set(operationId, close);
+  return close;
+}
+
+function surfaceInterruptedDownload(task: BackupDownloadResponse) {
+  if (!task.destination || shownInterrupted.has(task.operationId)) return;
+  shownInterrupted.add(task.operationId);
+  const progress = reactive<DownloadNoticeState>({ status: "interrupted", bytesTransferred: task.bytesTransferred ?? 0,
+    sizeBytes: task.sizeBytes ?? null, error: "上次下载未完成，可继续下载。" });
+  showDownloadNotice(task.operationId, task.destination, progress, () => void retryDownload(task), () => {});
 }
 
 async function runDownload(backupId:string, operationId:string, destination:string, recordVersion:number, instanceTarget:NonNullable<typeof target.value>) {
   const requestEpoch = epoch;
-  const task: BackupDownloadResponse = {schemaVersion:1,target:instanceTarget,backupId,operationId,status:"running",stage:"transfer",destination};
-  downloadTasks.value = [task, ...downloadTasks.value.filter(item => item.operationId !== operationId)];
-  try {
-    const result = await queueSsh(() => downloadInstanceBackup({schemaVersion:1,requestId:crypto.randomUUID(),target:instanceTarget,
-      expectedRecordVersion:recordVersion,backupId,operationId,destination}));
-    if (requestEpoch !== epoch || targetKey.value !== `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}` || server.value?.recordVersion !== recordVersion) return;
-    downloadTasks.value = [result, ...downloadTasks.value.filter(item => item.operationId !== operationId)];
-  } catch (cause) {
-    const stillCurrent = requestEpoch === epoch && targetKey.value === `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}` && server.value?.recordVersion === recordVersion;
-    if (stillCurrent) {
-      const message = describeError(cause).message;
-      error.value = message;
-      downloadTasks.value = downloadTasks.value.map(item => item.operationId === operationId ? {...item,status:"interrupted",errorCode:"BACKUP_DOWNLOAD_INTERRUPTED"} : item);
+  const requestKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  const progress = reactive<DownloadNoticeState>({ status: "running", bytesTransferred: 0, sizeBytes: null, error: "" });
+  let poll = 0;
+  const stopPolling = () => {
+    if (poll) {
+      clearInterval(poll);
+      poll = 0;
     }
+  };
+  activeDownloadIds.add(operationId);
+  const close = showDownloadNotice(operationId, destination, progress,
+    () => void runDownload(backupId, operationId, destination, recordVersion, instanceTarget), stopPolling);
+  poll = window.setInterval(async () => {
+    try {
+      const task = await getBackupDownloadTask({ schemaVersion: 1, requestId: crypto.randomUUID(), target: instanceTarget,
+        expectedRecordVersion: recordVersion, backupId, operationId, destination });
+      if (!poll) return;
+      if (typeof task.sizeBytes === "number") progress.sizeBytes = task.sizeBytes;
+      if (typeof task.bytesTransferred === "number") progress.bytesTransferred = task.bytesTransferred;
+      if (task.status === "interrupted" || task.status === "failed") {
+        progress.status = "interrupted";
+        progress.error = "下载中断，可重试。";
+      }
+    } catch {
+      // 状态文件可能尚未写入，保持当前进度。
+    }
+  }, 800);
+  try {
+    const result = await queueSsh(() => downloadInstanceBackup({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      target: instanceTarget, expectedRecordVersion: recordVersion, backupId, operationId, destination }));
+    stopPolling();
+    progress.status = "succeeded";
+    progress.bytesTransferred = result.bytesTransferred ?? progress.bytesTransferred;
+    progress.sizeBytes = result.sizeBytes ?? progress.sizeBytes;
+    progress.error = "";
+    window.setTimeout(close, 3500);
+  } catch (cause) {
+    stopPolling();
+    const message = describeError(cause).message;
+    progress.status = "interrupted";
+    progress.error = message;
+    if (requestEpoch === epoch && targetKey.value === requestKey && server.value?.recordVersion === recordVersion) {
+      error.value = message;
+    } else {
+      close();
+    }
+  } finally {
+    activeDownloadIds.delete(operationId);
+  }
+}
+
+async function importBackup() {
+  if (workspace.preview.value || importing.value) return;
+  const selectionKey = targetKey.value;
+  const recordVersion = server.value?.recordVersion;
+  const requestEpoch = epoch;
+  const path = await pickBackupImportPath();
+  const connection = server.value; const instanceTarget = target.value; const expectedRevision = revision.value;
+  if (!path || !connection || !instanceTarget || expectedRevision === null
+    || connection.recordVersion !== recordVersion || targetKey.value !== selectionKey
+    || requestEpoch !== epoch) return;
+  await runImport(path, crypto.randomUUID(), connection.recordVersion, expectedRevision, instanceTarget);
+}
+
+async function retryImport() {
+  const task = importTask.value; const connection = server.value; const instanceTarget = target.value;
+  const expectedRevision = revision.value;
+  if (!task || task.status !== "failed" || !connection || !instanceTarget
+    || expectedRevision === null || workspace.preview.value) return;
+  await runImport(task.path, task.operationId, connection.recordVersion, expectedRevision, instanceTarget);
+}
+
+async function runImport(path: string, operationId: string, recordVersion: number, expectedRevision: number,
+  instanceTarget: NonNullable<typeof target.value>) {
+  const requestEpoch = epoch;
+  const requestKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  importTask.value = { path, operationId, status: "running" };
+  error.value = "";
+  try {
+    const result = await queueSsh(() => importInstanceBackup({ schemaVersion: 1, requestId: crypto.randomUUID(),
+      target: instanceTarget, expectedRecordVersion: recordVersion, expectedRevision, operationId, localPath: path }));
+    if (requestEpoch !== epoch || targetKey.value !== requestKey || server.value?.recordVersion !== recordVersion) return;
+    if (result.schemaVersion !== 1 || result.status !== "succeeded" || result.operationId !== operationId
+      || result.target.serverId !== instanceTarget.serverId || result.target.hostId !== instanceTarget.hostId
+      || result.target.instanceId !== instanceTarget.instanceId) throw new Error("备份导入回执身份不匹配");
+    importTask.value = { path, operationId, status: "succeeded" };
+    await refresh();
+  } catch (cause) {
+    if (requestEpoch === epoch && targetKey.value === requestKey) {
+      error.value = describeError(cause).message;
+      importTask.value = { path, operationId, status: "failed" };
+    }
+  }
+}
+
+function editNote(item: BackupSummary) {
+  if (workspace.preview.value) return;
+  error.value = "";
+  noteError.value = "";
+  noteDraft.value = item.reason;
+  noteTarget.value = item;
+}
+
+async function saveNote() {
+  const current = noteTarget.value; const connection = server.value; const instanceTarget = target.value;
+  const expectedRevision = revision.value;
+  if (!current || !connection || !instanceTarget || expectedRevision === null
+    || noteBusy.value || workspace.preview.value) return;
+  const requestEpoch = epoch;
+  const requestKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
+  noteBusy.value = true; noteError.value = "";
+  try {
+    const requestId = crypto.randomUUID();
+    const response = await queueSsh(() => updateInstanceBackupNote({ schemaVersion: 1, requestId,
+      target: instanceTarget, expectedRecordVersion: connection.recordVersion, expectedRevision,
+      backupId: current.backupId, note: noteDraft.value, expectedNote: current.reason }));
+    if (requestEpoch !== epoch || targetKey.value !== requestKey
+      || server.value?.recordVersion !== connection.recordVersion) return;
+    if (response.requestId !== requestId || response.backupId !== current.backupId
+      || response.target.serverId !== instanceTarget.serverId || response.target.hostId !== instanceTarget.hostId
+      || response.target.instanceId !== instanceTarget.instanceId) throw new Error("备份备注回执身份不匹配");
+    items.value = items.value.map(item => item.backupId === current.backupId
+      ? { ...item, reason: response.reason }
+      : item);
+    noteTarget.value = null;
+  } catch (cause) {
+    if (requestEpoch === epoch) noteError.value = describeError(cause).message;
+  } finally {
+    if (requestEpoch === epoch) noteBusy.value = false;
   }
 }
 
@@ -369,9 +553,11 @@ function openCreateDialog() {
   createOpen.value = true;
   if (pendingCreate) {
     mode.value = pendingCreate.captureMode;
+    createNote.value = pendingCreate.reason;
     return;
   }
   mode.value = null;
+  createNote.value = "";
 }
 
 function chooseMode(captureMode: BackupCaptureMode) {
@@ -397,8 +583,9 @@ async function createBackup() {
   const operationId = pendingOperationId || crypto.randomUUID();
   pendingOperationId = operationId;
   pendingCreate ??= { requestId: crypto.randomUUID(), backupId: crypto.randomUUID(),
-    captureMode: requestedMode, revision: expectedRevision };
-  const { requestId, backupId, captureMode, revision: requestRevision } = pendingCreate;
+    captureMode: requestedMode, revision: expectedRevision,
+    reason: createNote.value.trim() || "手动创建" };
+  const { requestId, backupId, captureMode, reason, revision: requestRevision } = pendingCreate;
   const targetKey = `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}`;
   createBusy.value = true;
   error.value = "";
@@ -406,7 +593,7 @@ async function createBackup() {
   try {
     const result = await queueSsh(() => createInstanceBackup({ schemaVersion: 1, requestId, target: instanceTarget,
       expectedRecordVersion: connection.recordVersion, expectedRevision: requestRevision, captureMode,
-      operationId, backupId, reason: "手动创建" }));
+      operationId, backupId, reason }));
     if (result.schemaVersion !== 1 || result.requestId !== requestId
       || result.target.serverId !== instanceTarget.serverId || result.target.hostId !== instanceTarget.hostId
       || result.target.instanceId !== instanceTarget.instanceId || result.task.operationId !== operationId
@@ -417,6 +604,7 @@ async function createBackup() {
     pendingCreate = null;
     pendingOperationId = "";
     createOpen.value = false;
+    createNote.value = "";
     previews.value = { ...previews.value, [captureMode]: null };
   } catch (cause) {
     if (target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) {
@@ -426,10 +614,6 @@ async function createBackup() {
   }
 }
 
-function formatBytes(value: number) {
-  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(0)} MB`;
-  return `${(value / 1024 ** 3).toFixed(2)} GB`;
-}
 function formatDate(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
@@ -551,10 +735,18 @@ watch([targetKey, () => server.value?.recordVersion, revision, () => workspace.p
   currentListRequest = "";
   currentPreviewRequest = "";
   items.value = [];
-  downloadTasks.value = [];
+  destroyDownloadNotices();
+  shownInterrupted.clear();
+  activeDownloadIds.clear();
+  importTask.value = null;
   previews.value = { cold: null, quasiHot: null };
   mode.value = null;
+  createNote.value = "";
   createOpen.value = false;
+  noteTarget.value = null;
+  noteDraft.value = "";
+  noteError.value = "";
+  noteBusy.value = false;
   restoreTarget.value = null;
   deleteTarget.value = null;
   restoreError.value = "";
@@ -574,7 +766,10 @@ watch([targetKey, () => server.value?.recordVersion, revision, () => workspace.p
 }, { immediate: true });
 function closeCreateDialog(open: boolean) {
   createOpen.value = open;
-  if (!open && !createBusy.value && !pendingCreate) mode.value = null;
+  if (!open && !createBusy.value && !pendingCreate) {
+    mode.value = null;
+    createNote.value = "";
+  }
 }
 onBeforeUnmount(() => {
   epoch++;
@@ -584,24 +779,31 @@ onBeforeUnmount(() => {
   currentPreviewRequest = "";
 });
 
+const tableItems = computed(() => [...items.value].sort((left, right) =>
+  (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0)));
 const columns = computed<DataTableColumns<BackupSummary>>(() => {
   void workspace.preview.value;
   void restoreBusy.value;
   void deleteBusy.value;
+  void noteBusy.value;
+  void downloading.value;
   return [
-  { title: "时间", key: "createdAt", render: item => formatDate(item.createdAt) },
-  { title: "模式", key: "captureMode", render: item => modeLabel(item.captureMode) },
-  { title: "原因", key: "reason", render: item => item.reason },
-  { title: "DST build", key: "dstBuild", render: item => h("span", { class: "mono" }, item.dstBuild ?? "未知") },
-  { title: "大小", key: "sizeBytes", render: item => formatBytes(item.sizeBytes) },
+  { title: "时间", key: "createdAt", width: 100, ellipsis: { tooltip: true }, render: item => formatDate(item.createdAt) },
+  { title: "模式", key: "captureMode", width: 72, ellipsis: true, render: item => modeLabel(item.captureMode) },
+  { title: "备注", key: "reason", width: 90, ellipsis: { tooltip: true }, render: item => item.reason || "—" },
+  { title: "大小", key: "sizeBytes", width: 72, ellipsis: true, render: item => formatBytes(item.sizeBytes) },
   {
     title: "校验",
     key: "verification",
+    width: 72,
+    ellipsis: true,
     render: item => h(StatusLabel, { tone: verificationTone(item.verification), label: verificationLabel(item.verification) }),
   },
   {
     title: "恢复能力",
     key: "restorability",
+    width: 72,
+    ellipsis: true,
     render: item => item.restorability === "restorable" ? "可恢复"
       : item.restorability === "missingArtifacts" ? "缺少产物"
       : item.restorability === "incompatible" ? "不兼容" : "待确认",
@@ -609,11 +811,17 @@ const columns = computed<DataTableColumns<BackupSummary>>(() => {
   {
     title: "",
     key: "actions",
+    width: 148,
     align: "center",
     render: item => h("div", { class: "row-actions" }, [
       h(IconButton, {
-        label: "下载备份",
-        disabled: workspace.preview.value,
+        label: "编辑备注",
+        disabled: workspace.preview.value || noteBusy.value,
+        onClick: () => editNote(item),
+      }, () => h(Pencil, { size: 15 })),
+      h(IconButton, {
+        label: downloading.value ? "已有下载任务进行中" : "下载备份",
+        disabled: workspace.preview.value || downloading.value,
         onClick: () => void downloadBackup(item),
       }, () => h(Download, { size: 15 })),
       h(IconButton, {
@@ -642,6 +850,10 @@ const rowKey = (item: BackupSummary) => item.backupId;
           <template #icon><Plus :size="16"/></template>
           {{ createBusy ? "备份中…" : pendingCreate ? "重试原请求" : "创建备份" }}
         </NButton>
+        <NButton :disabled="pageLoading || importing || revision === null || workspace.preview.value" @click="importBackup">
+          <template #icon><Upload :size="16"/></template>
+          {{ importing ? "导入中…" : "导入备份" }}
+        </NButton>
         <NButton :disabled="pageLoading || previewLoading || revision === null || workspace.preview.value" @click="refreshPage">
           <template #icon><RefreshCw :size="16"/></template>
           {{ pageLoading || previewLoading ? "读取中…" : "刷新" }}
@@ -651,16 +863,15 @@ const rowKey = (item: BackupSummary) => item.backupId;
     <PreviewNotice/>
     <div v-if="error" class="error-strip" role="alert">{{ error }}</div>
     <div class="table-wrap">
-      <NDataTable :columns="columns" :data="items" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="pageLoading">
+      <NDataTable :columns="columns" :data="tableItems" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="pageLoading">
         <template #empty><span class="muted-text">暂无备份</span></template>
       </NDataTable>
     </div>
-    <section v-if="downloadTasks.length" class="backup-task-list" aria-label="备份下载任务">
-      <div v-for="task in downloadTasks" :key="task.operationId" class="download-task">
-        <span>{{ task.status === "succeeded" ? "下载完成" : task.status === "running" ? "正在下载" : "下载中断" }}</span>
-        <span class="mono">{{ task.backupId }}</span>
-        <span>{{ task.bytesTransferred ? formatBytes(task.bytesTransferred) : "待开始" }}</span>
-        <NButton v-if="task.status === 'interrupted'" size="small" :disabled="workspace.preview.value" @click="retryDownload(task)">继续下载</NButton>
+    <section v-if="importTask" class="backup-task-list" aria-label="备份导入任务">
+      <div class="import-task">
+        <span>{{ importTask.status === "succeeded" ? "导入完成" : importTask.status === "running" ? "正在导入" : "导入失败" }}</span>
+        <span class="mono">{{ importFileName }}</span>
+        <NButton v-if="importTask.status === 'failed'" size="small" :disabled="workspace.preview.value" @click="retryImport">重试导入</NButton>
       </div>
     </section>
 <FloatingTask v-if="activeTask" label="备份任务">
@@ -684,6 +895,11 @@ const rowKey = (item: BackupSummary) => item.backupId;
           <StatusLabel :tone="modeStatus(option.value as BackupCaptureMode).tone" :label="modeStatus(option.value as BackupCaptureMode).label"/>
         </button>
       </div>
+      <label class="backup-note-field">
+        <span>备注</span>
+        <NInput v-model:value="createNote" :maxlength="96" show-count placeholder="可选"
+          :disabled="createBusy || workspace.preview.value"/>
+      </label>
       <p v-if="mode && previewLoading" class="muted-text">正在校验{{ modeLabel(mode) }}条件…</p>
       <p v-else-if="mode && preview && !preview.allowed" class="environment-error">当前条件不满足{{ modeLabel(mode) }}。</p>
       <template #footer>
@@ -702,6 +918,18 @@ const rowKey = (item: BackupSummary) => item.backupId;
       <p v-if="restoreError" class="error-strip" role="alert">{{ restoreError }}</p>
       <template #footer><NButton :disabled="restoreBusy" @click="restoreTarget = null; restoreError = ''; restoreModWarnings = []">取消</NButton><NButton type="primary" :disabled="restoreBusy || workspace.preview.value" @click="restoreBackup">{{ restoreBusy ? "检测并开始恢复…" : "确认恢复" }}</NButton></template>
     </AppDialog>
+    <AppDialog :open="!!noteTarget" title="编辑备注" @update:open="value => { if (!value && !noteBusy) { noteTarget = null; noteError = ''; } }">
+      <label class="backup-note-field">
+        <span>备注</span>
+        <NInput v-model:value="noteDraft" :maxlength="96" show-count autofocus placeholder="例如：换 MOD 前"
+          :disabled="noteBusy"/>
+      </label>
+      <p v-if="noteError" class="error-strip" role="alert">{{ noteError }}</p>
+      <template #footer>
+        <NButton :disabled="noteBusy" @click="noteTarget = null; noteError = ''">取消</NButton>
+        <NButton type="primary" :disabled="noteBusy || workspace.preview.value" @click="saveNote">{{ noteBusy ? "保存中…" : "保存" }}</NButton>
+      </template>
+    </AppDialog>
     <AppDialog :open="!!deleteTarget" title="删除备份" description="此操作会永久删除远端归档，不能撤销。" @update:open="value => { if (!value && !deleteBusy) { deleteTarget = null; deleteError = ''; } }">
       <p v-if="deleteTarget">确定删除 <span class="mono">{{ deleteTarget.backupId }}</span>（{{ formatBytes(deleteTarget.sizeBytes) }}）？</p>
       <p v-if="deleteError" class="error-strip" role="alert">{{ deleteError }}</p>
@@ -718,5 +946,10 @@ const rowKey = (item: BackupSummary) => item.backupId;
 .backup-warning { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: 13px; }
 .backup-restore-option { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-4) 0 var(--space-2); font-size: 13px; }
 .backup-restore-option input { width: 16px; height: 16px; accent-color: var(--text); }
-.download-task { display:flex; align-items:center; gap:var(--space-3); min-height:44px; border-bottom:1px solid var(--border); }
+.table-wrap :deep(.row-actions) { gap:4px; }
+.import-task { display:flex; align-items:center; gap:var(--space-3); min-height:44px; border-bottom:1px solid var(--border); }
+.import-task span:nth-child(2) { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.backup-note-field { display:flex; align-items:center; gap:var(--space-3); margin:var(--space-4) 0 var(--space-2); font-size:13px; }
+.backup-note-field > span { flex:none; color:var(--text-secondary); }
+.backup-note-field :deep(.n-input) { flex:1; }
 </style>

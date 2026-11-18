@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use ssh2::{ExtendedData, Session};
+use ssh2::{ExtendedData, OpenFlags, OpenType, Session};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -22,6 +22,8 @@ const TASK_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-task
 const ARCHIVE_SCRIPT: &str = include_str!("../../remote-scripts/actions/backup-archive.py");
 const RESTORE_SCRIPT: &str = include_str!("../../remote-scripts/actions/restore-task.py");
 const MAX_OUTPUT: usize = 1024 * 1024;
+const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const IMPORT_SPACE_MARGIN: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -122,6 +124,31 @@ pub struct RestoreTaskStatusRequest {
     pub target: InstanceTarget,
     pub expected_record_version: u64,
     pub operation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoteRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub expected_record_version: u64,
+    pub expected_revision: u64,
+    pub backup_id: String,
+    pub note: String,
+    pub expected_note: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: InstanceTarget,
+    pub expected_record_version: u64,
+    pub expected_revision: u64,
+    pub operation_id: String,
+    pub local_path: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -314,6 +341,16 @@ fn invoke(session: &Session, payload: &Value) -> CommandResult<Value> {
                 error("BACKUP_DELETE_FAILED", "备份删除未完成，请刷新核对现场")
             }
             "INSTANCE_BUSY" => error("INSTANCE_BUSY", "专服正由其他维护操作占用"),
+            "INSTANCE_NOT_FOUND" => error("INSTANCE_NOT_FOUND", "专服不存在或尚未就绪"),
+            "BACKUP_ID_EXISTS" => error("BACKUP_ID_EXISTS", "该备份已存在且内容不同"),
+            "BACKUP_ARCHIVE_INVALID" | "BACKUP_ARCHIVE_UNSAFE" => {
+                error("BACKUP_ARCHIVE_INVALID", "备份归档无效或已损坏")
+            }
+            "BACKUP_CHECKSUM_MISMATCH" => error("BACKUP_CHECKSUM_MISMATCH", "备份归档校验失败"),
+            "BACKUP_SPACE_INSUFFICIENT" => error("BACKUP_SPACE_INSUFFICIENT", "远端可用空间不足"),
+            "BACKUP_IMPORT_STAGING_INVALID" => {
+                error("BACKUP_IMPORT_STAGING_INVALID", "备份导入暂存状态无效")
+            }
             "BACKUP_METADATA_MISSING" => error(
                 "BACKUP_METADATA_MISSING",
                 "发现未完成的备份现场，需先检查任务状态",
@@ -466,6 +503,30 @@ fn valid_destination(value: &str) -> CommandResult<PathBuf> {
         return Err(error("BACKUP_DOWNLOAD_PATH_INVALID", "本地下载目录不存在"));
     }
     Ok(path)
+}
+
+fn valid_note(value: &str) -> bool {
+    value.chars().count() <= 96 && !value.chars().any(char::is_control)
+}
+
+fn valid_import_source(value: &str) -> CommandResult<(PathBuf, u64)> {
+    let path = PathBuf::from(value);
+    if !path.is_absolute() || path.file_name().is_none() || value.len() > 4096 {
+        return Err(error("BACKUP_IMPORT_PATH_INVALID", "本地备份文件路径无效"));
+    }
+    let info = fs::symlink_metadata(&path)
+        .map_err(|_| error("BACKUP_IMPORT_PATH_INVALID", "本地备份文件不存在"))?;
+    if !info.file_type().is_file() {
+        return Err(error("BACKUP_IMPORT_PATH_INVALID", "本地备份文件无效"));
+    }
+    let size = info.len();
+    if size == 0 || size > MAX_IMPORT_BYTES {
+        return Err(error(
+            "BACKUP_IMPORT_PATH_INVALID",
+            "本地备份文件大小超出范围",
+        ));
+    }
+    Ok((path, size))
 }
 
 fn download_task_dir(database: &Path) -> CommandResult<PathBuf> {
@@ -859,6 +920,203 @@ pub fn download(database: &Path, request: DownloadRequest) -> CommandResult<Valu
     result
 }
 
+pub fn update_note(database: &Path, request: NoteRequest) -> CommandResult<Value> {
+    if request.schema_version != 1 {
+        return Err(error("SCHEMA_UNSUPPORTED", "备份备注请求版本不受支持"));
+    }
+    valid_target(&request.target)?;
+    valid_request_id(&request.request_id)?;
+    validate_revision(request.expected_revision)?;
+    crate::server_input::validate_id(&request.backup_id, OP, "backupId")?;
+    if !valid_note(&request.note) || !valid_note(&request.expected_note) {
+        return Err(error("BACKUP_INPUT_INVALID", "备份备注无效"));
+    }
+    let connection = connection(
+        &request.request_id,
+        &request.target,
+        request.expected_record_version,
+    );
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "备份主机身份不一致"));
+        }
+        let result = invoke(
+            session,
+            &json!({
+                "schemaVersion": 1, "action": "updateNote", "requestId": request.request_id,
+                "serverId": request.target.server_id, "hostId": request.target.host_id,
+                "instanceId": request.target.instance_id, "expectedRevision": request.expected_revision,
+                "backupId": request.backup_id, "note": request.note, "expectedNote": request.expected_note,
+            }),
+        )?;
+        let response_target = result
+            .get("target")
+            .and_then(|item| serde_json::from_value::<InstanceTarget>(item.clone()).ok());
+        if result.get("schemaVersion") != Some(&Value::from(1))
+            || result.get("requestId").and_then(Value::as_str) != Some(request.request_id.as_str())
+            || result.get("backupId").and_then(Value::as_str) != Some(request.backup_id.as_str())
+            || result.get("reason").and_then(Value::as_str) != Some(request.note.as_str())
+            || response_target
+                .as_ref()
+                .is_none_or(|value| !same_target(value, &request.target))
+        {
+            return Err(error("BACKUP_PROTOCOL_INVALID", "备份备注回执无效"));
+        }
+        Ok(result)
+    })
+}
+
+pub fn import_backup(database: &Path, request: ImportRequest) -> CommandResult<Value> {
+    if request.schema_version != 1 {
+        return Err(error("SCHEMA_UNSUPPORTED", "备份导入请求版本不受支持"));
+    }
+    valid_target(&request.target)?;
+    valid_request_id(&request.request_id)?;
+    validate_revision(request.expected_revision)?;
+    crate::server_input::validate_id(&request.operation_id, OP, "operationId")?;
+    let (source_path, size) = valid_import_source(&request.local_path)?;
+    let connection = connection(
+        &request.request_id,
+        &request.target,
+        request.expected_record_version,
+    );
+    with_verified_session(database, &connection, |session, host_id| {
+        if host_id.as_deref() != Some(request.target.host_id.as_str()) {
+            return Err(error("HOST_IDENTITY_MISMATCH", "备份主机身份不一致"));
+        }
+        let prepared = invoke(
+            session,
+            &json!({
+                "schemaVersion": 1, "action": "importPrepare", "requestId": request.request_id,
+                "serverId": request.target.server_id, "hostId": request.target.host_id,
+                "instanceId": request.target.instance_id, "expectedRevision": request.expected_revision,
+                "operationId": request.operation_id, "sizeBytes": size,
+            }),
+        )?;
+        let prepared_target = prepared
+            .get("target")
+            .and_then(|item| serde_json::from_value::<InstanceTarget>(item.clone()).ok());
+        let staging_path = prepared
+            .get("stagingPath")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let available = prepared
+            .get("availableBytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let expected_staging = format!(
+            "/var/lib/famine-hub/backup-imports/{}/archive.tar.gz",
+            request.operation_id
+        );
+        if prepared.get("schemaVersion") != Some(&Value::from(1))
+            || prepared.get("requestId").and_then(Value::as_str)
+                != Some(request.request_id.as_str())
+            || prepared.get("operationId").and_then(Value::as_str)
+                != Some(request.operation_id.as_str())
+            || prepared_target
+                .as_ref()
+                .is_none_or(|value| !same_target(value, &request.target))
+            || staging_path != expected_staging
+        {
+            return Err(error("BACKUP_PROTOCOL_INVALID", "备份导入准备回执无效"));
+        }
+        if available < size.saturating_add(IMPORT_SPACE_MARGIN) {
+            return Err(error("BACKUP_SPACE_INSUFFICIENT", "远端可用空间不足"));
+        }
+        session.set_timeout(0);
+        let sftp = session
+            .sftp()
+            .map_err(|_| error("SSH_SFTP_FAILED", "无法建立 SFTP 上传通道"))?;
+        let mut local = fs::File::open(&source_path)
+            .map_err(|_| error("BACKUP_IMPORT_PATH_INVALID", "无法读取本地备份文件"))?;
+        let mut remote = sftp
+            .open_mode(
+                Path::new(staging_path),
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+                0o600,
+                OpenType::File,
+            )
+            .map_err(|_| error("BACKUP_IMPORT_FAILED", "无法创建远端导入暂存文件"))?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 1024 * 1024];
+        let mut total = 0u64;
+        loop {
+            let count = local
+                .read(&mut buffer)
+                .map_err(|_| error("BACKUP_IMPORT_PATH_INVALID", "读取本地备份文件失败"))?;
+            if count == 0 {
+                break;
+            }
+            remote
+                .write_all(&buffer[..count])
+                .map_err(|_| error("BACKUP_IMPORT_FAILED", "上传备份归档失败"))?;
+            digest.update(&buffer[..count]);
+            total = total.saturating_add(count as u64);
+            if total > size {
+                return Err(error(
+                    "BACKUP_IMPORT_PATH_INVALID",
+                    "本地备份文件在上传期间发生变化",
+                ));
+            }
+        }
+        remote
+            .flush()
+            .map_err(|_| error("BACKUP_IMPORT_FAILED", "上传备份归档失败"))?;
+        drop(remote);
+        if total != size {
+            return Err(error(
+                "BACKUP_IMPORT_PATH_INVALID",
+                "本地备份文件在上传期间发生变化",
+            ));
+        }
+        let checksum = format!("{:x}", digest.finalize());
+        let result = invoke(
+            session,
+            &json!({
+                "schemaVersion": 1, "action": "importFinalize", "requestId": request.request_id,
+                "serverId": request.target.server_id, "hostId": request.target.host_id,
+                "instanceId": request.target.instance_id, "expectedRevision": request.expected_revision,
+                "operationId": request.operation_id, "sourceChecksum": checksum, "sizeBytes": size,
+            }),
+        )?;
+        let result_target = result
+            .get("target")
+            .and_then(|item| serde_json::from_value::<InstanceTarget>(item.clone()).ok());
+        let backup = result.get("backup").filter(|value| value.is_object());
+        let backup_id = backup
+            .and_then(|value| value.get("backupId"))
+            .and_then(Value::as_str);
+        if result.get("schemaVersion") != Some(&Value::from(1))
+            || result.get("requestId").and_then(Value::as_str) != Some(request.request_id.as_str())
+            || result.get("operationId").and_then(Value::as_str)
+                != Some(request.operation_id.as_str())
+            || result_target
+                .as_ref()
+                .is_none_or(|value| !same_target(value, &request.target))
+            || backup_id.is_none_or(|value| !valid_uuid(value))
+            || backup
+                .and_then(|value| value.get("checksum"))
+                .and_then(Value::as_str)
+                != Some(checksum.as_str())
+            || backup
+                .and_then(|value| value.get("verification"))
+                .and_then(Value::as_str)
+                != Some("verified")
+            || backup
+                .and_then(|value| value.get("sizeBytes"))
+                .and_then(Value::as_u64)
+                != Some(size)
+        {
+            return Err(error("BACKUP_PROTOCOL_INVALID", "备份导入回执无效"));
+        }
+        Ok(json!({
+            "schemaVersion": 1, "requestId": request.request_id, "target": request.target,
+            "operationId": request.operation_id, "backupId": backup_id,
+            "checksum": checksum, "sizeBytes": size, "status": "succeeded"
+        }))
+    })
+}
+
 pub fn create(database: &Path, request: CreateRequest) -> CommandResult<Value> {
     if request.schema_version != 1 {
         return Err(error("SCHEMA_UNSUPPORTED", "备份请求版本不受支持"));
@@ -870,10 +1128,9 @@ pub fn create(database: &Path, request: CreateRequest) -> CommandResult<Value> {
     validate_revision(request.expected_revision)?;
     if !["cold", "quasiHot"].contains(&request.capture_mode.as_str())
         || request.reason.trim().is_empty()
-        || request.reason.len() > 96
-        || request.reason.chars().any(char::is_control)
+        || !valid_note(&request.reason)
     {
-        return Err(error("BACKUP_INPUT_INVALID", "备份模式或原因无效"));
+        return Err(error("BACKUP_INPUT_INVALID", "备份模式或备注无效"));
     }
     let connection = connection(
         &request.request_id,
@@ -1641,5 +1898,29 @@ mod tests {
             "33333333-3333-4333-8333-333333333333"
         )
         .is_err());
+    }
+
+    #[test]
+    fn note_validation_counts_characters_not_bytes() {
+        assert!(valid_note(&"更".repeat(96)));
+        assert!(!valid_note(&"更".repeat(97)));
+        assert!(!valid_note("换行\n备注"));
+        assert!(valid_note(""));
+    }
+
+    #[test]
+    fn import_source_must_be_an_absolute_regular_file() {
+        assert!(valid_import_source("relative.tar.gz").is_err());
+        assert!(valid_import_source("/missing/archive.tar.gz").is_err());
+        let path = std::env::temp_dir().join(format!(
+            "hunger-desolate-import-{}.tar.gz",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&path, b"archive").expect("write import fixture");
+        let (resolved, size) =
+            valid_import_source(path.to_str().expect("utf8 path")).expect("valid import source");
+        assert_eq!(resolved, path);
+        assert_eq!(size, 7);
+        let _ = fs::remove_file(&path);
     }
 }

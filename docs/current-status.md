@@ -40,7 +40,7 @@
 
 ### 备份
 
-- 归档只保存世界存档（`data/Master`、`data/Caves`），不包含服务器配置、Release、Compose 或凭据。
+- 归档只保存 `config/Cluster_1/<分片>/save` 世界存档（归档内逻辑路径 `data/<分片>/save`），不包含服务器配置、Release、Compose 或凭据；缺少世界存档的备份标为不可恢复。
 - 恢复使用当前活动 Release，只替换世界存档；兼容旧归档。
 - 备份 `dstBuild` 高于当前 build 时阻断恢复；MOD 差异只返回 warning。
 - MOD 应用的完整回滚快照保存在任务目录，不进入备份列表。

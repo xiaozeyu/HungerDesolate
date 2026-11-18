@@ -20,6 +20,8 @@ MAX_REVISION = 9007199254740991
 DST_RUNTIME_UID = 1000
 RUNTIME_READY_SECONDS = 120
 MISSING = object()
+WORLD_SAVE_ROOTS = {"Master": "config/Cluster_1/Master/save",
+                    "Caves": "config/Cluster_1/Caves/save"}
 
 
 class Rejected(Exception):
@@ -790,13 +792,17 @@ def _worker_impl(task_id):
         module["inspect_archive"](backup_dir / "archive.tar.gz", request["hostId"], request["instanceId"], checksum)
         set_status(directory, "running", "stagingVerify", completed="preflight")
         failure_step = "extractBackupArchive"
-        module["extract_to_staging"](backup_dir / "archive.tar.gz", staging, request["hostId"], request["instanceId"], checksum)
+        extracted = module["extract_to_staging"](backup_dir / "archive.tar.gz", staging, request["hostId"], request["instanceId"], checksum)
+        failure_step = "verifyWorldData"
+        save_roots = module["world_save_roots"](extracted["manifest"], manifest.get("cavesEnabled") is True)
+        if save_roots is None:
+            reject("BACKUP_WORLD_DATA_MISSING")
         failure_step = "assignRuntimeOwnership"
-        for relative in ("data/Master", "data/Caves"):
-            if (staging / relative).exists():
-                assign_runtime_ownership(staging / relative)
+        for archive_root in save_roots.values():
+            if (staging / archive_root).exists():
+                assign_runtime_ownership(staging / archive_root)
         failure_step = "writeRestoreTransaction"
-        rollback_paths = ["data/Master", "data/Caves"]
+        rollback_paths = [WORLD_SAVE_ROOTS[shard] for shard in save_roots]
         original_paths = [relative for relative in rollback_paths
                           if (instance / relative).exists() or (instance / relative).is_symlink()]
         runtime_before_evidence = {}
@@ -835,7 +841,8 @@ def _worker_impl(task_id):
             identity = {"schemaVersion": 1, "hostId": request["hostId"], "instanceId": request["instanceId"],
                         "backupId": protection_id, "captureMode": "cold", "runtimeStatus": "stopped",
                         "runtimeVerified": True, "reason": "恢复前保护点"}
-            protection_roots = ["data/Master"] + (["data/Caves"] if manifest.get("cavesEnabled") else [])
+            protection_roots = {WORLD_SAVE_ROOTS[shard]: "data/" + shard + "/save"
+                                for shard in save_roots}
             created = module["create_archive"](instance, protection_archive, identity, protection_roots)
             atomic_json(protection_dir / "metadata.json", {"schemaVersion": 1, "backupId": protection_id,
                 "hostId": request["hostId"], "instanceId": request["instanceId"], "createdAt": now(),
@@ -852,19 +859,24 @@ def _worker_impl(task_id):
         else:
             set_status(directory, "running", "restoreCommit", completed="stop")
         recovery.mkdir(mode=0o700)
-        relative_paths = ["data/Master", "data/Caves"]
         failure_step = "commitRestoredFiles"
-        for relative in relative_paths:
+        for shard, archive_root in save_roots.items():
+            relative = WORLD_SAVE_ROOTS[shard]
             source = instance / relative
             if source.exists():
                 destination = recovery / relative
                 destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 os.replace(source, destination)
                 moved.append(relative)
-            restored = staging / relative
+            restored = staging / archive_root
             if restored.exists():
-                restored.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                os.replace(restored, source)
+                destination = instance / relative
+                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                for current in (destination.parent, destination.parent.parent, instance / "config"):
+                    if current.exists():
+                        os.chown(current, DST_RUNTIME_UID, DST_RUNTIME_UID)
+                        os.chmod(current, 0o700)
+                os.replace(restored, destination)
         if runtime_before == "running":
             failure_step = "createRestoredContainers"
             compose(instance, manifest, "create", "--force-recreate", *roles)

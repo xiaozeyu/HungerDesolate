@@ -342,7 +342,7 @@ interface UpdatePreview {
 必须恢复一致组合，不能只切 active Release 字段：
 
 - 旧 `active-release.json`、`manifest.json`、`compose.yaml`（来自任务 `transaction.json`）；
-- 旧世界存档 `data/Master`、`data/Caves`（来自保护点归档）；
+- 旧世界存档 `config/Cluster_1/<分片>/save`（来自保护点归档）；
 - 旧 DST Release 的镜像和 staging 产物必须仍存在且校验通过；
 - 更新不改世界配置和 MOD desired/deployed，因此不恢复它们；transaction 中的副本只作为现场证据；
 - 按更新前运行状态创建/启动容器，并验证旧 build 和进程。
@@ -352,7 +352,7 @@ interface UpdatePreview {
 普通恢复不再有版本限制：备份归档只含世界存档，恢复始终使用当前活动 Release，不读取也不校验备份记录的 Release。更新回滚是 update worker 的独立分支：
 
 - `rollback` 阶段用 `transaction.json` 恢复 `active-release.json`、`manifest.json`、`compose.yaml`；
-- 用保护点归档恢复 `data/Master`、`data/Caves`；
+- 用保护点归档恢复 `config/Cluster_1/<分片>/save`；
 - 复用既有 `extract_to_staging`、归档校验、权限归一化、`render_compose`、`wait_for_runtime_processes`，按旧 Release 重建/启动/验证；
 - 不调用普通恢复命令，也不引入 `allowDstSwitch` 或 `restoreMode`；
 - 回滚完成后任务终态是 `failed`，结果写 `rollback: {performed: true, verified: true}`，不把失败改成成功。
@@ -380,7 +380,7 @@ interface UpdatePreview {
 
 备份归档的目标边界是**仅世界存档**，因此恢复与 DST 版本解耦：
 
-- 归档只包含 `data/Master`、`data/Caves`，并排除运行日志和临时文件（`server_log.txt`、`server_chat_log.txt`、`client_log.txt` 等，具体清单用 fixture 固化）；不包含 `active-release.json`、`manifest.json`、`compose.yaml`、`config/Cluster_1`、`desired/deployed` 状态、Release 引用或凭据。
+- 归档只包含 `config/Cluster_1/<分片>/save` 世界存档（归档内 `data/<分片>/save`），并排除运行日志和临时文件（`server_log.txt`、`server_chat_log.txt`、`client_log.txt` 等，具体清单用 fixture 固化）；不包含 `active-release.json`、`manifest.json`、`compose.yaml`、`config/Cluster_1` 的其余配置、`desired/deployed` 状态、Release 引用或凭据。
 - 现有 `sanitize_cluster_ini`、`sanitize_world_snapshot`、`preserve_access_policy`、`rebase_world_config` 等清洗/合并逻辑在新边界下不再需要；旧归档恢复时忽略对应文件。
 - 恢复始终使用当前活动 Release：不切换 Release，不改 manifest/Compose/端口/世界配置/MOD/访问策略/凭据；只替换世界存档并按当前配置启动验证。
 - `restorability` 只取决于归档归属、checksum、结构与当前空间，不再依赖 Release 产物；保留现有枚举值以兼容前端：`missingArtifacts` 仅表示归档文件缺失，`incompatible` 表示归档损坏或身份不符。

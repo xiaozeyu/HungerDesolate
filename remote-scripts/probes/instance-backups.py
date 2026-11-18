@@ -16,7 +16,8 @@ MAX_BYTES = 1024 * 1024
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024 * 1024
 IMPORT_STALE_SECONDS = 24 * 60 * 60
 RUNTIME_UID = 1000
-WORLD_ROOTS = ("data/Master", "data/Caves")
+WORLD_SAVE_ROOTS = {"Master": "config/Cluster_1/Master/save",
+                    "Caves": "config/Cluster_1/Caves/save"}
 EXCLUDED_NAMES = {"cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt",
                   "server_log.txt", "server_chat_log.txt", "client_log.txt"}
 
@@ -115,16 +116,17 @@ def acquire_heavy_lock():
     return lock_fd
 
 
-def inspect_backup_archive(path, host_id, instance_id, checksum=None):
+def inspect_backup_archive(path, host_id, instance_id, checksum=None, caves_enabled=False):
     source = globals().get("ARCHIVE_SOURCE")
     if not isinstance(source, str):
         reject("BACKUP_ARCHIVE_INVALID")
     module = {}
     exec(compile(source, "<backup-archive>", "exec"), module)
     try:
-        return module["inspect_archive"](path, host_id, instance_id, checksum)
+        inspected = module["inspect_archive"](path, host_id, instance_id, checksum)
     except module["BackupRejected"] as failure:
         reject(failure.code)
+    return inspected, module["world_save_roots"](inspected["manifest"], caves_enabled is True)
 
 
 def identity(request):
@@ -253,7 +255,8 @@ def list_backups(request):
             if release is not None:
                 metadata["dstBuild"] = release.get("dstBuild")
         if metadata.get("verification") == "verified":
-            metadata["restorability"] = assess_restorability(child, metadata, host_id, instance_id)
+            metadata["restorability"] = assess_restorability(
+                child, metadata, host_id, instance_id, manifest.get("cavesEnabled") is True)
         items.append(metadata)
         if len(items) > 5000:
             reject("BACKUP_READ_LIMIT")
@@ -264,7 +267,7 @@ def list_backups(request):
             "restoreAcceptancePassed": restore_acceptance(host_id), "items": items}
 
 
-def assess_restorability(backup, metadata, host_id, instance_id):
+def assess_restorability(backup, metadata, host_id, instance_id, caves_enabled):
     archive = backup / "archive.tar.gz"
     try:
         info = archive.lstat()
@@ -272,8 +275,9 @@ def assess_restorability(backup, metadata, host_id, instance_id):
             return "incompatible"
         if not isinstance(globals().get("ARCHIVE_SOURCE"), str):
             return "unknown"
-        inspect_backup_archive(archive, host_id, instance_id, metadata.get("checksum"))
-        return "restorable"
+        _, roots = inspect_backup_archive(archive, host_id, instance_id,
+                                          metadata.get("checksum"), caves_enabled)
+        return "restorable" if roots is not None else "missingArtifacts"
     except FileNotFoundError:
         return "missingArtifacts"
     except (OSError, Rejected, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
@@ -286,14 +290,19 @@ def preview(request):
     if mode not in ("cold", "quasiHot"):
         reject("BACKUP_INPUT_INVALID")
     status, verified = runtime_state(instance_id, manifest)
-    roots = [instance / "data" / "Master"]
-    if manifest.get("cavesEnabled") is True:
-        roots.append(instance / "data" / "Caves")
+    shards = ["Master"] + (["Caves"] if manifest.get("cavesEnabled") is True else [])
     file_count = 0
     size_bytes = 0
-    for data_root in roots:
-        safe_directory(data_root, allow_runtime=True)
-        for current, directories, files in os.walk(data_root, followlinks=False):
+    world_present = True
+    for shard in shards:
+        save_root = instance / WORLD_SAVE_ROOTS[shard]
+        try:
+            safe_directory(save_root, allow_runtime=True)
+        except FileNotFoundError:
+            world_present = False
+            continue
+        shard_files = 0
+        for current, directories, files in os.walk(save_root, followlinks=False):
             current_path = Path(current)
             for name in directories:
                 info = (current_path / name).lstat()
@@ -309,18 +318,24 @@ def preview(request):
                         or info.st_mode & 0o022):
                     reject("BACKUP_SOURCE_UNSAFE")
                 if name not in EXCLUDED_NAMES:
+                    shard_files += 1
                     file_count += 1
                     size_bytes += info.st_size
+        if shard_files == 0:
+            world_present = False
     available = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
+    warnings = ["QUASI_HOT_FILES_MAY_CHANGE_DURING_CAPTURE"] if mode == "quasiHot" else []
+    if not world_present:
+        warnings.append("BACKUP_WORLD_DATA_MISSING")
     return {"schemaVersion": 1, "requestId": request["requestId"],
             "target": {"serverId": request["serverId"], "hostId": host_id,
                        "instanceId": instance_id}, "captureMode": mode,
             "runtimeStatus": status, "runtimeVerified": verified,
             "estimatedArchiveBytes": size_bytes + max(size_bytes // 10, 1024 * 1024),
             "availableBytes": available, "fileCount": file_count,
-            "worldDataPresent": file_count > 0,
-            "allowed": (status in ("running", "stopped", "degraded") and verified if mode == "cold" else True),
-            "warnings": (["QUASI_HOT_FILES_MAY_CHANGE_DURING_CAPTURE"] if mode == "quasiHot" else [])}
+            "worldDataPresent": world_present,
+            "allowed": world_present and (status in ("running", "stopped", "degraded") and verified if mode == "cold" else True),
+            "warnings": warnings}
 
 
 def installed_build(instance):
@@ -356,11 +371,14 @@ def restore_preflight(request):
     archive_info = archive.lstat()
     if not stat.S_ISREG(archive_info.st_mode) or archive_info.st_nlink != 1:
         reject("BACKUP_ARCHIVE_INVALID")
-    inspected = inspect_backup_archive(archive, host_id, instance_id, metadata["checksum"])
+    inspected, save_roots = inspect_backup_archive(archive, host_id, instance_id,
+                                                   metadata["checksum"], manifest.get("cavesEnabled") is True)
     archive_manifest = inspected["manifest"]
     runtime, runtime_verified = runtime_state(instance_id, manifest)
     available = os.statvfs(ROOT).f_bavail * os.statvfs(ROOT).f_frsize
     blockers = []
+    if save_roots is None:
+        blockers.append("BACKUP_WORLD_DATA_MISSING")
     if runtime not in ("running", "stopped", "degraded") or not runtime_verified:
         blockers.append("RUNTIME_STATE_UNVERIFIED")
     if available < archive_info.st_size * 2:
@@ -372,9 +390,9 @@ def restore_preflight(request):
             and int(backup_build) > int(current_build)):
         blockers.append("BACKUP_BUILD_NEWER_THAN_INSTANCE")
     current_size = 0
-    protection_roots = [instance / "data" / "Master"]
+    protection_roots = [instance / WORLD_SAVE_ROOTS["Master"]]
     if manifest.get("cavesEnabled") is True:
-        protection_roots.append(instance / "data" / "Caves")
+        protection_roots.append(instance / WORLD_SAVE_ROOTS["Caves"])
     for root in protection_roots:
         for current, _, files in os.walk(root, followlinks=False):
             for name in files:
@@ -520,7 +538,7 @@ def import_prepare(request):
 
 
 def import_finalize(request):
-    host_id, instance_id, _, _ = identity(request)
+    host_id, instance_id, _, instance_manifest = identity(request)
     operation_id = request.get("operationId")
     checksum = request.get("sourceChecksum")
     size = request.get("sizeBytes")
@@ -539,7 +557,10 @@ def import_finalize(request):
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or info.st_uid not in (0, os.geteuid()) or info.st_size != size):
             reject("BACKUP_ARCHIVE_INVALID")
-        inspected = inspect_backup_archive(archive, host_id, instance_id, checksum)
+        inspected, save_roots = inspect_backup_archive(
+            archive, host_id, instance_id, checksum, instance_manifest.get("cavesEnabled") is True)
+        if save_roots is None:
+            reject("BACKUP_WORLD_DATA_MISSING")
         manifest = inspected["manifest"]
         backup_id = manifest.get("backupId")
         capture_mode = manifest.get("captureMode")

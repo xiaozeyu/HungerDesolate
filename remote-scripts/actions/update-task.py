@@ -18,6 +18,8 @@ TASKS = ROOT / "update-tasks"
 PLANS = ROOT / "update-plans"
 MAX_REVISION = 9007199254740991
 MISSING = object()
+WORLD_SAVE_ROOTS = {"Master": "config/Cluster_1/Master/save",
+                    "Caves": "config/Cluster_1/Caves/save"}
 
 
 class Rejected(Exception):
@@ -280,22 +282,25 @@ def load_plan(request):
         reject("UPDATE_PLAN_STALE")
 
 
-def restore_protection(instance, directory, archive, request, backup_id):
+def restore_protection(instance, directory, archive, request, backup_id, caves_enabled):
     protection = directory / "protection" / backup_id
     metadata = read_json(protection / "metadata.json")
     staging = instance / (".update-rollback-" + directory.name)
     shutil.rmtree(staging, ignore_errors=True)
-    archive["extract_to_staging"](protection / "archive.tar.gz", staging, request["hostId"],
-                                  request["instanceId"], metadata["checksum"])
-    for relative in ("data/Master", "data/Caves"):
-        source = staging / relative
-        if not source.exists():
-            continue
-        destination = instance / relative
-        if destination.exists():
-            shutil.rmtree(destination)
-        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.replace(source, destination)
+    extracted = archive["extract_to_staging"](protection / "archive.tar.gz", staging,
+                                              request["hostId"], request["instanceId"],
+                                              metadata["checksum"])
+    save_roots = archive["world_save_roots"](extracted["manifest"], caves_enabled)
+    if save_roots is not None:
+        for shard, archive_root in save_roots.items():
+            source = staging / archive_root
+            if not source.exists():
+                continue
+            destination = instance / WORLD_SAVE_ROOTS[shard]
+            if destination.exists():
+                shutil.rmtree(destination)
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.replace(source, destination)
     shutil.rmtree(staging, ignore_errors=True)
 
 
@@ -393,7 +398,9 @@ def _worker_impl(task_id):
         identity = {"schemaVersion": 1, "hostId": request["hostId"], "instanceId": request["instanceId"],
                     "backupId": protection_id, "captureMode": "cold", "runtimeStatus": "stopped",
                     "runtimeVerified": True, "reason": "DST 更新前保护点"}
-        roots = ["data/Master"] + (["data/Caves"] if manifest.get("cavesEnabled") else [])
+        shards = ["Master"] + (["Caves"] if manifest.get("cavesEnabled") is True else [])
+        roots = {WORLD_SAVE_ROOTS[shard]: "data/" + shard + "/save"
+                 for shard in shards if (instance / WORLD_SAVE_ROOTS[shard]).is_dir()}
         created = archive["create_archive"](instance, protection / "archive.tar.gz", identity, roots)
         previous_release = next((item for item in releases if item.get("releaseId") == current_release_id), None)
         atomic_json(protection / "metadata.json", {"schemaVersion": 1, "backupId": protection_id,
@@ -463,8 +470,9 @@ def _worker_impl(task_id):
         elif instance is not None:
             try:
                 if protection_id and backup_created:
-                    restore_protection(instance, directory, archive, request, protection_id)
-                    for relative in ("data/Master", "data/Caves"):
+                    restore_protection(instance, directory, archive, request, protection_id,
+                                       original_manifest.get("cavesEnabled") is True)
+                    for relative in WORLD_SAVE_ROOTS.values():
                         if (instance / relative).exists():
                             helpers["assign_runtime_ownership"](instance / relative)
                 atomic_json(instance / "active-release.json", original_active)

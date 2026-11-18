@@ -60,7 +60,10 @@ def checked_files(source_root, include_paths=None, overrides=None):
         reject("BACKUP_SOURCE_INVALID")
     entries = []
     total = 0
-    selected = include_paths or ["."]
+    if isinstance(include_paths, dict):
+        selected = list(include_paths.items())
+    else:
+        selected = [(item, item) for item in (include_paths or ["."])]
     overrides = overrides or {}
     def add_file(path, relative):
         nonlocal total
@@ -78,19 +81,28 @@ def checked_files(source_root, include_paths=None, overrides=None):
             if len(entries) >= MAX_FILES or total > MAX_BYTES:
                 reject("BACKUP_SIZE_LIMIT")
             entries.append({"path": relative, "sizeBytes": len(payload),
-                            "sha256": None, "mode": 0o600, "_content": payload})
+                            "sha256": None, "mode": 0o600, "_content": payload,
+                            "_source": path.relative_to(root).as_posix()})
             return
         total += info.st_size
         if len(entries) >= MAX_FILES or total > MAX_BYTES:
             reject("BACKUP_SIZE_LIMIT")
         entries.append({"path": relative, "sizeBytes": info.st_size,
                         "sha256": None, "mode": stat.S_IMODE(info.st_mode) & 0o755,
-                        "_device": info.st_dev, "_inode": info.st_ino})
+                        "_device": info.st_dev, "_inode": info.st_ino,
+                        "_source": path.relative_to(root).as_posix()})
 
-    for relative_root in selected:
+    for relative_root, archive_root in selected:
+        if (not isinstance(relative_root, str) or not isinstance(archive_root, str)):
+            reject("BACKUP_SOURCE_UNSAFE")
         if relative_root == ".":
             scan_root = root
-            archive_prefix = ""
+            if archive_root in ("", "."):
+                archive_prefix = ""
+            elif safe_member_name(archive_root):
+                archive_prefix = archive_root + "/"
+            else:
+                reject("BACKUP_SOURCE_UNSAFE")
         elif safe_member_name(relative_root):
             scan_root = root
             parts = PurePosixPath(relative_root).parts
@@ -102,12 +114,20 @@ def checked_files(source_root, include_paths=None, overrides=None):
             selected_path = scan_root / parts[-1]
             selected_info = selected_path.lstat()
             if stat.S_ISREG(selected_info.st_mode):
-                add_file(selected_path, relative_root)
+                archive_path = relative_root if archive_root in ("", ".") else archive_root
+                if not safe_member_name(archive_path):
+                    reject("BACKUP_SOURCE_UNSAFE")
+                add_file(selected_path, archive_path)
                 continue
             if not stat.S_ISDIR(selected_info.st_mode):
                 reject("BACKUP_SOURCE_UNSAFE")
             scan_root = selected_path
-            archive_prefix = relative_root + "/"
+            if archive_root in ("", "."):
+                archive_prefix = ""
+            elif safe_member_name(archive_root):
+                archive_prefix = archive_root + "/"
+            else:
+                reject("BACKUP_SOURCE_UNSAFE")
         else:
             reject("BACKUP_SOURCE_UNSAFE")
         for current, directories, files in os.walk(scan_root, followlinks=False):
@@ -131,6 +151,28 @@ def safe_member_name(name):
     path = PurePosixPath(name)
     return (not path.is_absolute() and bool(path.parts) and path.as_posix() == name
             and all(part not in ("", ".", "..") for part in path.parts))
+
+
+def world_save_roots(manifest, caves_enabled):
+    """Return the archive paths that contain real world saves, or None if incomplete."""
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(files, list):
+        return None
+    paths = [item.get("path") for item in files
+             if isinstance(item, dict) and isinstance(item.get("path"), str)]
+    roots = {}
+    for shard in (("Master", "Caves") if caves_enabled is True else ("Master",)):
+        current = "data/" + shard + "/save"
+        if any(path.startswith(current + "/") for path in paths):
+            roots[shard] = current
+            continue
+        legacy = "data/" + shard
+        markers = (legacy + "/index", legacy + "/clock")
+        if any(path in markers or path.startswith(legacy + "/session/") for path in paths):
+            roots[shard] = legacy
+            continue
+        return None
+    return roots
 
 
 def create_archive(source_root, output_path, identity, include_paths=None, overrides=None):
@@ -168,7 +210,7 @@ def create_archive(source_root, output_path, identity, include_paths=None, overr
                     archive.addfile(info, io.BytesIO(payload))
                     item["sha256"] = hashlib.sha256(payload).hexdigest()
                     continue
-                path = Path(source_root) / item["path"]
+                path = Path(source_root) / item.get("_source", item["path"])
                 fd, opened = checked_open(path, item["_device"], item["_inode"])
                 try:
                     delta = opened.st_size - item["sizeBytes"]

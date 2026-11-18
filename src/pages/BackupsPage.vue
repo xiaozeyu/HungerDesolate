@@ -437,7 +437,7 @@ async function saveNote() {
 }
 
 async function prepareRestore(item: BackupSummary) {
-  if (workspace.preview.value || item.verification !== "verified") return;
+  if (workspace.preview.value || item.verification !== "verified" || item.restorability !== "restorable") return;
   error.value = "";
   restoreError.value = "";
   restoreProtection.value = true;
@@ -645,6 +645,7 @@ function taskErrorLabel(code: string | null | undefined, stage: string, operatio
     BACKUP_ID_EXISTS: "备份编号已存在，原备份未覆盖。",
     BACKUP_WORKER_FAILED: "备份任务启动失败，任务现场已保留。",
     BACKUP_WORKER_NOT_STARTED: "备份 worker 未开始执行，专服未进入备份阶段。请刷新任务状态后重新创建备份。",
+    BACKUP_WORLD_DATA_MISSING: "专服没有可备份的世界存档；请确认世界已生成并至少保存过一次。",
     BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING: "旧备份缺少配置快照，且当前已应用配置版本不同；恢复已阻止。",
     BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID: "备份中的已应用配置快照校验失败；恢复已阻止。",
     MOD_RELEASE_UNAVAILABLE: "主机库中没有可用的 MOD 版本，恢复已停止。",
@@ -671,6 +672,7 @@ function taskErrorLabel(code: string | null | undefined, stage: string, operatio
       : "";
   const failureSteps: Record<string, string> = {
     readBackupMetadata: "读取备份元数据", inspectBackupArchive: "校验备份归档", extractBackupArchive: "解包备份",
+    verifyWorldData: "校验世界存档",
     readWorldSnapshot: "读取世界配置快照", readModSnapshot: "读取 MOD 快照", rebaseSnapshots: "校验配置快照",
     restoreCredentials: "重建本机凭据文件", assignRuntimeOwnership: "设置运行目录权限",
     validateModReleaseSnapshot: "校验 MOD Release 快照", validateDstRelease: "校验 DST Release",
@@ -825,8 +827,9 @@ const columns = computed<DataTableColumns<BackupSummary>>(() => {
         onClick: () => void downloadBackup(item),
       }, () => h(Download, { size: 15 })),
       h(IconButton, {
-        label: "恢复备份",
-        disabled: workspace.preview.value || restoreBusy.value || item.verification !== "verified",
+        label: item.restorability === "restorable" ? "恢复备份" : "备份不包含可恢复的世界存档",
+        disabled: workspace.preview.value || restoreBusy.value || item.verification !== "verified"
+          || item.restorability !== "restorable",
         onClick: () => void prepareRestore(item),
       }, () => h(RotateCcw, { size: 15 })),
       h(IconButton, {
@@ -901,6 +904,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
           :disabled="createBusy || workspace.preview.value"/>
       </label>
       <p v-if="mode && previewLoading" class="muted-text">正在校验{{ modeLabel(mode) }}条件…</p>
+      <p v-else-if="mode && preview && !preview.worldDataPresent" class="environment-error">没有可备份的世界存档，请确认世界已生成并至少保存过一次。</p>
       <p v-else-if="mode && preview && !preview.allowed" class="environment-error">当前条件不满足{{ modeLabel(mode) }}。</p>
       <template #footer>
         <NButton :disabled="createBusy" @click="closeCreateDialog(false)">取消</NButton>
@@ -930,7 +934,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
         <NButton type="primary" :disabled="noteBusy || workspace.preview.value" @click="saveNote">{{ noteBusy ? "保存中…" : "保存" }}</NButton>
       </template>
     </AppDialog>
-    <AppDialog :open="!!deleteTarget" title="删除备份" description="此操作会永久删除远端归档，不能撤销。" @update:open="value => { if (!value && !deleteBusy) { deleteTarget = null; deleteError = ''; } }">
+    <AppDialog :open="!!deleteTarget" title="删除备份"  @update:open="value => { if (!value && !deleteBusy) { deleteTarget = null; deleteError = ''; } }">
       <p v-if="deleteTarget">确定删除 <span class="mono">{{ deleteTarget.backupId }}</span>（{{ formatBytes(deleteTarget.sizeBytes) }}）？</p>
       <p v-if="deleteError" class="error-strip" role="alert">{{ deleteError }}</p>
       <template #footer><NButton :disabled="deleteBusy" @click="deleteTarget = null">取消</NButton><NButton type="error" ghost :disabled="deleteBusy || workspace.preview.value" @click="deleteBackup">{{ deleteBusy ? "删除中…" : "永久删除" }}</NButton></template>

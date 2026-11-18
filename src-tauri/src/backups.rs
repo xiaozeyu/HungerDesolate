@@ -351,6 +351,10 @@ fn invoke(session: &Session, payload: &Value) -> CommandResult<Value> {
             "BACKUP_IMPORT_STAGING_INVALID" => {
                 error("BACKUP_IMPORT_STAGING_INVALID", "备份导入暂存状态无效")
             }
+            "BACKUP_WORLD_DATA_MISSING" => error(
+                "BACKUP_WORLD_DATA_MISSING",
+                "备份不包含世界存档，无法导入或恢复",
+            ),
             "BACKUP_METADATA_MISSING" => error(
                 "BACKUP_METADATA_MISSING",
                 "发现未完成的备份现场，需先检查任务状态",
@@ -463,6 +467,9 @@ fn task_error(code: &str) -> Box<CommandError> {
         "INSTANCE_BUSY" => error("INSTANCE_BUSY", "专服正由其他维护操作占用"),
         "BACKUP_RUNTIME_INVALID" => error("BACKUP_RUNTIME_INVALID", "分片运行状态或身份无法确认"),
         "BACKUP_SPACE_INSUFFICIENT" => error("BACKUP_SPACE_INSUFFICIENT", "远端可用空间不足"),
+        "BACKUP_WORLD_DATA_MISSING" => {
+            error("BACKUP_WORLD_DATA_MISSING", "专服没有可备份的世界存档")
+        }
         "OPERATION_ID_REUSED" => error("OPERATION_ID_REUSED", "操作编号已用于不同的备份请求"),
         "BACKUP_STOP_FAILED" => error("BACKUP_STOP_FAILED", "无法确认冷备份所需的停服状态"),
         "BACKUP_RESTART_FAILED" => error(
@@ -1592,6 +1599,10 @@ fn check_restore_preflight(
             }
             "WORLD_TOKEN_MISSING" => error("WORLD_TOKEN_MISSING", "本机受保护的 Klei 令牌材料缺失，已阻止恢复"),
             "CONFIG_REVISION_EXHAUSTED" => error("BACKUP_INPUT_INVALID", "配置版本号已达上限"),
+            "BACKUP_WORLD_DATA_MISSING" => error(
+                "BACKUP_WORLD_DATA_MISSING",
+                "备份不包含世界存档，已阻止恢复",
+            ),
             "BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING" => error("BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING", "旧备份未保存已应用配置快照，且当前配置版本已变化；为避免恢复后无法启动，已阻止恢复"),
             "BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID" => error("BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID", "备份中的已应用配置快照校验失败，已阻止恢复"),
             "MOD_RELEASE_UNAVAILABLE" => error("MOD_RELEASE_UNAVAILABLE", "旧备份缺少 MOD 发布快照，当前 MOD 部署无法与备份世界安全匹配"),

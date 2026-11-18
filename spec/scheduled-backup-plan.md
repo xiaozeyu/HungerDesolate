@@ -32,7 +32,7 @@
 现有 `quasiHot` 行为：
 
 - 不要求服务同步，不停止分片；
-- 逐文件读取 `data/Master`、`data/Caves`；归档边界以 [备份与恢复文件边界](../docs/backup-restore-boundaries.md) 为目标，只含世界存档，服务器配置/身份不进入归档；
+- 逐文件读取 `config/Cluster_1/<Master|Caves>/save`；归档边界以 [备份与恢复文件边界](../docs/backup-restore-boundaries.md) 为目标，只含世界存档（归档内 `data/<分片>/save`），服务器配置/身份不进入归档；
 - 记录开始/结束时间和文件级摘要；
 - metadata：`captureMode=quasiHot`、`captureSemantics=onDiskBestEffort`、`runtimeStatusAtCapture`；
 - 文件可能在采集期间变化，因此不宣称跨文件一致；

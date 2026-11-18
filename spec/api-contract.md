@@ -638,7 +638,7 @@ type GetInstanceCreationStatusResponse = {
 | --- | --- | --- | --- |
 | list_instance_backups / listInstanceBackups | Q | target、cursor、limit | BackupSummary 分页，包含 retired 实例历史 |
 | preview_instance_backup / previewInstanceBackup | P | target、captureMode(cold/quasiHot)、expectedRevision | 一致性语义、停服影响、空间估算；准热备份不满足破坏性操作保护点 |
-| create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；归档只含世界存档（`data/Master`、`data/Caves`），不保存服务器身份、配置、Compose 或 Release 引用；metadata 保留采集模式、运行状态、`dstBuild`、`mods[]`（workshopId/enabled/artifactDigest）引用作为提示；`BackupSummary.mods` 返回引用 |
+| create_instance_backup / createInstanceBackup | T | target、captureMode、planId、expectedRevision、operationId | verified 备份才可用于恢复；归档只含世界存档（来源 `config/Cluster_1/<分片>/save`，归档内 `data/<分片>/save`），不保存服务器身份、配置、Compose 或 Release 引用；缺少世界存档返回 `BACKUP_WORLD_DATA_MISSING`；metadata 保留采集模式、运行状态、`dstBuild`、`mods[]`（workshopId/enabled/artifactDigest）引用作为提示；`BackupSummary.mods` 返回引用 |
 | download_instance_backup / downloadInstanceBackup | T | target、backupId、operationId、本地授权 destinationHandle | SFTP 下载及本地 checksum；不允许前端随意传远端路径 |
 | import_instance_backup / importInstanceBackup | M | target、expectedRevision、operationId、本地授权 sourceHandle | SFTP 上传既有归档到同一 host+instance；manifest 身份必须匹配，远端 inspect 与 checksum 通过后才重建 metadata 并发布；同 backupId 同 checksum 幂等，不同 checksum 返回 `BACKUP_ID_EXISTS`；不进入远端任务队列、不停服 |
 | update_instance_backup_note / updateInstanceBackupNote | M | target、expectedRevision、backupId、note、expectedNote | 以 CAS 更新 metadata.reason（≤96 Unicode 字符），只改 metadata、不重写归档；不一致返回 `BACKUP_CHANGED`；备注不进入归档 |

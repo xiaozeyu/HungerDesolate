@@ -321,7 +321,7 @@ MOD 通过 `TheSim:SetPersistentString` 写固定 key `hungerhub_bridge_result`�
 | `render_compose` | 当 `manifest.playerBridge.enabled` 时追加挂载；否则不挂载 |
 | 实例创建 | 创建 bridge 目录、上传文件、初始 overrides、Compose 挂载 |
 | 世界配置应用 | 不改 `modoverrides.lua`；如果现有实现会重写，必须保留桥接项 |
-| 恢复 | 只替换 `data/Master`、`data/Caves`；不覆盖 Compose、manifest、overrides；`bridge/` 保留，状态由 MOD 重建 |
+| 恢复 | 只替换 `config/Cluster_1/<分片>/save`；不覆盖 Compose、manifest、overrides；`bridge/` 保留，状态由 MOD 重建 |
 | 更新 | 只换 DST 镜像；桥接目录/overrides 保留；验证阶段检查桥接是否仍写状态，失败只 warning |
 | 删除实例 | 删除 bridge 目录；不保留玩家数据 |
 

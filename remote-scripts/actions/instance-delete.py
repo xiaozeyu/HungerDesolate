@@ -274,8 +274,8 @@ def inspect_instance(request, registry):
                                          info.st_size, info.st_mtime_ns])
                 has_files = has_files or stat.S_ISREG(info.st_mode)
                 world_data = world_data or (stat.S_ISREG(info.st_mode)
-                                            and (relative.startswith("data/Master/")
-                                                 or relative.startswith("data/Caves/")))
+                                            and (relative.startswith("config/Cluster_1/Master/save/")
+                                                 or relative.startswith("config/Cluster_1/Caves/save/")))
             data_snapshot = hashlib.sha256(canonical(entries_snapshot)).hexdigest()
     if registry["registryRevision"] >= MAX_REVISION:
         reject("REGISTRY_REVISION_EXHAUSTED")

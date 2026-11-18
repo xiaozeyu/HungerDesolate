@@ -505,10 +505,21 @@ def _worker_impl(task_id):
         if request["captureMode"] == "cold" and runtime_before not in ("running", "stopped", "degraded"):
             reject("BACKUP_RUNTIME_INVALID")
         set_status(directory, "running", "preflight")
-        roots = ["data/Master"]
+        roots = {"config/Cluster_1/Master/save": "data/Master/save"}
         if manifest.get("cavesEnabled") is True:
-            roots.append("data/Caves")
+            roots["config/Cluster_1/Caves/save"] = "data/Caves/save"
+        for source in roots:
+            save_root = instance / source
+            try:
+                save_info = save_root.lstat()
+            except FileNotFoundError:
+                reject("BACKUP_WORLD_DATA_MISSING")
+            if not stat.S_ISDIR(save_info.st_mode) or save_root.is_symlink():
+                reject("BACKUP_WORLD_DATA_MISSING")
         files, source_size = archive_module["checked_files"](instance, roots)
+        if archive_module["world_save_roots"]({"schemaVersion": 1, "files": files},
+                                              manifest.get("cavesEnabled") is True) is None:
+            reject("BACKUP_WORLD_DATA_MISSING")
         filesystem = os.statvfs(ROOT)
         available = filesystem.f_bavail * filesystem.f_frsize
         estimated = source_size + max(source_size // 10, 1024 * 1024)
@@ -571,6 +582,9 @@ def _worker_impl(task_id):
             created = archive_module["create_archive"](instance, archive_path, backup_identity, roots)
             verified = archive_module["inspect_archive"](archive_path, request["hostId"],
                                                            request["instanceId"], created["checksum"])
+            if archive_module["world_save_roots"](verified["manifest"],
+                                                  manifest.get("cavesEnabled") is True) is None:
+                reject("BACKUP_WORLD_DATA_MISSING")
             set_status(directory, "running", "backupVerify", completed="backup")
             dst_build = backup_dst_build(instance)
             restorability = "restorable"

@@ -11,7 +11,7 @@ import uuid
 
 ROOT = Path("/var/lib/famine-hub")
 PLANS = ROOT / "update-plans"
-WORLD_ROOTS = ("data/Master", "data/Caves")
+WORLD_ROOTS = ("config/Cluster_1/Master/save", "config/Cluster_1/Caves/save")
 EXCLUDED_NAMES = {"cluster_token.txt", "adminlist.txt", "blocklist.txt", "whitelist.txt",
                   "server_log.txt", "server_chat_log.txt", "client_log.txt"}
 

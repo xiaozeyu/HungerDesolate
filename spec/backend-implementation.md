@@ -316,7 +316,7 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 
 ### 10.1 备份内容与一致性
 
-> 规划调整（未实现，见 [DST 更新设计](dst-update-plan.md#96-历史备份恢复)）：归档边界将收窄为只保留 `data/Master`、`data/Caves`；`config/Cluster_1`、`active-release.json`、`manifest.json`、`compose.yaml`、`desired/deployed` 状态、Release 引用和凭据不再进入归档。恢复始终使用当前活动 Release，不切换版本、不覆盖服务器配置。以下现有描述在实现前仍代表当前行为。
+> 已实现边界（见 [备份与恢复文件边界](../docs/backup-restore-boundaries.md)）：归档只保留 DST 世界存档 `config/Cluster_1/<分片>/save`（归档内映射为 `data/<分片>/save`）；`config/Cluster_1` 的其余配置、`active-release.json`、`manifest.json`、`compose.yaml`、`desired/deployed` 状态、Release 引用和凭据不进入归档。恢复始终使用当前活动 Release，不切换版本、不覆盖服务器配置。
 
 包括：完整世界数据、可复现配置、`desired/world.json` 与 `deployed-world.json` 的一致快照、configRevision/digests、DST build/产物标识、MOD 发布摘要、schema、hostId/instanceId，以及秘密的受保护引用。`desired-secrets` 与 `cluster_token.txt` 不进入归档；恢复保留备份的世界设置，但优先使用恢复前当前 `desired-secrets` 中的 token/password 引用重建凭据文件，避免回退到备份时的旧凭据。引用/文件缺失则预检阻断；Klei 已撤销或拒绝的令牌仍需用户重新生成，不能由本地文件校验推断令牌有效。
 
@@ -333,10 +333,10 @@ MOD 应用不要求主机已有 `restore-acceptance.json`，也不要求既有�
 
 ### 10.2 恢复
 
-> 规划调整（未实现）：恢复只替换世界存档并使用当前活动 Release；不再检查备份 Release 产物、配置快照或 revision 兼容性，也不再改写 manifest/Compose/desired/deployed。旧归档只提取 `data/Master`、`data/Caves`。以下步骤在实现前仍代表当前行为。
+> 已实现：恢复只替换世界存档 `config/Cluster_1/<分片>/save` 并使用当前活动 Release；不再检查备份 Release 产物、配置快照或 revision 兼容性，也不再改写 manifest/Compose/desired/deployed。旧归档只提取可识别的 `data/<分片>/save` 或旧布局 `data/<分片>` 世界存档。
 
 1. 备份包含 `desired/world.json` 与 `deployed-world.json` 的非秘密配置快照。用户点击确认恢复后，命令在接纳远端任务前同步检查 backupId、原实例归属、checksum/schema/路径安全、已应用配置快照、产物可用与兼容性、空间和运行状态；检查失败不创建恢复任务。旧备份缺少快照时，仅当当前 desired/deployed 都与该备份 revision 一致才允许恢复，否则阻断。
-2. 预检通过后由持久 worker 在 heavy、实例 world-config 和 instance 三把锁内重新检查；已核实身份但运行退化的分片先统一停服，无法确认 Docker/容器身份时阻断。解压到 staging 并验证容量、权限、摘要；恢复出的 `data/Master`、`data/Caves`、`config/Cluster_1` 以及 `mods/releases/<id>` 的 Master/Caves 内容递归归还 DST UID/GID 1000，目录设为 0700、普通文件 0600；MOD release 的 `manifest.json` 保持 root:root 0600。归档排除的 Token 由当前实例 creds 重建，玩家名单保留恢复前当前配置。不允许普通跨实例恢复。
+2. 预检通过后由持久 worker 在 heavy、实例 world-config 和 instance 三把锁内重新检查；已核实身份但运行退化的分片先统一停服，无法确认 Docker/容器身份时阻断。解压到 staging 并验证容量、权限、摘要与 `data/<分片>/save` 世界存档；恢复出的 `config/Cluster_1/<分片>/save` 以及 `mods/releases/<id>` 的 Master/Caves 内容递归归还 DST UID/GID 1000，目录设为 0700、普通文件 0600；MOD release 的 `manifest.json` 保持 root:root 0600。归档排除的 Token 由当前实例 creds 重建，玩家名单保留恢复前当前配置。不允许普通跨实例恢复。
 3. 停分片，生成当前状态保护备份。
 4. journal 记录原 data/config/active-release，将当前数据移动到受控恢复区，提交完整恢复点；每个 rename 有前置/完成证据。
 5. 同步恢复期望与已应用配置快照，并将两者 revision 及 manifest 更新为一个新的递增 configRevision；记录来源旧 revision，不将当前 revision 回退到备份数值。备份同时包含 `desired/world.json` 与 `deployed-world.json` 时，两者允许处于“已保存未应用”状态，revision 和 settings 不要求相同；分别校验后 rebase 到新 revision。备份缺少 `desired/mods.json` 时按无 MOD 状态恢复并移除当前 desired/deployed，不得复用当前更新的 MOD 状态；只有 desired 而无 deployed 时保留“已保存未应用”状态。MOD 快照恢复只校验 schema、instanceId 和 mods 列表，旧 revision 不要求小于备份 revision；世界与 MOD 的旧 revision 统一 rebase 到新的全局 revision。

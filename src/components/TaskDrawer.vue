@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RefreshCw, Trash2, X } from "@lucide/vue";
-import { NDrawer, NDrawerContent, NEmpty, NTabPane, NTabs } from "naive-ui";
+import { NDrawer, NDrawerContent, NEmpty, NPopconfirm, NTabPane, NTabs } from "naive-ui";
 import TaskRow from "./TaskRow.vue";
 import IconButton from "./IconButton.vue";
 import { useOperations } from "../composables/useOperations";
@@ -150,7 +150,12 @@ onBeforeUnmount(() => {
           <div><span class="eyebrow">本次会话</span><h2>任务记录</h2></div>
           <div class="task-drawer-actions">
             <IconButton label="刷新任务" :disabled="refreshing" @click="refresh"><RefreshCw :size="16" :class="{ spinning: refreshing }"/></IconButton>
-            <IconButton label="清理失效的本地任务记录" :disabled="cleaning" @click="cleanupStaleTasks"><Trash2 :size="16"/></IconButton>
+            <NPopconfirm @positive-click="cleanupStaleTasks">
+              <template #trigger>
+                <span><IconButton label="清理失效的本地任务记录" :disabled="cleaning"><Trash2 :size="16"/></IconButton></span>
+              </template>
+              清理已失效的本地任务记录？远端任务不受影响。
+            </NPopconfirm>
             <IconButton label="关闭任务记录" @click="close"><X :size="18"/></IconButton>
           </div>
         </header>

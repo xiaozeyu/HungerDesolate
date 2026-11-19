@@ -37,7 +37,7 @@ export function useHostModBatch() {
   const taskStore = useTasks();
   const operations = useOperations();
 
-  async function start(target: HostModBatchTarget, items: WorkshopItem[]) {
+  async function start(target: HostModBatchTarget, items: WorkshopItem[], action: "update" | "add" = "update") {
     if (state.running || !items.length) return;
     state.running = true;
     state.total = items.length;
@@ -84,7 +84,7 @@ export function useHostModBatch() {
           operations.recordFailure({
             kind: "hostModUpdate",
             target: { serverId: target.serverId, hostId: target.hostId },
-            title: "批量更新主机 MOD",
+            title: action === "add" ? "批量添加主机 MOD" : "批量更新主机 MOD",
             stage: `提交第 ${Math.floor(offset / 50) + 1} 批`,
             error: failure,
           });

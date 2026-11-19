@@ -19,6 +19,7 @@ import { controlInstance, listInstanceReleases, type InstanceReleaseSummary } fr
 import { previewInstanceUpdate, runInstanceUpdate, type UpdatePreview } from "../api/updates";
 import { describeError, type UserError } from "../lib/commandError";
 import { formatBytes } from "../lib/environmentView";
+import { inSession } from "../lib/session";
 import { hasReadyShardListeners } from "../lib/instanceRuntime";
 import { activeContext } from "../context/activeContext";
 import { operationTargetKey, stageLabel, taskOperationLabel } from "../lib/operationView";
@@ -38,12 +39,24 @@ const instanceTasks = computed(() => {
     .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
 });
 const visibleTask = computed(() => instanceTasks.value.find(task => ["queued", "running"].includes(task.status))
-  ?? instanceTasks.value.find(task => ["failed", "interrupted"].includes(task.status))
+  ?? instanceTasks.value.find(task => ["failed", "interrupted"].includes(task.status) && inSession(task.createdAt))
   ?? null);
 const taskTone = computed(() => visibleTask.value?.status === "failed" ? "danger"
   : visibleTask.value?.status === "interrupted" ? "warning" : "warning");
 const taskStatusText = computed(() => visibleTask.value?.status === "failed" ? "失败"
   : visibleTask.value?.status === "interrupted" ? "待核实" : visibleTask.value?.status === "queued" ? "排队中" : "进行中");
+const taskPercent = computed(() => {
+  const progress = visibleTask.value?.progress;
+  return progress?.kind === "determinate" && progress.total > 0
+    ? Math.round(progress.completed * 100 / progress.total) : null;
+});
+const dismissedTaskId = ref<string | null>(null);
+const dockTask = computed(() => visibleTask.value && visibleTask.value.taskId !== dismissedTaskId.value ? visibleTask.value : null);
+const taskDismissible = computed(() => !!visibleTask.value
+  && ["succeeded", "failed", "cancelled", "interrupted"].includes(visibleTask.value.status));
+function dismissTask() {
+  if (visibleTask.value) dismissedTaskId.value = visibleTask.value.taskId;
+}
 const runtimeAction = computed<"start"|"stop"|"restart"|null>(() => {
   const operation = target.value ? operations.runningFor(targetKey.value, ["start", "stop", "restart"]) : null;
   return operation && (operation.kind === "start" || operation.kind === "stop" || operation.kind === "restart")
@@ -309,10 +322,10 @@ const updateOptions = computed(() => updateCandidates.value.map(release => ({
         </div>
         <p v-else class="muted-text">端口信息尚未采集</p>
       </section>
-<FloatingTask v-if="visibleTask" label="专服任务">
-    <TaskPanel v-if="visibleTask" :title="taskOperationLabel(visibleTask.operation)" :status-label="taskStatusText"
-      :stage-label="stageLabel(visibleTask.stage)" :tone="taskTone" :queue-position="visibleTask.queuePosition"
-      :error="visibleTask.error">
+<FloatingTask v-if="dockTask" label="专服任务" :tone="taskTone" :summary="taskStatusText" :progress="taskPercent" :dismissible="taskDismissible" @dismiss="dismissTask">
+    <TaskPanel v-if="dockTask" dock :title="taskOperationLabel(dockTask.operation)" :status-label="taskStatusText"
+      :stage-label="stageLabel(dockTask.stage)" :tone="taskTone" :queue-position="dockTask.queuePosition"
+      :error="dockTask.error">
       <template #actions><NButton text size="small" @click="openTaskDrawer">任务记录</NButton></template>
     </TaskPanel>
 </FloatingTask>

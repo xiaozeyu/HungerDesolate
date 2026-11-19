@@ -4,6 +4,7 @@ import { AlertCircle, CheckCircle, Hammer, Package, RefreshCw, Trash2 } from "@l
 import { useRoute } from "vue-router";
 import { NAlert, NButton, NDataTable, NInput, NLog, NProgress, NSpin, type DataTableColumns } from "naive-ui";
 import PageHeader from "../components/PageHeader.vue";
+import PreviewNotice from "../components/PreviewNotice.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import IconButton from "../components/IconButton.vue";
@@ -27,6 +28,7 @@ import {
   type InstanceReleaseDeletePreview,
 } from "../api/instances";
 import { describeError } from "../lib/commandError";
+import { sessionStartedAt } from "../lib/session";
 import { cleanupBuildCache, previewBuildCache, type BuildCachePreview } from "../api/buildCache";
 import { checkDstUpdates, getDstUpdateStatus, type HostDstUpdateStatus } from "../api/updates";
 import { formatBytes } from "../lib/environmentView";
@@ -54,6 +56,21 @@ const buildError = computed(() => buildEntry.value?.status.status === "failed"
   ? buildEntry.value.status.logTail.at(-1) ?? "构建失败，请查看主机构建日志"
   : buildEntry.value?.status.status === "notFound" ? "构建任务不存在，请重新构建"
   : buildStartError.value);
+const buildTone = computed<"running" | "danger" | "success" | "muted">(() => building.value ? "running"
+  : buildError.value ? "danger" : buildMessage.value ? "success" : "muted");
+const dismissedBuildKey = ref<string | null>(null);
+const buildDockKey = computed(() => {
+  const state = building.value ? "building" : buildError.value ? "error" : buildMessage.value ? "success" : "";
+  return state ? `${state}:${buildEntry.value?.startedAt ?? 0}` : "";
+});
+const buildDockVisible = computed(() => {
+  if (!buildDockKey.value || buildDockKey.value === dismissedBuildKey.value) return false;
+  return building.value || (buildEntry.value?.startedAt ?? 0) >= sessionStartedAt;
+});
+const buildDismissible = computed(() => !building.value && !!buildDockKey.value);
+function dismissBuild() {
+  dismissedBuildKey.value = buildDockKey.value;
+}
 const dockerNotice = computed(() => {
   const docker = hostEnvironment.data.value?.docker;
   if (!docker) return null;
@@ -602,6 +619,7 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
         <IconButton label="刷新 Release" :disabled="loading || !server" @click="refresh"><RefreshCw :size="16"/></IconButton>
       </template>
     </PageHeader>
+    <PreviewNotice/>
 
     <div v-if="error" class="environment-error release-feedback" role="alert">
       <strong>{{ error.message }}</strong>
@@ -626,7 +644,7 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
       </div>
     </template>
     <div v-else-if="!error" class="empty-state">尚未读取 Release</div>
-<FloatingTask v-if="building || buildStatus?.status === 'failed' || buildMessage || buildError" label="镜像构建">
+<FloatingTask v-if="buildDockVisible" label="镜像构建" :tone="buildTone" :summary="buildAlert.title" :dismissible="buildDismissible" @dismiss="dismissBuild">
     <NAlert :type="buildAlert.type" :title="buildAlert.title" :bordered="false" :show-icon="true" class="build-alert">
       <template #icon>
         <NSpin v-if="building" size="small"/>

@@ -6,11 +6,12 @@ import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import LoadingState from "../components/LoadingState.vue";
 import AppDialog from "../components/AppDialog.vue";
+import ErrorNotice from "../components/ErrorNotice.vue";
 import { useInstancePlayers } from "../composables/useInstancePlayers";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { characterLabel } from "../lib/characters";
-import { describeError } from "../lib/commandError";
+import { describeError, type UserError } from "../lib/commandError";
 import { notifyError, notifyInfo, notifySuccess } from "../naive/notify";
 import {
   installInstancePlayerBridge, previewInstancePlayerBridge,
@@ -21,7 +22,19 @@ const { server, target, instanceName } = usePageTarget();
 const workspace = useWorkspace();
 const { data, error, loading, stale, refresh } = useInstancePlayers();
 let refreshFailureNotified = false;
-watch(data, () => { refreshFailureNotified = false; });
+let notifiedWarnings = "";
+watch(data, response => {
+  refreshFailureNotified = false;
+  if (!response) return;
+  const warnings = response.data.warnings;
+  if (!warnings.length) { notifiedWarnings = ""; return; }
+  const signature = warnings.join("|");
+  if (signature === notifiedWarnings) return;
+  notifiedWarnings = signature;
+  notifyInfo(warnings.includes("PLAYER_STATE_INVALID")
+    ? "部分分片的玩家状态无法读取，已跳过"
+    : "部分玩家条目无法读取，已跳过");
+});
 watch(() => data.value?.freshness, (freshness, previous) => {
   if (!freshness) return;
   if (freshness === "stale" && previous !== "stale") {
@@ -38,7 +51,7 @@ watch(stale, value => {
 const enableOpen = ref(false);
 const enableLoading = ref(false);
 const enableBusy = ref(false);
-const enableError = ref("");
+const enableError = ref<UserError | string | null>(null);
 const enablePreview = ref<PlayerBridgeStatusResponse | null>(null);
 let epoch = 0;
 let sequence = 0;
@@ -82,7 +95,7 @@ async function openEnable() {
         || preview.configRevision !== response.configRevision) throw new Error("启用预览响应不匹配");
     enablePreview.value = preview;
   } catch (cause) {
-    if (isCurrent(ticket, requestEpoch, key)) enableError.value = describeError(cause).message;
+    if (isCurrent(ticket, requestEpoch, key)) enableError.value = describeError(cause);
   } finally {
     if (isCurrent(ticket, requestEpoch, key)) enableLoading.value = false;
   }
@@ -106,7 +119,7 @@ async function confirmEnable() {
     notifySuccess("玩家列表已启用", "重启或启动专服后生效。");
     await refresh();
   } catch (cause) {
-    if (isCurrent(ticket, requestEpoch, key)) enableError.value = describeError(cause).message;
+    if (isCurrent(ticket, requestEpoch, key)) enableError.value = describeError(cause);
   } finally {
     if (isCurrent(ticket, requestEpoch, key)) enableBusy.value = false;
   }
@@ -118,6 +131,7 @@ watch([() => target.value?.instanceId, () => server.value?.recordVersion], () =>
   enableOpen.value = false;
   enablePreview.value = null;
   enableError.value = "";
+  notifiedWarnings = "";
 }, { flush: "sync" });
 </script>
 
@@ -159,9 +173,6 @@ watch([() => target.value?.instanceId, () => server.value?.recordVersion], () =>
         <div v-else class="table-wrap">
           <NDataTable :columns="columns" :data="players" :row-key="rowKey" :bordered="false" :single-line="true" size="medium"/>
         </div>
-        <div v-if="data.data.warnings.length" class="muted-text">
-          {{ data.data.warnings.includes('PLAYER_STATE_INVALID') ? '部分分片的玩家状态无法读取，已跳过' : '部分玩家条目无法读取，已跳过' }}
-        </div>
       </section>
     </template>
     <div v-else class="empty-state" role="alert">
@@ -170,7 +181,7 @@ watch([() => target.value?.instanceId, () => server.value?.recordVersion], () =>
 
     <AppDialog v-model:open="enableOpen" title="启用玩家列表" size="sm">
       <LoadingState v-if="enableLoading" compact description="正在检查安装条件"/>
-      <div v-else-if="enableError" class="inline-error">{{ enableError }}</div>
+      <ErrorNotice v-else-if="enableError" :error="enableError"/>
       <template v-else-if="enablePreview">
         <ul v-if="enablePreview.blockers.length" class="environment-error">
           <li v-for="blocker in enablePreview.blockers" :key="blocker">{{ blocker === 'PLAYER_BRIDGE_OVERRIDES_UNMANAGED'

@@ -5,16 +5,20 @@ import { NButton, NCheckbox, NDataTable, NInput, NInputNumber, NTooltip, type Da
 import AppDialog from "../components/AppDialog.vue";
 import OptionSelect, { type OptionSelectItem } from "../components/OptionSelect.vue";
 import PageHeader from "../components/PageHeader.vue";
+import PreviewNotice from "../components/PreviewNotice.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import IconButton from "../components/IconButton.vue";
 import LoadingState from "../components/LoadingState.vue";
+import ErrorNotice from "../components/ErrorNotice.vue";
+import TaskPanel from "../components/TaskPanel.vue";
 import { applyInstanceMods, listInstanceModApplyTasks,
   cancelInstanceModApply, listInstanceMods, previewInstanceMods, saveInstanceMods } from "../api/mods";
 import { getInstanceOverview } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
-import { describeError } from "../lib/commandError";
+import { describeError, type UserError } from "../lib/commandError";
+import { inSession } from "../lib/session";
 import type { InstanceModSummary, ModSchemaStatus } from "../types/mods";
 import { listHostMods, type HostModItem } from "../api/hostMods";
 import { createSerialQueue } from "../lib/serialQueue";
@@ -37,8 +41,8 @@ const queueSsh = createSerialQueue();
 const items = ref<InstanceModSummary[]>([]);
 const revision = ref<number | null>(null);
 const loading = ref(false);
-const error = ref("");
-const hostLibraryOpen = ref(false), hostLibraryItems = ref<HostModItem[]>([]), hostLibraryLoading = ref(false), hostLibraryError = ref("");
+const error = ref<UserError | string | null>(null);
+const hostLibraryOpen = ref(false), hostLibraryItems = ref<HostModItem[]>([]), hostLibraryLoading = ref(false), hostLibraryError = ref<UserError | string | null>(null);
 const hostLibrarySelected = ref<Set<string>>(new Set());
 const hostLibraryKey = (item: HostModItem) => `${item.workshopId}:${item.contentDigest}`;
 const currentHostMod = (item: HostModItem) => items.value.find(current => current.workshopId === item.workshopId && current.desiredEnabled !== null);
@@ -83,9 +87,10 @@ const applyTask = computed<TaskSnapshot | null>(() => {
   const key = `${selected.serverId}:${selected.hostId}:${selected.instanceId}`;
   const tasks = taskStore.tasks.value.filter(task => applyTaskBelongsHere(task, key))
     .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
-  return tasks.find(task => ["queued", "running"].includes(task.status)) ?? tasks[0] ?? null;
+  return tasks.find(task => ["queued", "running"].includes(task.status))
+    ?? tasks.find(task => inSession(task.createdAt)) ?? null;
 });
-const applyTaskError = ref("");
+const applyTaskError = ref<UserError | string | null>(null);
 const applyTaskTone = computed<"running"|"success"|"danger"|"warning">(() => {
   const status = applyTask.value?.status;
   return status === "succeeded" ? "success" : status === "failed" ? "danger" : status === "interrupted" ? "warning" : "running";
@@ -94,12 +99,25 @@ const applyTaskStatusLabel = computed(() => {
   const status = applyTask.value?.status;
   return status === "succeeded" ? "完成" : status === "failed" ? "失败" : status === "interrupted" ? "待核实" : status === "cancelled" ? "已取消" : "进行中";
 });
+const dismissedApplyTaskId = ref<string | null>(null);
+const visibleApplyTask = computed<TaskSnapshot | null>(() =>
+  applyTask.value && applyTask.value.taskId !== dismissedApplyTaskId.value ? applyTask.value : null);
+const applyTaskPercent = computed(() => {
+  const progress = applyTask.value?.progress;
+  return progress?.kind === "determinate" && progress.total > 0
+    ? Math.round(progress.completed * 100 / progress.total) : null;
+});
+const applyTaskDismissible = computed(() => !!applyTask.value
+  && ["succeeded", "failed", "cancelled", "interrupted"].includes(applyTask.value.status));
+function dismissApplyTask() {
+  if (applyTask.value) dismissedApplyTaskId.value = applyTask.value.taskId;
+}
 const cancelBusy = ref(false);
 const cancelMessage = ref("");
 const removeTarget = ref<InstanceModSummary | null>(null);
 const removeBusy = ref(false);
-const removeError = ref("");
-const taskError = ref("");
+const removeError = ref<UserError | string | null>(null);
+const taskError = ref<UserError | string | null>(null);
 const configEditorOpen = ref(false);
 const editingMod = ref<InstanceModSummary | null>(null);
 const configBase = ref<Record<string, unknown>>({});
@@ -108,11 +126,11 @@ const configFieldGroups = computed(() => editingMod.value
 const configDraft = ref<Record<string, unknown>>({});
 const configChangedFields = ref<string[]>([]);
 const configOptionSelection = ref<Record<string, string>>({});
-const configError = ref("");
+const configError = ref<UserError | string | null>(null);
 const configSaving = ref(false);
 const applyPreviewOpen = ref(false);
 const applyPreviewLoading = ref(false);
-const applyPreviewError = ref("");
+const applyPreviewError = ref<UserError | string | null>(null);
 const applyPreview = ref<ModApplyPreview | null>(null);
 const serverApplyPreview = ref<import("../api/mods").ModApplyPreviewResponse | null>(null);
 const applyBusy = ref(false);
@@ -163,7 +181,7 @@ async function refresh(): Promise<boolean> {
     revision.value = response.configRevision;
     return true;
   } catch (cause) {
-    if (isCurrent(requestId, ticket, requestEpoch, connection.serverId, connection.recordVersion, targetKey)) error.value = describeError(cause).message;
+    if (isCurrent(requestId, ticket, requestEpoch, connection.serverId, connection.recordVersion, targetKey)) error.value = describeError(cause);
     return false;
   } finally {
     if (isCurrent(requestId, ticket, requestEpoch, connection.serverId, connection.recordVersion, targetKey)) loading.value = false;
@@ -228,7 +246,7 @@ async function loadHostLibrary() {
     }
     hostLibraryItems.value = response.items;
   } catch (cause) {
-    if (requestEpoch === epoch) hostLibraryError.value = describeError(cause).message;
+    if (requestEpoch === epoch) hostLibraryError.value = describeError(cause);
   } finally {
     if (requestEpoch === epoch) hostLibraryLoading.value = false;
   }
@@ -303,7 +321,7 @@ async function saveHostLibraryItems(selectedItems: HostModItem[]) {
   } catch (cause) {
     if (requestEpoch === epoch && target.value
         && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) {
-      hostLibraryError.value = describeError(cause).message;
+      hostLibraryError.value = describeError(cause);
     }
   } finally {
     if (requestEpoch === epoch) savingWorkshopId.value = null;
@@ -348,7 +366,7 @@ async function setModEnabled(item: InstanceModSummary) {
   } catch (cause) {
     if (savedEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === recordVersion) taskError.value = describeError(cause).message;
+      && server.value?.recordVersion === recordVersion) taskError.value = describeError(cause);
   } finally {
     if (savedEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
@@ -391,7 +409,7 @@ async function confirmRemoveMod() {
     removeTarget.value = null;
     await refresh();
   } catch (cause) {
-    if (savedEpoch === epoch) removeError.value = describeError(cause).message;
+    if (savedEpoch === epoch) removeError.value = describeError(cause);
   } finally {
     if (savedEpoch === epoch) {
       removeBusy.value = false;
@@ -546,7 +564,7 @@ async function saveConfiguration() {
   } catch (cause) {
     if (savedEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget
-      && server.value?.recordVersion === savedRecordVersion) configError.value = describeError(cause).message;
+      && server.value?.recordVersion === savedRecordVersion) configError.value = describeError(cause);
   } finally {
     if (savedEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === savedTarget
@@ -612,7 +630,7 @@ async function openApplyPreview() {
   } catch (cause) {
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === recordVersion) applyPreviewError.value = describeError(cause).message;
+      && server.value?.recordVersion === recordVersion) applyPreviewError.value = describeError(cause);
   } finally {
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
@@ -651,7 +669,7 @@ async function cancelApply() {
     taskStore.receive(response.task);
     cancelMessage.value = "取消请求已提交，等待任务安全结束。";
   } catch (cause) {
-    applyTaskError.value = describeError(cause).message;
+    applyTaskError.value = describeError(cause);
   } finally {
     cancelBusy.value = false;
   }
@@ -680,7 +698,7 @@ async function refreshApplyTasks() {
     const current = response.items.find(task => ["queued", "running"].includes(task.status)) ?? response.items[0] ?? null;
     if (current) taskStore.receive(current);
   } catch (cause) {
-    if (requestEpoch === epoch) applyTaskError.value = describeError(cause).message;
+    if (requestEpoch === epoch) applyTaskError.value = describeError(cause);
   }
 }
 
@@ -723,7 +741,7 @@ async function applyMods() {
   } catch (cause) {
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
-      && server.value?.recordVersion === recordVersion) applyTaskError.value = describeError(cause).message;
+      && server.value?.recordVersion === recordVersion) applyTaskError.value = describeError(cause);
   } finally {
     if (requestEpoch === epoch && target.value
       && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey
@@ -900,10 +918,11 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
         </NButton>
       </template>
     </PageHeader>
+    <PreviewNotice/>
 
-    <div v-if="error" class="inline-error">{{ error }}</div>
-    <div v-if="taskError" class="error-strip">{{ taskError }}</div>
-    <div v-if="applyTaskError" class="error-strip">{{ applyTaskError }}</div>
+    <ErrorNotice :error="error"/>
+    <ErrorNotice :error="taskError"/>
+    <ErrorNotice :error="applyTaskError"/>
 
     <template v-if="loading || items.length">
       <div class="table-wrap">
@@ -912,16 +931,16 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
     </template>
     <div v-else class="empty-state"><h2>尚未发现 MOD</h2></div>
 
-<FloatingTask v-if="applyTask" label="MOD 应用">
-    <TaskPanel v-if="applyTask" title="应用 MOD" :status-label="applyTaskStatusLabel" :stage-label="applyStageLabel(applyTask)"
-      :tone="applyTaskTone" :queue-position="applyTask.queuePosition" :error="applyTask.error"
-      :progress="applyTask.progress.kind === 'determinate' ? `${applyTask.progress.completed}/${applyTask.progress.total}` : '处理中'"
-      :cancellable="!!applyTask.cancelAllowed && ['queued', 'running'].includes(applyTask.status)" :busy="cancelBusy" @cancel="cancelApply">
+<FloatingTask v-if="visibleApplyTask" label="MOD 应用" :tone="applyTaskTone" :summary="applyTaskStatusLabel" :progress="applyTaskPercent" :dismissible="applyTaskDismissible" @dismiss="dismissApplyTask">
+    <TaskPanel v-if="visibleApplyTask" title="应用 MOD" dock :status-label="applyTaskStatusLabel" :stage-label="applyStageLabel(visibleApplyTask)"
+      :tone="applyTaskTone" :queue-position="visibleApplyTask.queuePosition" :error="visibleApplyTask.error"
+      :progress="visibleApplyTask.progress.kind === 'determinate' ? `${visibleApplyTask.progress.completed}/${visibleApplyTask.progress.total}` : '处理中'"
+      :cancellable="!!visibleApplyTask.cancelAllowed && ['queued', 'running'].includes(visibleApplyTask.status)" :busy="cancelBusy" @cancel="cancelApply">
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
 </FloatingTask>
     <AppDialog v-model:open="hostLibraryOpen" title="从主机 MOD 库添加" size="lg">
-      <div v-if="hostLibraryError" class="error-strip">{{ hostLibraryError }}</div>
+      <ErrorNotice :error="hostLibraryError"/>
       <div v-if="hostLibraryLoading" class="muted-text" role="status">读取主机 MOD 库…</div>
       <template v-else-if="hostLibraryItems.length">
         <div class="host-library-toolbar">
@@ -981,7 +1000,7 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
           </IconButton>
         </div>
       </div>
-      <div v-if="configError" class="error-strip">{{ configError }}</div>
+      <ErrorNotice :error="configError"/>
       <div v-if="configValidationError" class="error-strip">{{ configValidationError }}</div>
       <template #footer>
         <NButton :disabled="configSaving" @click="configEditorOpen = false">取消</NButton>
@@ -993,7 +1012,7 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
 
     <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容与恢复条件" size="lg">
       <LoadingState v-if="applyPreviewLoading" compact description="正在核对应用条件"/>
-      <div v-else-if="applyPreviewError" class="inline-error">{{ applyPreviewError }}</div>
+      <ErrorNotice v-else-if="applyPreviewError" :error="applyPreviewError"/>
       <div v-else-if="applyPreview" class="mod-apply-preview">
         <div v-if="applyPreviewStale" class="error-strip">MOD 配置已变化，此预览已失效。请重新生成。</div>
         <section class="mod-apply-section">
@@ -1033,7 +1052,7 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
           <div><span>MOD</span><strong>{{ instanceModName(removeTarget) }}</strong></div>
           <div><span>Workshop ID</span><strong class="mono">{{ removeTarget.workshopId }}</strong></div>
         </div>
-        <div v-if="removeError" class="error-strip" role="alert">{{ removeError }}</div>
+        <ErrorNotice :error="removeError"/>
       </div>
       <template #footer>
         <NButton :disabled="removeBusy" @click="removeTarget = null">取消</NButton>

@@ -23,6 +23,22 @@ const engineLabels = {notInstalled:"未安装",permissionDenied:"权限不足",u
 const checks = computed(() => [...(data.value?.checks ?? [])].sort((a,b)=>({blocker:0,warning:1,passed:2}[a.level]-{blocker:0,warning:1,passed:2}[b.level])));
 const refreshButton = ref<HTMLSpanElement | null>(null);
 const dockerPlanInvalid = computed(() => ["PLAN_STALE","PLAN_EXPIRED","INSTALL_HOST_CHANGED","INSTALL_SNAPSHOT_CHANGED","INSTALL_PREFLIGHT_BLOCKED"].includes(dockerTaskError.value?.code ?? ""));
+const dismissedDockerTaskId = ref<string | null>(null);
+const dockerDockTask = computed(() => {
+  const task = dockerTask.value;
+  return task && task.taskId !== dismissedDockerTaskId.value ? task : null;
+});
+const dockerDockTone = computed<"running" | "success" | "danger" | "warning">(() => {
+  const status = dockerDockTask.value?.status;
+  return status === "succeeded" ? "success" : status === "failed" ? "danger"
+    : status === "interrupted" ? "warning" : "running";
+});
+const dockerDockSummary = computed(() => dockerDockTask.value ? dockerInstallStatusLabel(dockerDockTask.value.status) : "");
+const dockerDockDismissible = computed(() => !!dockerDockTask.value
+  && ["succeeded", "failed", "interrupted"].includes(dockerDockTask.value.status));
+function dismissDockerTask() {
+  if (dockerDockTask.value) dismissedDockerTaskId.value = dockerDockTask.value.taskId;
+}
 async function confirm() {
   const target = server.value;
   await confirmInitialization();
@@ -62,8 +78,8 @@ async function retryDockerInstall() {
         <div class="section-heading"><div><h2>检查结果</h2><p class="muted-text">阻断、警告与恢复建议</p></div><span class="muted-text">{{checks.length}} 项</span></div>
         <div class="environment-checks"><details v-for="check in checks" :key="`${check.code}:${check.label}`" class="environment-check"><summary><CheckCircle2 v-if="check.level === 'passed'" class="icon-success" :size="17"/><CircleX v-else-if="check.level === 'blocker'" class="icon-danger" :size="17"/><AlertTriangle v-else class="icon-warning" :size="17"/><span>{{check.label}}</span><span class="environment-check-result">{{check.message}}</span><ChevronDown v-if="check.recoverySteps.length" class="environment-check-chevron" :size="15"/></summary><ul v-if="check.recoverySteps.length"><li v-for="step in check.recoverySteps" :key="step">{{step}}</li></ul></details></div>
       </section>
-<FloatingTask v-if="dockerTask && ['queued','running'].includes(dockerTask.status)" label="Docker 安装">
-      <div v-if="dockerTask && ['queued','running'].includes(dockerTask.status)" class="environment-summary" role="status"><StatusLabel tone="warning" :label="dockerInstallStatusLabel(dockerTask.status)"/><span>{{dockerInstallPhaseLabel(dockerTask.phase)}}</span><span class="muted-text">{{dockerTaskLoading ? '同步中…' : ''}}</span></div>
+<FloatingTask v-if="dockerDockTask" label="Docker 安装" :tone="dockerDockTone" :summary="dockerDockSummary" :dismissible="dockerDockDismissible" @dismiss="dismissDockerTask">
+      <div v-if="dockerDockTask" class="environment-summary" role="status"><span>{{dockerInstallPhaseLabel(dockerDockTask.phase)}}</span><span class="muted-text">{{dockerTaskLoading ? '同步中…' : ''}}</span><span v-if="['failed','interrupted'].includes(dockerDockTask.status)">{{dockerInstallTaskErrorLabel(dockerDockTask.messageCode)}}</span></div>
 </FloatingTask>
     </template>
     <div v-else-if="!error" class="empty-state"><h2>尚未检查</h2></div>

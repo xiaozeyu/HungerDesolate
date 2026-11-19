@@ -4,11 +4,13 @@ import { ArrowLeftRight, DownloadCloud, Package, Plus, RefreshCw, Trash2 } from 
 import { useRoute } from "vue-router";
 import { NButton, NDataTable, NInput, type DataTableColumns } from "naive-ui";
 import IconButton from "../components/IconButton.vue";
-import { notifyBottomError, notifyBottomInfo, notifyBottomSuccess } from "../naive/notify";
+import { notifyError, notifyInfo, notifySuccess } from "../naive/notify";
 import PageHeader from "../components/PageHeader.vue";
+import PreviewNotice from "../components/PreviewNotice.vue";
 import FloatingTask from "../components/FloatingTask.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import LoadingState from "../components/LoadingState.vue";
+import ErrorNotice from "../components/ErrorNotice.vue";
 import TaskPanel from "../components/TaskPanel.vue";
 import AppDialog from "../components/AppDialog.vue";
 import { useWorkspace } from "../composables/useWorkspace";
@@ -23,6 +25,7 @@ import { getWorkshopCollection, getWorkshopMetadata } from "../api/workshop";
 import type { WorkshopItem } from "../types/workshop";
 import { normalizeWorkshopCollection, normalizeWorkshopIds } from "../lib/workshopInput";
 import { describeError } from "../lib/commandError";
+import { inSession } from "../lib/session";
 import { useQuery } from "../lib/queryClient";
 import { formatBytes } from "../lib/environmentView";
 import { stageLabel } from "../lib/operationView";
@@ -64,6 +67,31 @@ const taskStatusLabel = computed(() => {
   const status = task.value?.status;
   return status === "succeeded" ? "已加入主机库" : status === "failed" ? "准备失败" : status === "interrupted" ? "准备中断" : status === "cancelled" ? "已取消" : status === "queued" ? "排队中" : "准备 MOD";
 });
+const dismissedTaskId = ref<string | null>(null);
+const visibleTask = computed<TaskSnapshot | null>(() =>
+  task.value && task.value.taskId !== dismissedTaskId.value ? task.value : null);
+const batchState = hostModBatch.state;
+const batchPercent = computed(() =>
+  batchState.total ? Math.round((batchState.accepted + batchState.failed) * 100 / batchState.total) : null);
+const dockTone = computed(() => batchState.running ? "running" : taskTone.value);
+const dockSummary = computed(() => {
+  if (batchState.running) {
+    const done = batchState.accepted + batchState.failed;
+    return batchState.failed ? `已提交 ${done}/${batchState.total} · 失败 ${batchState.failed}` : `已提交 ${done}/${batchState.total}`;
+  }
+  return taskStatusLabel.value;
+});
+const dockProgress = computed(() => {
+  if (batchState.running) return batchPercent.value;
+  const progress = task.value?.progress;
+  return progress?.kind === "determinate" && progress.total > 0
+    ? Math.round(progress.completed * 100 / progress.total) : null;
+});
+const dockDismissible = computed(() => !batchState.running && !!task.value
+  && ["succeeded", "failed", "cancelled", "interrupted"].includes(task.value.status));
+function dismissDock() {
+  if (task.value) dismissedTaskId.value = task.value.taskId;
+}
 const loading = libraryQuery.loading;
 const error = libraryQuery.error;
 const mutationError = ref("");
@@ -76,10 +104,11 @@ const workshopInput = ref("");
 const collectionInput = ref("");
 const collectionTitle = ref("");
 const collectionSelection = ref<Set<string>>(new Set());
+const manualSelection = ref<Set<string>>(new Set());
 const queryBusy = ref(false);
 const queryError = ref("");
 let queryGeneration = 0;
-function invalidateQuery() { queryGeneration += 1; queryBusy.value = false; }
+function invalidateQuery() { queryGeneration += 1; queryBusy.value = false; manualSelection.value = new Set(); }
 const candidates = ref<WorkshopItem[]>([]);
 const isHostModPresent = (item: WorkshopItem) => items.value.some(entry => entry.workshopId === item.workshopId);
 const versionedPreview = (url: string | null, digest: string | null) => {
@@ -159,13 +188,13 @@ async function checkUpdates(targets: HostModItem[]) {
     const failedCount = statuses.filter(status => status === "failed").length;
     if (ids.length === 1) {
       const name = latest.get(ids[0])?.name ?? ids[0];
-      if (statuses[0] === "outdated") notifyBottomInfo("发现新版本", name);
-      else if (statuses[0] === "latest") notifyBottomSuccess("已是最新版本", name);
-      else notifyBottomError("更新检查失败", updateChecks.value[ids[0]]?.message || name);
+      if (statuses[0] === "outdated") notifyInfo("发现新版本", name);
+      else if (statuses[0] === "latest") notifySuccess("已是最新版本", name);
+      else notifyError("更新检查失败", updateChecks.value[ids[0]]?.message || name);
     } else {
       const summary = `${latestCount} 个已是最新${outdatedCount ? `，${outdatedCount} 个可更新` : ""}${failedCount ? `，${failedCount} 个检查失败` : ""}`;
-      if (failedCount) notifyBottomError("更新检查完成", summary);
-      else notifyBottomSuccess("更新检查完成", summary);
+      if (failedCount) notifyError("更新检查完成", summary);
+      else notifySuccess("更新检查完成", summary);
     }
   } catch (cause) {
     const failure = describeError(cause);
@@ -175,7 +204,7 @@ async function checkUpdates(targets: HostModItem[]) {
       }
     }
     operations.recordFailure({ kind: "hostModCheck", target: hostTarget, title: "检查主机 MOD 更新", stage: "查询 Workshop", error: failure });
-    notifyBottomError("更新检查失败", failure.message);
+    notifyError("更新检查失败", failure.message);
   } finally {
     checkingUpdates.value = false;
   }
@@ -194,9 +223,10 @@ async function startBatchUpdate() {
   const hostTarget = target.value;
   if (!connection || !hostTarget || !outdatedCandidates.value.length) return;
   const count = outdatedCandidates.value.length;
+  dismissedTaskId.value = null;
   await hostModBatch.start({ serverId: connection.serverId, hostId: hostTarget.hostId, recordVersion: connection.recordVersion }, outdatedCandidates.value);
   updateChecks.value = {};
-  notifyBottomSuccess("已提交批量更新", `${count} 个 MOD`);
+  notifySuccess("已提交批量更新", `${count} 个 MOD`);
 }
 
 async function refreshLibrary() {
@@ -208,6 +238,9 @@ const selectableCandidates = computed(() => candidates.value.filter(item => item
 const selectedCollectionItems = computed(() => selectableCandidates.value.filter(item => collectionSelection.value.has(item.workshopId)));
 const allCandidatesSelected = computed(() => selectableCandidates.value.length > 0
   && selectableCandidates.value.every(item => collectionSelection.value.has(item.workshopId)));
+const selectedManualItems = computed(() => selectableCandidates.value.filter(item => manualSelection.value.has(item.workshopId)));
+const allManualSelected = computed(() => selectableCandidates.value.length > 0
+  && selectableCandidates.value.every(item => manualSelection.value.has(item.workshopId)));
 const task = computed<TaskSnapshot | null>(() => {
   const selected = target.value;
   if (!selected) return null;
@@ -215,7 +248,8 @@ const task = computed<TaskSnapshot | null>(() => {
     .filter(item => item.operation === "hostModPrepare" && "hostId" in item.target
       && item.target.serverId === selected.serverId && item.target.hostId === selected.hostId)
     .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
-  return tasks.find(item => ["queued", "running"].includes(item.status)) ?? tasks[0] ?? null;
+  return tasks.find(item => ["queued", "running"].includes(item.status))
+    ?? tasks.find(item => inSession(item.createdAt)) ?? null;
 });
 const deleteTarget = ref<HostModItem | null>(null);
 const deleteBusy = ref(false);
@@ -243,6 +277,7 @@ async function query() {
   queryBusy.value = true;
   queryError.value = "";
   candidates.value = [];
+  manualSelection.value = new Set();
   try {
     const requestId = crypto.randomUUID();
     const response = await getWorkshopMetadata({ schemaVersion: 1, requestId,
@@ -335,6 +370,33 @@ function toggleAllCollectionItems() {
   collectionSelection.value = new Set(eligible.slice(0, 50).map(item => item.workshopId));
 }
 
+function toggleManualItem(id: string) {
+  if (!selectableCandidates.value.some(item => item.workshopId === id)) return;
+  const next = new Set(manualSelection.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  manualSelection.value = next;
+}
+
+function toggleAllManualItems() {
+  manualSelection.value = allManualSelected.value ? new Set()
+    : new Set(selectableCandidates.value.map(item => item.workshopId));
+}
+
+async function addSelectedCandidates() {
+  const connection = server.value;
+  const hostTarget = target.value;
+  const selected = selectedManualItems.value;
+  if (!connection || !hostTarget || !selected.length || hostModBatch.state.running) return;
+  const count = selected.length;
+  addOpen.value = false;
+  candidates.value = [];
+  manualSelection.value = new Set();
+  await hostModBatch.start({ serverId: connection.serverId, hostId: hostTarget.hostId, recordVersion: connection.recordVersion }, selected, "add");
+  if (hostModBatch.state.failed) notifyError("部分主机 MOD 添加失败", `${hostModBatch.state.failed}/${hostModBatch.state.total}`);
+  else notifySuccess("已提交添加到主机库", `${count} 个 MOD`);
+}
+
 async function importCollection() {
   const connection = server.value;
   const hostTarget = target.value;
@@ -357,11 +419,11 @@ async function importCollection() {
     addOpen.value = false;
     candidates.value = [];
     collectionSelection.value = new Set();
-    notifyBottomSuccess("已提交合集导入", `${selected.length} 个 MOD`);
+    notifySuccess("已提交合集导入", `${selected.length} 个 MOD`);
   } catch (cause) {
     const failure = describeError(cause);
     queryError.value = failure.message;
-    notifyBottomError("合集导入失败", failure.message);
+    notifyError("合集导入失败", failure.message);
   } finally {
     importingCollection.value = false;
   }
@@ -384,11 +446,11 @@ async function addCandidate(item: WorkshopItem) {
     taskStore.receive(response.task);
     addOpen.value = false;
     candidates.value = [];
-    notifyBottomSuccess("已提交添加到主机库", item.title ?? item.workshopId);
+    notifySuccess("已提交添加到主机库", item.title ?? item.workshopId);
   } catch (cause) {
     const failure = describeError(cause);
     queryError.value = failure.message;
-    notifyBottomError("添加主机 MOD 失败", failure.message);
+    notifyError("添加主机 MOD 失败", failure.message);
   } finally {
     addingWorkshopId.value = null;
   }
@@ -415,7 +477,7 @@ async function updateHostMod(item: HostModItem) {
       updateChecks.value = { ...updateChecks.value, [item.workshopId]: { status: "latest", message: "", candidate } };
       operations.succeed(operationId);
       operations.dismiss(operationId);
-      notifyBottomInfo("已是最新版本", item.name ?? item.workshopId);
+      notifyInfo("已是最新版本", item.name ?? item.workshopId);
       return;
     }
     operations.setStage(operationId, "启动更新任务");
@@ -428,12 +490,12 @@ async function updateHostMod(item: HostModItem) {
     taskStore.receive(response.task);
     operations.succeed(operationId);
     operations.dismiss(operationId);
-    notifyBottomSuccess("已提交 MOD 更新", item.name ?? item.workshopId);
+    notifySuccess("已提交 MOD 更新", item.name ?? item.workshopId);
   } catch (cause) {
     const failure = describeError(cause);
     updateChecks.value = { ...updateChecks.value, [item.workshopId]: { status: "failed", message: failure.message, candidate: null } };
     operations.fail(operationId, failure);
-    notifyBottomError("MOD 更新失败", failure.message);
+    notifyError("MOD 更新失败", failure.message);
   } finally {
     addingWorkshopId.value = null;
   }
@@ -530,8 +592,8 @@ async function confirmSync() {
     syncBusy.value = false;
     syncProgress.value = "";
   }
-  if (syncErrors.value.length) notifyBottomError("同步未全部完成", `${done}/${entries.length} 个专服已同步`);
-  else notifyBottomSuccess("期望版本已同步", `${done} 个专服`);
+  if (syncErrors.value.length) notifyError("同步未全部完成", `${done}/${entries.length} 个专服已同步`);
+  else notifySuccess("期望版本已同步", `${done} 个专服`);
 }
 
 async function cancelPrepare() {
@@ -544,11 +606,11 @@ async function cancelPrepare() {
       target: hostTarget, expectedRecordVersion: connection.recordVersion, operationId: current.operationId });
     taskStore.receive(response.task);
     cancelMessage.value = "取消请求已提交，等待任务安全结束。";
-    notifyBottomInfo("已提交取消请求");
+    notifyInfo("已提交取消请求");
   } catch (cause) {
     const failure = describeError(cause);
     mutationError.value = failure.message;
-    notifyBottomError("取消任务失败", failure.message);
+    notifyError("取消任务失败", failure.message);
   } finally {
     cancelBusy.value = false;
   }
@@ -568,11 +630,11 @@ async function remove() {
     if (response.requestId !== requestId) throw new Error("主机 MOD 删除响应身份不匹配");
     deleteTarget.value = null;
     await refresh();
-    notifyBottomSuccess("主机 MOD 版本已删除", item.name ?? item.workshopId);
+    notifySuccess("主机 MOD 版本已删除", item.name ?? item.workshopId);
   } catch (cause) {
     const failure = describeError(cause);
     mutationError.value = failure.message;
-    notifyBottomError("删除主机 MOD 失败", failure.message);
+    notifyError("删除主机 MOD 失败", failure.message);
   } finally {
     deleteBusy.value = false;
   }
@@ -582,18 +644,18 @@ watch(task, async (next, previous) => {
   if (!next || next.status === "queued" || next.status === "running") return;
   if (previous?.taskId === next.taskId && previous.status === next.status) return;
   if (next.status === "failed" || next.status === "interrupted") {
-    notifyBottomError("主机 MOD 任务未完成", next.error?.message ?? "任务未完成");
+    notifyError("主机 MOD 任务未完成", next.error?.message ?? "任务未完成");
     return;
   }
   if (next.status === "cancelled") {
-    notifyBottomInfo("主机 MOD 任务已取消");
+    notifyInfo("主机 MOD 任务已取消");
     return;
   }
   if (next.status !== "succeeded") return;
   addOpen.value = false;
   candidates.value = [];
   updateChecks.value = {};
-  notifyBottomSuccess("主机 MOD 操作完成");
+  notifySuccess("主机 MOD 操作完成");
   await refresh();
 }, { flush: "sync" });
 
@@ -620,23 +682,23 @@ watch(collectionInput, () => { invalidateQuery(); if (addMode.value === 'collect
 const candidateColumns = computed<DataTableColumns<WorkshopItem>>(() => {
   void items.value;
   void collectionSelection.value;
+  void manualSelection.value;
   void addingWorkshopId.value;
   void workspace.preview.value;
+  void hostModBatch.state.running;
   const collection = addMode.value === "collection";
   const columns: DataTableColumns<WorkshopItem> = [];
-  if (collection) {
-    columns.push({
-      title: "",
-      key: "select",
-      width: 34,
-      render: item => h("input", {
-        type: "checkbox",
-        checked: collectionSelection.value.has(item.workshopId),
-        disabled: item.result !== 1 || isHostModPresent(item),
-        onChange: () => toggleCollectionItem(item.workshopId),
-      }),
-    });
-  }
+  columns.push({
+    title: "",
+    key: "select",
+    width: 34,
+    render: item => h("input", {
+      type: "checkbox",
+      checked: (collection ? collectionSelection.value : manualSelection.value).has(item.workshopId),
+      disabled: item.result !== 1 || isHostModPresent(item) || (!collection && hostModBatch.state.running),
+      onChange: () => collection ? toggleCollectionItem(item.workshopId) : toggleManualItem(item.workshopId),
+    }),
+  });
   columns.push(
     {
       title: "图片",
@@ -705,11 +767,9 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
         <NButton type="primary" :disabled="!target || workspace.preview.value" @click="openAdd"><template #icon><Plus :size="16"/></template>添加 MOD</NButton>
       </template>
     </PageHeader>
-    <div v-if="error" class="environment-error" role="alert">
-      <strong>{{ error.message }}</strong>
-      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
-    </div>
-    <div v-if="mutationError" class="environment-error" role="alert"><strong>{{ mutationError }}</strong></div>
+    <PreviewNotice/>
+    <ErrorNotice :error="error"/>
+    <ErrorNotice :error="mutationError"/>
 
     <LoadingState v-if="loading && !items.length" description="正在读取主机 MOD 库"/>
     <div v-else-if="!items.length" class="empty-state">
@@ -736,13 +796,13 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
         </div>
       </article>
     </div>
-<FloatingTask v-if="task" label="主机 MOD">
-    <TaskPanel v-if="task" title="准备主机 MOD" :status-label="taskStatusLabel" :stage-label="stageLabel(task.stage)" :tone="taskTone"
-      :queue-position="task.queuePosition" :error="task.error"
-      :cancellable="!!task.cancelAllowed && ['queued','running'].includes(task.status)" :busy="cancelBusy" @cancel="cancelPrepare">
-      <span v-if="task.status === 'succeeded' && task.result?.autoCleanupError" class="muted-text">内容已固定 · 旧版本清理未完成，下次更新会重试</span>
-      <span v-else-if="task.status === 'succeeded' && task.result?.autoCleanupDeleted" class="muted-text">内容已固定，可供所有专服选择 · 已自动清理 {{ task.result.autoCleanupDeleted }} 个旧版本</span>
-      <span v-else-if="task.status === 'succeeded'" class="muted-text">内容已固定，可供所有专服选择</span>
+<FloatingTask v-if="visibleTask" label="主机 MOD" :tone="dockTone" :summary="dockSummary" :progress="dockProgress" :dismissible="dockDismissible" @dismiss="dismissDock">
+    <TaskPanel v-if="visibleTask" title="准备主机 MOD" dock :status-label="taskStatusLabel" :stage-label="stageLabel(visibleTask.stage)" :tone="taskTone"
+      :queue-position="visibleTask.queuePosition" :error="visibleTask.error"
+      :cancellable="!!visibleTask.cancelAllowed && ['queued','running'].includes(visibleTask.status)" :busy="cancelBusy" @cancel="cancelPrepare">
+      <span v-if="visibleTask.status === 'succeeded' && visibleTask.result?.autoCleanupError" class="muted-text">内容已固定 · 旧版本清理未完成，下次更新会重试</span>
+      <span v-else-if="visibleTask.status === 'succeeded' && visibleTask.result?.autoCleanupDeleted" class="muted-text">内容已固定，可供所有专服选择 · 已自动清理 {{ visibleTask.result.autoCleanupDeleted }} 个旧版本</span>
+      <span v-else-if="visibleTask.status === 'succeeded'" class="muted-text">内容已固定，可供所有专服选择</span>
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
 </FloatingTask>
@@ -759,7 +819,7 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
         <label for="host-mod-collection">Steam 合集链接或 ID</label>
         <NInput v-model:value="collectionInput" placeholder="https://steamcommunity.com/sharedfiles/filedetails/?id=..." :input-props="{ id: 'host-mod-collection' }" @keydown.enter="loadCollection"/>
       </div>
-      <div v-if="queryError" class="error-strip" role="alert">{{ queryError }}</div>
+      <ErrorNotice :error="queryError"/>
       <div v-if="queryBusy" class="muted-text" role="status">{{ addMode === 'collection' ? "正在读取合集…" : "正在查询 Workshop…" }}</div>
       <template v-else-if="candidates.length">
         <div v-if="addMode === 'collection'" class="collection-toolbar">
@@ -769,6 +829,13 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
             <span class="muted-text">已选 {{ collectionSelection.size }} / 50</span>
           </div>
         </div>
+        <div v-else class="collection-toolbar">
+          <div><strong>查询结果</strong><span class="muted-text">{{ candidates.length }} 项</span></div>
+          <div class="collection-selection">
+            <NButton text size="small" :disabled="!selectableCandidates.length || hostModBatch.state.running" @click="toggleAllManualItems">{{ allManualSelected ? "取消全选" : "全选可添加" }}</NButton>
+            <span class="muted-text">已选 {{ manualSelection.size }}</span>
+          </div>
+        </div>
         <div class="table-wrap">
           <NDataTable :columns="candidateColumns" :data="candidates" :bordered="false" :single-line="true" size="medium" :row-key="candidateRowKey"/>
         </div>
@@ -776,8 +843,9 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
 
       <template #footer>
         <NButton @click="addOpen = false">关闭</NButton>
-        <NButton v-if="addMode === 'manual'" type="primary" :disabled="queryBusy" @click="query">{{ queryBusy ? "查询中…" : "查询" }}</NButton>
+        <NButton v-if="addMode === 'manual'" :type="candidates.length ? 'default' : 'primary'" :disabled="queryBusy" @click="query">{{ queryBusy ? "查询中…" : "查询" }}</NButton>
         <NButton v-else :disabled="queryBusy" @click="loadCollection">{{ queryBusy ? "读取中…" : "读取合集" }}</NButton>
+        <NButton v-if="addMode === 'manual'" type="primary" :disabled="queryBusy || hostModBatch.state.running || !selectedManualItems.length" @click="addSelectedCandidates">{{ hostModBatch.state.running ? "添加中…" : `添加所选${selectedManualItems.length ? ` (${selectedManualItems.length})` : ""}` }}</NButton>
         <NButton v-if="addMode === 'collection'" type="primary" :disabled="queryBusy || importingCollection || !selectedCollectionItems.length" @click="importCollection">{{ importingCollection ? "导入中…" : `导入所选${selectedCollectionItems.length ? ` (${selectedCollectionItems.length})` : ""}` }}</NButton>
       </template>
     </AppDialog>

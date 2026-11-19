@@ -9,13 +9,15 @@ import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import IconButton from "../components/IconButton.vue";
 import TaskPanel from "../components/TaskPanel.vue";
+import ErrorNotice from "../components/ErrorNotice.vue";
 import DownloadProgressNotice from "../components/DownloadProgressNotice.vue";
 import { listHostMods } from "../api/hostMods";
 import { notification } from "../naive/notify";
 import { cancelInstanceBackup, cancelInstanceRestore, createInstanceBackup, deleteInstanceBackup, downloadInstanceBackup, getBackupDownloadTask, importInstanceBackup, listBackupDownloadTasks, listInstanceBackupTasks, listInstanceBackups, listInstanceRestoreTasks, listInstances, pickBackupDownloadPath, pickBackupImportPath, previewInstanceBackup, restoreInstanceBackup, updateInstanceBackupNote, type BackupCaptureMode, type BackupDownloadResponse, type BackupPreviewResponse, type BackupSummary } from "../api/instances";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
-import { describeError } from "../lib/commandError";
+import { describeError, type UserError } from "../lib/commandError";
+import { inSession } from "../lib/session";
 import { formatBytes } from "../lib/environmentView";
 import { useTasks } from "../composables/useTasks";
 import type { TaskSnapshot } from "../types/contracts";
@@ -36,7 +38,7 @@ const preview = computed(() => mode.value ? previews.value[mode.value] : null);
 const loading = ref(false);
 const contextLoading = ref(false);
 const previewLoading = ref(false);
-const error = ref("");
+const error = ref<UserError | string | null>(null);
 const restoreError = ref("");
 const deleteError = ref("");
 const createBusy = ref(false);
@@ -45,8 +47,22 @@ const activeTask = computed<TaskSnapshot | null>(() => {
   if (!key) return null;
   const tasks = taskStore.tasks.value.filter(task => taskBelongsHere(task, key))
     .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
-  return tasks.find(task => ["queued", "running"].includes(task.status)) ?? tasks[0] ?? null;
+  return tasks.find(task => ["queued", "running"].includes(task.status))
+    ?? tasks.find(task => inSession(task.createdAt)) ?? null;
 });
+const dismissedTaskId = ref<string | null>(null);
+const visibleActiveTask = computed<TaskSnapshot | null>(() =>
+  activeTask.value && activeTask.value.taskId !== dismissedTaskId.value ? activeTask.value : null);
+const activeTaskPercent = computed(() => {
+  const progress = activeTask.value?.progress;
+  return progress?.kind === "determinate" && progress.total > 0
+    ? Math.round(progress.completed * 100 / progress.total) : null;
+});
+const activeTaskDismissible = computed(() => !!activeTask.value
+  && ["succeeded", "failed", "cancelled", "interrupted"].includes(activeTask.value.status));
+function dismissActiveTask() {
+  if (activeTask.value) dismissedTaskId.value = activeTask.value.taskId;
+}
 const restoreBusy = ref(false);
 const restoreTarget = ref<BackupSummary | null>(null);
 const restoreModWarnings = ref<string[]>([]);
@@ -125,7 +141,7 @@ async function refreshInstanceSummaries() {
     }
     workspace.commitInstances(response);
   } catch (cause) {
-    if (ticket === summarySequence && requestEpoch === epoch) error.value = describeError(cause).message;
+    if (ticket === summarySequence && requestEpoch === epoch) error.value = describeError(cause);
   } finally {
     if (ticket === summarySequence && requestEpoch === epoch) contextLoading.value = false;
   }
@@ -194,7 +210,7 @@ async function refresh() {
       }
     }
   } catch (cause) {
-    if (isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) error.value = describeError(cause).message;
+    if (isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) error.value = describeError(cause);
   } finally {
     if (isCurrent("list", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) loading.value = false;
   }
@@ -223,7 +239,7 @@ async function inspectMode(captureMode: BackupCaptureMode) {
     }
     previews.value = { ...previews.value, [captureMode]: response };
   } catch (cause) {
-    if (isCurrent("preview", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) error.value = describeError(cause).message;
+    if (isCurrent("preview", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) error.value = describeError(cause);
   } finally {
     if (isCurrent("preview", ticket, requestEpoch, requestId, connection.serverId, connection.recordVersion, targetKey)) previewLoading.value = false;
   }
@@ -342,11 +358,11 @@ async function runDownload(backupId:string, operationId:string, destination:stri
     window.setTimeout(close, 3500);
   } catch (cause) {
     stopPolling();
-    const message = describeError(cause).message;
+    const failure = describeError(cause);
     progress.status = "interrupted";
-    progress.error = message;
+    progress.error = failure.message;
     if (requestEpoch === epoch && targetKey.value === requestKey && server.value?.recordVersion === recordVersion) {
-      error.value = message;
+      error.value = failure;
     } else {
       close();
     }
@@ -393,7 +409,7 @@ async function runImport(path: string, operationId: string, recordVersion: numbe
     await refresh();
   } catch (cause) {
     if (requestEpoch === epoch && targetKey.value === requestKey) {
-      error.value = describeError(cause).message;
+      error.value = describeError(cause);
       importTask.value = { path, operationId, status: "failed" };
     }
   }
@@ -542,7 +558,7 @@ async function cancelActiveTask() {
     taskStore.receive(response.task);
     cancelMessage.value = "取消请求已提交，等待任务安全结束。";
   } catch (cause) {
-    error.value = describeError(cause).message;
+    error.value = describeError(cause);
   } finally {
     cancelBusy.value = false;
   }
@@ -608,7 +624,7 @@ async function createBackup() {
     previews.value = { ...previews.value, [captureMode]: null };
   } catch (cause) {
     if (target.value && `${target.value.serverId}:${target.value.hostId}:${target.value.instanceId}` === targetKey) {
-      error.value = describeError(cause).message;
+      error.value = describeError(cause);
       createBusy.value = false;
     }
   }
@@ -864,7 +880,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <div v-if="error" class="error-strip" role="alert">{{ error }}</div>
+    <ErrorNotice :error="error"/>
     <div class="table-wrap">
       <NDataTable :columns="columns" :data="tableItems" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="pageLoading">
         <template #empty><span class="muted-text">暂无备份</span></template>
@@ -877,15 +893,15 @@ const rowKey = (item: BackupSummary) => item.backupId;
         <NButton v-if="importTask.status === 'failed'" size="small" :disabled="workspace.preview.value" @click="retryImport">重试导入</NButton>
       </div>
     </section>
-<FloatingTask v-if="activeTask" label="备份任务">
-    <TaskPanel v-if="activeTask" :title="activeTask.operation === 'backupRestore' ? '恢复备份' : '创建备份'"
-      :status-label="activeTaskStatusLabel(activeTask)" :stage-label="activeTaskStageLabel(activeTask)" :tone="activeTaskTone"
-      :queue-position="activeTask.queuePosition" :error="activeTask.error"
-      :cancellable="['backupCreate','backupRestore'].includes(activeTask.operation) && !!activeTask.cancelAllowed && ['queued','running'].includes(activeTask.status)"
-      :cancel-label="activeTask.operation === 'backupRestore' ? '取消恢复' : '取消备份'" :busy="cancelBusy" @cancel="cancelActiveTask">
-      <span v-if="activeTask.result?.backupId" class="mono muted-text">{{ activeTask.result.backupId }}</span>
-      <span v-if="activeTask.error" class="backup-warning">{{ taskErrorLabel(activeTask.error.code, activeTask.stage, activeTask.operation, activeTask.error.details) }}</span>
-      <span v-if="activeTask.result?.modsWarnings?.length" class="backup-warning">{{ activeTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}。缺少 MOD 时世界可能崩溃。</span>
+<FloatingTask v-if="visibleActiveTask" label="备份任务" :tone="activeTaskTone" :summary="visibleActiveTask ? activeTaskStatusLabel(visibleActiveTask) : ''" :progress="activeTaskPercent" :dismissible="activeTaskDismissible" @dismiss="dismissActiveTask">
+    <TaskPanel v-if="visibleActiveTask" dock :title="visibleActiveTask.operation === 'backupRestore' ? '恢复备份' : '创建备份'"
+      :status-label="activeTaskStatusLabel(visibleActiveTask)" :stage-label="activeTaskStageLabel(visibleActiveTask)" :tone="activeTaskTone"
+      :queue-position="visibleActiveTask.queuePosition" :error="visibleActiveTask.error"
+      :cancellable="['backupCreate','backupRestore'].includes(visibleActiveTask.operation) && !!visibleActiveTask.cancelAllowed && ['queued','running'].includes(visibleActiveTask.status)"
+      :cancel-label="visibleActiveTask.operation === 'backupRestore' ? '取消恢复' : '取消备份'" :busy="cancelBusy" @cancel="cancelActiveTask">
+      <span v-if="visibleActiveTask.result?.backupId" class="mono muted-text">{{ visibleActiveTask.result.backupId }}</span>
+      <span v-if="visibleActiveTask.error" class="backup-warning">{{ taskErrorLabel(visibleActiveTask.error.code, visibleActiveTask.stage, visibleActiveTask.operation, visibleActiveTask.error.details) }}</span>
+      <span v-if="visibleActiveTask.result?.modsWarnings?.length" class="backup-warning">{{ visibleActiveTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}。缺少 MOD 时世界可能崩溃。</span>
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
 </FloatingTask>

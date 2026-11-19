@@ -15,6 +15,7 @@ const props = withDefaults(defineProps<{
   cancellable?: boolean;
   cancelLabel?: string;
   busy?: boolean;
+  dock?: boolean;
 }>(), {
   tone: "running",
   queuePosition: null,
@@ -23,6 +24,7 @@ const props = withDefaults(defineProps<{
   cancellable: false,
   cancelLabel: "取消任务",
   busy: false,
+  dock: false,
 });
 defineEmits<{ cancel: [] }>();
 </script>
@@ -31,7 +33,7 @@ defineEmits<{ cancel: [] }>();
   <section class="task-panel" :class="`tone-${props.tone}`" aria-live="polite">
     <span class="task-panel-marker" aria-hidden="true"/>
     <div class="task-panel-copy">
-      <span class="task-panel-kicker">任务</span>
+      <span v-if="!props.dock" class="task-panel-kicker">任务</span>
       <strong class="task-panel-title">{{ props.title }}</strong>
       <p class="task-panel-stage">
         {{ props.stageLabel }}
@@ -44,7 +46,7 @@ defineEmits<{ cancel: [] }>();
       <slot/>
     </div>
     <div class="task-panel-side">
-      <span class="task-panel-status">{{ props.statusLabel }}</span>
+      <span v-if="!props.dock" class="task-panel-status">{{ props.statusLabel }}</span>
       <span v-if="props.progress" class="task-panel-progress mono">{{ props.progress }}</span>
       <NButton v-if="props.cancellable" size="small" :disabled="props.busy" @click="$emit('cancel')">
         {{ props.busy ? "提交中…" : props.cancelLabel }}

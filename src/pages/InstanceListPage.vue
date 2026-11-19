@@ -2,7 +2,8 @@
 import { computed, h, ref, watch } from "vue";
 import { Plus, RefreshCw, ArrowRight, ServerCog, Trash2, AlertTriangle } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
-import { NButton, NDataTable, NInput, NModal, type DataTableColumns } from "naive-ui";
+import { NButton, NDataTable, NInput, type DataTableColumns } from "naive-ui";
+import AppDialog from "../components/AppDialog.vue";
 import InstanceCreateDialog from "../components/InstanceCreateDialog.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
@@ -175,7 +176,7 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
       </NDataTable></div>
     </template>
     <div v-else-if="!error" class="empty-state"><ServerCog :size="28"/><h2>尚未读取专服</h2></div>
-    <NModal :show="!!deleteTarget" preset="card" :bordered="false" :closable="!deleteBusy" :mask-closable="!deleteBusy" :close-on-esc="!deleteBusy" title="删除专服" aria-label="删除专服" :style="{ width: 'min(680px, calc(100vw - 48px))' }" @update:show="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
+    <AppDialog :open="!!deleteTarget" title="删除专服" :dismissible="!deleteBusy" @update:open="value=>{if(!value&&!deleteBusy){deleteTarget=null;deletePlan=null}}">
       <div v-if="deleteTarget" class="form-stack">
         <p>专服：<strong>{{deleteTarget.displayName}}</strong></p>
         <p v-if="deletePreviewBusy" role="status">正在检查删除条件…</p>
@@ -203,7 +204,7 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
         </div>
       </div>
       <template #footer><div class="dialog-footer-actions"><NButton :disabled="deleteBusy" @click="deleteTarget=null;deletePlan=null">取消</NButton><NButton v-if="deletePlan?.allowed" type="error" ghost :disabled="deleteBusy || deleteName!==deleteTarget?.displayName" @click="deleteSelectedInstance">{{deleteBusy?'正在删除…':'确认永久删除'}}</NButton></div></template>
-    </NModal>
+    </AppDialog>
   </div>
 </template>
 

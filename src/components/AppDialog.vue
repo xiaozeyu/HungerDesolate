@@ -8,7 +8,8 @@ const props = withDefaults(defineProps<{
   description?: string;
   size?: "sm" | "md" | "lg";
   eyebrow?: string;
-}>(), { size: "md" });
+  dismissible?: boolean;
+}>(), { size: "md", dismissible: true });
 const emit = defineEmits<{ "update:open": [value: boolean] }>();
 
 const width = computed(() => props.size === "sm"
@@ -19,7 +20,7 @@ const width = computed(() => props.size === "sm"
 </script>
 
 <template>
-  <NModal :show="open" preset="card" :bordered="false" :closable="true" :aria-label="title" :style="{ width }"
+  <NModal :show="open" preset="card" :bordered="false" :closable="dismissible" :mask-closable="dismissible" :close-on-esc="dismissible" :aria-label="title" :style="{ width }"
     @update:show="emit('update:open', $event)">
     <template #header>
       <div v-if="eyebrow" class="eyebrow">{{ eyebrow }}</div>

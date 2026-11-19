@@ -12,10 +12,16 @@ defineEmits<{ click: [] }>();
 <template>
   <NTooltip>
     <template #trigger>
-      <NButton quaternary circle class="app-icon-button" :class="{ 'app-icon-button--danger': tone === 'danger' }" :aria-label="label" :disabled="disabled" @click="$emit('click')">
-        <slot/>
-      </NButton>
+      <span class="app-icon-button-wrap">
+        <NButton quaternary circle class="app-icon-button" :class="{ 'app-icon-button--danger': tone === 'danger' }" :aria-label="label" :disabled="disabled" @click="$emit('click')">
+          <slot/>
+        </NButton>
+      </span>
     </template>
     {{ label }}
   </NTooltip>
 </template>
+
+<style scoped>
+.app-icon-button-wrap { display: inline-flex; }
+</style>

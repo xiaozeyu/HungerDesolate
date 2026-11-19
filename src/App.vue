@@ -16,7 +16,7 @@ import { getBootstrapSnapshot } from "./api/bootstrap";
 import IconButton from "./components/IconButton.vue";
 import TaskDrawer from "./components/TaskDrawer.vue";
 import ConnectionSettingsDialog from "./components/ConnectionSettingsDialog.vue";
-import { elapsedLabel, operationKindLabel, operationTargetLabel, stageLabel, taskOperationLabel, taskTargetLabel } from "./lib/operationView";
+import { operationKindLabel, operationTargetLabel, taskOperationLabel, taskTargetLabel } from "./lib/operationView";
 import { refreshActiveTasks } from "./lib/taskRefresh";
 import { refreshBuildTasks } from "./lib/buildRefresh";
 import type { TaskSnapshot } from "./types/contracts";
@@ -47,18 +47,11 @@ const instancePages = [
 ];
 function hostRoute(page: string) { void router.push(activeServerId.value ? `/hosts/${activeServerId.value}/${page}` : "/hosts"); }
 
-const now = ref(Date.now());
 const runningOperation = computed(() => operations.running.value[0] ?? null);
 const runningTask = computed(() => taskStore.tasks.value
     .filter(task => ["queued", "running"].includes(task.status))
     .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0))[0] ?? null);
 const runningBuild = computed(() => buildTasks.all.value.find(entry => entry.status.status === "building") ?? null);
-const runningBuildStage = computed(() => {
-    const progress = runningBuild.value?.status.progress;
-    if (!progress) return "构建中";
-    const stage = progress.percent != null ? `${progress.currentStep} ${progress.percent}%` : progress.currentStep;
-    return progress.stepPercent != null ? `${stage} · 下载 ${progress.stepPercent}%` : stage;
-});
 const activityCount = computed(() => operations.running.value.length
     + taskStore.tasks.value.filter(task => ["queued", "running"].includes(task.status)).length
     + (runningBuild.value ? 1 : 0));
@@ -66,24 +59,13 @@ const activityTitle = computed(() => runningOperation.value
     ? operationKindLabel(runningOperation.value.kind)
     : runningTask.value ? taskOperationLabel(runningTask.value.operation)
     : runningBuild.value ? "构建 DST 镜像" : "");
-const activityStage = computed(() => runningOperation.value
-    ? stageLabel(runningOperation.value.stage)
-    : runningTask.value ? stageLabel(runningTask.value.stage)
-    : runningBuild.value ? runningBuildStage.value : "");
 const activityTarget = computed(() => runningOperation.value
     ? operationTargetLabel(runningOperation.value.target, workspace.servers.value)
     : runningTask.value ? taskTargetLabel(runningTask.value, workspace.servers.value)
     : runningBuild.value ? operationTargetLabel({ serverId: runningBuild.value.serverId, hostId: runningBuild.value.hostId }, workspace.servers.value) : "");
-const activityStartedAt = computed(() => runningOperation.value?.startedAt
-    ?? (runningTask.value ? Date.parse(runningTask.value.createdAt) || now.value
-      : runningBuild.value ? runningBuild.value.startedAt : null));
-const activityElapsed = computed(() => activityStartedAt.value
-    ? elapsedLabel(activityStartedAt.value, null, now.value) : "");
-
 let unlisten: UnlistenFn | undefined;
 let disposed = false;
 let taskPoller: ReturnType<typeof setInterval> | undefined;
-let clockTimer: ReturnType<typeof setInterval> | undefined;
 function pollTasks() {
     void refreshActiveTasks(taskStore.tasks.value, workspace.servers.value, task => taskStore.receive(task));
     void refreshBuildTasks(workspace.servers.value);
@@ -106,13 +88,11 @@ onMounted(async () => {
     if (disposed) return;
     pollTasks();
     taskPoller = setInterval(pollTasks, 2500);
-    clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
 });
 onUnmounted(() => {
     disposed = true;
     unlisten?.();
     if (taskPoller) clearInterval(taskPoller);
-    if (clockTimer) clearInterval(clockTimer);
 });
 </script>
 
@@ -139,24 +119,24 @@ onUnmounted(() => {
           <div class="nav-group-label">
             主机
           </div>
-          <button class="nav-item" :class="{active:route.path==='/hosts'}" @click="router.push('/hosts')">
+          <button class="nav-item" :class="{active:route.path==='/hosts'}" :aria-current="route.path==='/hosts' ? 'page' : undefined" @click="router.push('/hosts')">
             <Server :size="17"/>
             主机列表
           </button>
           <template v-if="activeServer">
-            <button class="nav-item" :class="{active:route.path.endsWith('/instances')}" @click="hostRoute('instances')">
+            <button class="nav-item" :class="{active:route.path.endsWith('/instances')}" :aria-current="route.path.endsWith('/instances') ? 'page' : undefined" @click="hostRoute('instances')">
               <List :size="17"/>
               专服列表
             </button>
-            <button class="nav-item" :class="{active:route.path.endsWith('/mods')}" @click="hostRoute('mods')">
+            <button class="nav-item" :class="{active:route.path.endsWith('/mods')}" :aria-current="route.path.endsWith('/mods') ? 'page' : undefined" @click="hostRoute('mods')">
               <Wrench :size="17"/>
               MOD 库
             </button>
-            <button class="nav-item" :class="{active:route.path.endsWith('/releases')}" @click="hostRoute('releases')">
+            <button class="nav-item" :class="{active:route.path.endsWith('/releases')}" :aria-current="route.path.endsWith('/releases') ? 'page' : undefined" @click="hostRoute('releases')">
               <Package :size="17"/>
               Release 管理
             </button>
-            <button class="nav-item" :class="{active:route.path.endsWith('/environment')}" @click="hostRoute('environment')">
+            <button class="nav-item" :class="{active:route.path.endsWith('/environment')}" :aria-current="route.path.endsWith('/environment') ? 'page' : undefined" @click="hostRoute('environment')">
               <Cpu :size="17"/>
               主机环境
             </button>
@@ -170,7 +150,7 @@ onUnmounted(() => {
           <div class="nav-group-label current-instance">
             当前：{{activeInstance?.displayName ?? '未知专服'}}
           </div>
-          <button v-for="page in instancePages" :key="page.name" class="nav-item" :class="{active:route.path.endsWith('/'+page.name)}" @click="router.push(`/hosts/${activeServerId}/instances/${activeInstanceId}/${page.name}`)">
+          <button v-for="page in instancePages" :key="page.name" class="nav-item" :class="{active:route.path.endsWith('/'+page.name)}" :aria-current="route.path.endsWith('/'+page.name) ? 'page' : undefined" @click="router.push(`/hosts/${activeServerId}/instances/${activeInstanceId}/${page.name}`)">
             <component :is="page.icon" :size="17"/>
             {{page.label}}
           </button>
@@ -178,7 +158,7 @@ onUnmounted(() => {
       </nav>
       <div class="sidebar-spacer"/>
       <div class="sidebar-footer">
-        <button class="nav-item" :class="{active:route.path==='/settings'}" @click="router.push('/settings')">
+        <button class="nav-item" :class="{active:route.path==='/settings'}" :aria-current="route.path==='/settings' ? 'page' : undefined" @click="router.push('/settings')">
           <Settings :size="17"/>
           应用设置
         </button>
@@ -187,7 +167,7 @@ onUnmounted(() => {
             版本
           </span>
           <span>
-            {{ appVersion }} Bate
+            {{ appVersion }} Beta
           </span>
         </div>
       </div>
@@ -214,9 +194,7 @@ onUnmounted(() => {
           <template v-if="runningOperation || runningTask || runningBuild">
             <span class="status-dot warning"></span>
             <strong>{{activityTitle}}</strong>
-            <span>{{activityStage}}</span>
             <span class="muted-text">{{activityTarget}}</span>
-            <span class="mono muted-text">{{activityElapsed}}</span>
           </template>
         </div>
         <NButton text size="small" class="operation-task-button" @click="openTaskDrawer">

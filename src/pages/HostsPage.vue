@@ -7,6 +7,7 @@ import { NButton, NDataTable, type DataTableColumns } from "naive-ui";
 import { notifySuccess } from "../naive/notify";
 import { describeError } from "../lib/commandError";
 import PageHeader from "../components/PageHeader.vue";
+import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import IconButton from "../components/IconButton.vue";
 import AppDialog from "../components/AppDialog.vue";
@@ -174,6 +175,7 @@ const columns = computed<DataTableColumns<ServerSummary>>(() => {
         </span>
       </template>
     </PageHeader>
+    <PreviewNotice/>
     <CredentialCleanupNotice/>
     <div v-if="workspace.error.value" class="error-strip" role="alert">{{workspace.error.value}}</div>
     <div v-if="connection.error.value" class="error-strip" role="alert">

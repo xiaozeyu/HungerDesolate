@@ -128,7 +128,7 @@ interface MutationResult<T> {
 
 `lifecycle`：creating/ready/createFailed/deleting/deleteFailed/retired。`runtimeStatus`：unknown/stopped/starting/running/degraded/stopping/failed。创建生命周期与运行状态分开。
 
-`verificationLevel`：processOnly/localVerified/networkVerified。容器 running 仅能证明进程层，不等价玩家可进入。玩家数不可确认时 `null` 显示“未知”；停止时显示“—”。运行采集优先从通过主机/实例/Compose 标签核实的分片容器所属 `<composeProject>_instance` 网络 IPv4 地址读取 Steam A2S 人数，失败或缺少该地址时回退本机已发布查询端口。网络地址仅接受该容器 Docker inspect 返回的私有 IPv4，不取请求中的地址、不扫描其他网络；`A2S_PLAYER` 超时、挑战失败或响应无效时继续独立尝试 `A2S_INFO`，每次查询受采集总时限约束。仅所有启用分片均成功且合计不超过人数上限时返回总人数（包括 0）；部分失败保持 `players=null` 并返回 `PLAYERS_QUERY_UNAVAILABLE`，不把部分分片人数当总数。启用洞穴但洞穴失败时专服为 degraded，不能因为 Master running 就显示全部正常。
+`verificationLevel`：processOnly/localVerified/networkVerified。容器 running 仅能证明进程层，不等价玩家可进入。玩家数不可确认时 `null` 显示“未知”；停止时显示“—”。运行采集优先从通过主机/实例/Compose 标签核实的分片容器所属 `<composeProject>_instance` 网络 IPv4 地址读取 Steam A2S 人数，失败或缺少该地址时回退本机已发布查询端口。网络地址仅接受该容器 Docker inspect 返回的私有 IPv4，不取请求中的地址、不扫描其他网络；`A2S_PLAYER` 超时、挑战失败或响应无效时继续独立尝试 `A2S_INFO`，每次查询受采集总时限约束。仅所有启用分片均成功且合计不超过人数上限时返回总人数（包括 0）；部分失败保持 `players=null` 并返回 `PLAYERS_QUERY_UNAVAILABLE`，不把部分分片人数当总数。A2S 整体不可用时回退读取玩家桥接 MOD 的状态：仅当 manifest `playerBridge` 已启用且所有启用分片的状态都在 120 秒内，按 userid 去重后返回人数；桥接不可用仍保持 `players=null`。启用洞穴但洞穴失败时专服为 degraded，不能因为 Master running 就显示全部正常。
 
 Token、服务器密码与分片密钥普通 DTO 只暴露 configured/missing/unknown；不回填明文。Token 与服务器密码更换请求分别使用 `tokenChange`、`serverPasswordChange`，形状为 `{ action: "replace", value: string }` 或 `{ action: "keep" }`；敏感输入只保留在组件内存并经专用命令写入远端受保护文件，禁止进入通用草稿、任务摘要、日志或诊断。首期不提供删除凭据按钮；更换为空白保持已配置值不变。
 

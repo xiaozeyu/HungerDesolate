@@ -18,6 +18,10 @@ ROOT = Path("/var/lib/famine-hub")
 SERVER_BINARY = "/srv/dst/bin64/dontstarve_dedicated_server_nullrenderer_x64"
 MAX_BYTES = 1024 * 1024
 WAIT_SECONDS = 120
+BRIDGE_STATE_KEY = "hungerhub_bridge_state"
+BRIDGE_HEADER = b"KLEI     1 "
+BRIDGE_MAX_STATE = 256 * 1024
+BRIDGE_STALE_SECONDS = 120
 RUNTIME_UID = 1000
 CURRENT_STAGE = "initialize"
 RELEASE_HELPERS = globals().get("RELEASE_HELPERS", {})
@@ -659,6 +663,77 @@ def _start_locked(request, host_id, instance_id, instance):
     raise Rejected("INSTANCE_START_RUNTIME_NOT_READY", details)
 
 
+def bridge_player_count(instance, manifest):
+    """Count online players from the player bridge state; all enabled shards must be fresh."""
+    bridge = manifest.get("playerBridge")
+    if not isinstance(bridge, dict) or bridge.get("enabled") is not True:
+        return None
+    shards = ["Master"] + (["Caves"] if manifest.get("cavesEnabled") is True else [])
+    now = int(time.time())
+    seen = set()
+    owners = (0, os.geteuid(), RUNTIME_UID)
+    for shard in shards:
+        save = instance / "config" / "Cluster_1" / shard / "save"
+        try:
+            info = save.lstat()
+        except OSError:
+            return None
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid not in owners or info.st_mode & 0o022):
+            return None
+        state_path = save / BRIDGE_STATE_KEY
+        try:
+            file_info = state_path.lstat()
+        except OSError:
+            return None
+        if (not stat.S_ISREG(file_info.st_mode) or file_info.st_nlink != 1
+                or file_info.st_size > BRIDGE_MAX_STATE or file_info.st_uid not in owners):
+            return None
+        try:
+            fd = os.open(state_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            return None
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (file_info.st_dev, file_info.st_ino):
+                return None
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                    or opened.st_size > BRIDGE_MAX_STATE or opened.st_uid not in owners):
+                return None
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(BRIDGE_MAX_STATE + 1)
+        except (OSError, ValueError):
+            return None
+        finally:
+            os.close(fd)
+        if len(raw) > BRIDGE_MAX_STATE or not raw.startswith(BRIDGE_HEADER):
+            return None
+        try:
+            state = json.loads(raw[len(BRIDGE_HEADER):])
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if (not isinstance(state, dict) or state.get("schemaVersion") != 1
+                or state.get("shard") != shard or not isinstance(state.get("players"), list)
+                or len(state["players"]) > 128):
+            return None
+        stamp = state.get("capturedAt")
+        if not isinstance(stamp, str) or len(stamp) > 32 or not stamp.endswith("Z"):
+            return None
+        try:
+            captured = int(datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+                           .replace(tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            return None
+        if now - captured > BRIDGE_STALE_SECONDS:
+            return None
+        for player in state["players"]:
+            user_id = player.get("userId") if isinstance(player, dict) else None
+            if not isinstance(user_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", user_id) is None:
+                return None
+            seen.add(user_id)
+    return len(seen)
+
+
 def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
     """Read-only evidence; never read cached runtime.json or write instance files."""
     instance = ROOT / "instances" / instance_id
@@ -837,6 +912,10 @@ def runtime_snapshot(host_id, instance_id, manifest, containers, releases=None):
             total = sum(counts)
             if total <= (result["maxPlayers"] or 128):
                 result["players"] = total
+        if result["players"] is None:
+            fallback = bridge_player_count(instance, manifest)
+            if fallback is not None and fallback <= (result["maxPlayers"] or 128):
+                result["players"] = fallback
         if result["players"] is None:
             result["warnings"].append("PLAYERS_QUERY_UNAVAILABLE")
     result["warnings"] = sorted(set(result["warnings"]))

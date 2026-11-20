@@ -111,18 +111,17 @@ pub struct ModItem {
     pub version: Option<String>,
 }
 
-fn apply_modinfo(items: &mut [ModItem], sources: &[(String, String)]) {
-    for (workshop_id, source) in sources {
+fn apply_modinfo(items: &mut [ModItem], sources: &[(String, String, String)]) {
+    for (workshop_id, content_digest, source) in sources {
         if source.len() > MAX_MODINFO_SOURCE {
             continue;
         }
         let metadata =
             crate::mod_parser::parse_modinfo(source, &format!("workshop-{workshop_id}"), "zh")
                 .metadata;
-        for item in items
-            .iter_mut()
-            .filter(|item| &item.workshop_id == workshop_id)
-        {
+        for item in items.iter_mut().filter(|item| {
+            &item.workshop_id == workshop_id && &item.content_digest == content_digest
+        }) {
             if let Some(value) = &metadata.name {
                 item.name = Some(value.clone());
             }
@@ -287,7 +286,9 @@ fn run_python(session: &Session, source: &str) -> CommandResult<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or("HOST_MOD_FAILED")
             {
-                "HOST_MOD_IN_USE" => error("HOST_MOD_IN_USE", "该 MOD 版本仍被实例使用，不能删除"),
+                "HOST_MOD_IN_USE" => {
+                    error("HOST_MOD_IN_USE", "该 MOD 版本仍被专服期望引用，不能删除")
+                }
                 "HOST_MOD_FETCH_CAPABILITY_UNAVAILABLE" => error(
                     "HOST_MOD_FETCH_CAPABILITY_UNAVAILABLE",
                     "主机没有包含 SteamCMD Workshop 获取能力的已验证 Release",
@@ -443,7 +444,7 @@ pub fn list(database: &Path, request: ListRequest) -> CommandResult<ListResponse
                 {
                     continue;
                 }
-                let sources: Vec<(String, String)> = info
+                let sources: Vec<(String, String, String)> = info
                     .get("items")
                     .and_then(Value::as_array)
                     .map(|values| {
@@ -452,10 +453,12 @@ pub fn list(database: &Path, request: ListRequest) -> CommandResult<ListResponse
                             .filter_map(|entry| {
                                 let workshop_id =
                                     entry.get("workshopId").and_then(Value::as_str)?;
+                                let content_digest =
+                                    entry.get("contentDigest").and_then(Value::as_str)?;
                                 let encoded = entry.get("source").and_then(Value::as_str)?;
                                 let source =
                                     String::from_utf8(STANDARD.decode(encoded).ok()?).ok()?;
-                                Some((workshop_id.to_string(), source))
+                                Some((workshop_id.to_string(), content_digest.to_string(), source))
                             })
                             .collect()
                     })
@@ -730,9 +733,25 @@ configuration_options = {
 "#;
         let mut items = vec![item(Some("Language"))];
         let id = items[0].workshop_id.clone();
-        apply_modinfo(&mut items, &[(id, source.to_string())]);
+        let digest = items[0].content_digest.clone();
+        apply_modinfo(&mut items, &[(id, digest, source.to_string())]);
         assert_eq!(items[0].name.as_deref(), Some("快捷种植布局"));
         assert_eq!(items[0].author.as_deref(), Some("Code_xu"));
         assert_eq!(items[0].version.as_deref(), Some("1.2.2"));
+    }
+
+    #[test]
+    fn parsed_modinfo_only_applies_to_the_matching_artifact() {
+        let mut older = item(None);
+        older.content_digest = "b".repeat(64);
+        let mut items = vec![older, item(None)];
+        let id = items[0].workshop_id.clone();
+        let digest = items[1].content_digest.clone();
+        apply_modinfo(
+            &mut items,
+            &[(id, digest, "version = \"2.8.26\"".to_string())],
+        );
+        assert_eq!(items[0].version, None);
+        assert_eq!(items[1].version.as_deref(), Some("2.8.26"));
     }
 }

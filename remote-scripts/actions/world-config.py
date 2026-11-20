@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 ROOT = Path("/var/lib/famine-hub")
 MAX_BYTES = 1024 * 1024
 MAX_REVISION = 9007199254740991
+RENDERER_VERSION = 2
 DST_RUNTIME_UID = 1000
 OPTION_SCHEMA = globals().get("OPTION_SCHEMA", [])
 GAME_MODES = {"relaxed", "survival", "endless", "wilderness", "lightsout"}
@@ -588,12 +589,17 @@ def preview_apply(request):
                 option = schema.get(("worldgen", option_key))
                 if option is not None:
                     new_world_options.append({"shard": shard_name, "key": option_key, "label": option["label"]})
+        deployed = deployed_world(instance_id, manifest, schema)
+        deployed_worldgen = deployed["settings"]["worldgen"] if deployed is not None else None
+        worldgen_changed = deployed_worldgen is None or any(
+            deployed_worldgen[shard_name]["worldgenOverrides"] != shard_config["worldgenOverrides"]
+            for shard_name, shard_config in desired["settings"]["worldgen"].items())
         blockers = []
         warnings = []
         if rendered is None:
             blockers.append("WORLD_CONFIG_RENDER_UNSUPPORTED")
-        if world_files and new_world_options:
-            warnings.append("实例已有世界存档；本次世界生成选项只对新世界生效。")
+        if world_files and new_world_options and worldgen_changed:
+            warnings.append("实例已有世界存档；本次世界生成选项只对新世界生效")
         if not token_present:
             blockers.append("WORLD_TOKEN_MISSING")
         instance_root = ROOT / "instances" / instance_id
@@ -708,7 +714,8 @@ def apply_config(request):
             return result
         previous_deployed = deployed_world(instance_id, manifest, schema)
         if (previous_deployed is not None and previous_deployed.get("revision") == desired.get("revision")
-                and previous_deployed.get("digest") == settings_digest):
+                and previous_deployed.get("digest") == settings_digest
+                and previous_deployed.get("rendererVersion") == RENDERER_VERSION):
             result = {"schemaVersion": 1, "requestId": request_id,
                       "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
                       "revision": expected_revision, "activeReleaseId": expected_release_id,
@@ -866,7 +873,7 @@ def apply_config(request):
                 raise
 
         applied = {"schemaVersion": 1, "instanceId": instance_id, "revision": desired["revision"],
-                   "digest": settings_digest, "settings": settings,
+                   "digest": settings_digest, "rendererVersion": RENDERER_VERSION, "settings": settings,
                    "appliedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                    "runtimeVerified": False}
         atomic_json(instance / "deployed-world.json", applied)

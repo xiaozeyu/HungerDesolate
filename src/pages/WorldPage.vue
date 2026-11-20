@@ -50,7 +50,7 @@ const tokenInput = computed({
 const activeView = ref<"basic" | "access" | "world">("basic");
 const worldView = ref<"worldSettings" | "worldgen">("worldSettings");
 const selectedShard = ref<DstWorldShard>("master");
-const activeGroup = ref("misc");
+const activeGroup = ref("");
 const draftVersion = ref(0), pendingOperationId = ref("");
 let epoch = 0, querySequence = 0, latestRequestId = "";
 
@@ -103,8 +103,8 @@ function selectView(view: typeof activeView.value) {
 
 function selectWorldView(view: typeof worldView.value) {
   worldView.value = view;
-  const groups = new Set(visibleWorldOptions(selectedShard.value, view).map((item) => item.group));
-  if (!groups.has(activeGroup.value)) activeGroup.value = groups.values().next().value ?? "";
+  const groups = visibleWorldOptions(selectedShard.value, view).map((item) => item.group);
+  activeGroup.value = groups[0] ?? "";
 }
 
 function selectShard(shard: DstWorldShard) {
@@ -186,9 +186,9 @@ async function refresh() {
       revealedToken.value = "";
       revealedPassword.value = "";
       secretError.value = "";
-      if (useRestored) notifyInfo("草稿已恢复", "已恢复未保存的草稿。");
+      if (useRestored) notifyInfo("草稿已恢复", "已恢复未保存的草稿");
     } else if (response.configRevision !== baseRevision.value) {
-      error.value = { code: "REVISION_CONFLICT", message: "期望配置已被其他操作更新；本地草稿已保留，请比较后重载或重新编辑。", recoverySteps: [], field: null };
+      error.value = { code: "REVISION_CONFLICT", message: "期望配置已被其他操作更新；本地草稿已保留，请比较后重载或重新编辑", recoverySteps: [], field: null };
     }
     tokenStatus.value = response.data.tokenStatus;
     passwordStatus.value = response.data.serverPasswordStatus;
@@ -260,23 +260,23 @@ function validateDraft(): string | null {
 async function save(): Promise<boolean> {
   const instanceTarget = target.value, connection = server.value, currentConfig = data.value;
   if (saving.value) {
-    notifyInfo("保存请求正在处理中", "请等待结果。");
+    notifyInfo("保存请求正在处理中", "请等待结果");
     return false;
   }
   if (!instanceTarget || !connection || !currentConfig) {
-    notifyError("无法保存", "尚未读取到可保存的专服配置，请先刷新。");
+    notifyError("无法保存", "尚未读取到可保存的专服配置，请先刷新");
     return false;
   }
   if (loading.value) {
-    notifyInfo("专服配置仍在读取", "请稍后保存。");
+    notifyInfo("专服配置仍在读取", "请稍后保存");
     return false;
   }
   if (stale.value) {
-    notifyError("配置读取已过期", "请刷新后再保存。");
+    notifyError("配置读取已过期", "请刷新后再保存");
     return false;
   }
   if (workspace.preview.value) {
-    notifyInfo("界面预览数据不能保存", "请在桌面应用中编辑真实专服。");
+    notifyInfo("界面预览数据不能保存", "请在桌面应用中编辑真实专服");
     return false;
   }
   if (!hasChanges.value) {
@@ -471,11 +471,11 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
     </NAlert>
     <LoadingState v-if="loading && !data" description="读取世界配置…"/>
     <NEmpty v-else-if="!target && !workspace.preview.value" class="world-empty" description="无法确定专服">
-      <template #extra><span class="muted-text">返回专服列表后重新进入。</span></template>
+      <template #extra><span class="muted-text">返回专服列表后重新进入</span></template>
     </NEmpty>
     <template v-else>
       <NAlert v-if="stale" type="warning" :bordered="false" show-icon class="world-alert" role="status">
-        显示上次读取的配置；当前结果已过期，保存已停用。
+        显示上次读取的配置；当前结果已过期，保存已停用
       </NAlert>
       <NTabs :value="activeView" type="line" class="world-tabs"
         @update:value="value => selectView(value as 'basic' | 'access' | 'world')">

@@ -76,7 +76,7 @@
 - 实例 MOD Release 使用 `content/322330/<workshopId>` + `appworkshop_322330.acf`；启动以 `-ugc_directory /srv/ugc -skip_update_server_mods` 直接加载预置内容，不再依赖首启下载。
 - 旧实例的 `steamapps/workshop/...` 布局和缺少索引的 Release 会在启动预检迁移/补齐；旧 Compose 自动迁移。
 - 主机库图片在版本变化后更新。
-- 主机 MOD 更新成功后自动清理旧版本：每个 Workshop 保留最新版本，实例/活动 MOD Release/备份引用不删除。
+- 主机 MOD 更新成功后自动清理旧版本：每个 Workshop 保留最新版本；仅实例尚未应用的期望引用会阻止清理，已部署副本、活动 MOD Release 和备份不阻止。
 
 ### 数据与任务
 

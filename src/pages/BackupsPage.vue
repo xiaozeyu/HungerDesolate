@@ -314,7 +314,7 @@ function surfaceInterruptedDownload(task: BackupDownloadResponse) {
   if (!task.destination || shownInterrupted.has(task.operationId)) return;
   shownInterrupted.add(task.operationId);
   const progress = reactive<DownloadNoticeState>({ status: "interrupted", bytesTransferred: task.bytesTransferred ?? 0,
-    sizeBytes: task.sizeBytes ?? null, error: "上次下载未完成，可继续下载。" });
+    sizeBytes: task.sizeBytes ?? null, error: "上次下载未完成，可继续下载" });
   showDownloadNotice(task.operationId, task.destination, progress, () => void retryDownload(task), () => {});
 }
 
@@ -341,10 +341,10 @@ async function runDownload(backupId:string, operationId:string, destination:stri
       if (typeof task.bytesTransferred === "number") progress.bytesTransferred = task.bytesTransferred;
       if (task.status === "interrupted" || task.status === "failed") {
         progress.status = "interrupted";
-        progress.error = "下载中断，可重试。";
+        progress.error = "下载中断，可重试";
       }
     } catch {
-      // 状态文件可能尚未写入，保持当前进度。
+      // 状态文件可能尚未写入，保持当前进度
     }
   }, 800);
   try {
@@ -536,7 +536,7 @@ watch(activeTask, async (next, previous) => {
     const revisionBeforeRestore = revision.value;
     await refreshInstanceSummaries();
     if (revisionBeforeRestore !== null && (revision.value === null || revision.value <= revisionBeforeRestore)) {
-      if (!error.value) error.value = "恢复已完成，但专服新配置版本尚未确认；备份列表未刷新。";
+      if (!error.value) error.value = "恢复已完成，但专服新配置版本尚未确认；备份列表未刷新";
       return;
     }
     return;
@@ -556,7 +556,7 @@ async function cancelActiveTask() {
       ? await cancelInstanceBackup(request)
       : await cancelInstanceRestore(request);
     taskStore.receive(response.task);
-    cancelMessage.value = "取消请求已提交，等待任务安全结束。";
+    cancelMessage.value = "取消请求已提交，等待任务安全结束";
   } catch (cause) {
     error.value = describeError(cause);
   } finally {
@@ -645,28 +645,28 @@ function taskErrorLabel(code: string | null | undefined, stage: string, operatio
   details: Record<string, unknown> = {}) {
   const rollbackSucceeded = details.rollbackSucceeded === true;
   const labels: Record<string, string> = {
-    BACKUP_STOP_FAILED: "无法确认分片全部停止，备份未报告成功。",
+    BACKUP_STOP_FAILED: "无法确认分片全部停止，备份未报告成功",
     BACKUP_RESTART_FAILED: rollbackSucceeded
-      ? "恢复后的专服未能通过启动核验；原部署已回滚。"
-      : "无法确认恢复后的专服启动状态，请检查专服现场。",
-    BACKUP_RECOVERY_REQUIRED: "任务中断后无法自动确认运行状态，请检查专服现场。",
-    BACKUP_ROLLBACK_FAILED: "恢复失败且自动回滚未能完成；请勿重复恢复，先检查专服和恢复现场。",
-    BACKUP_RESTORE_WORKER_FAILED: "恢复 worker 执行失败；请查看错误码和失败阶段。",
-    BACKUP_RESTORE_STAGING_FAILED: "恢复文件准备失败；原部署应保留，请查看错误码和失败阶段。",
-    WORLD_TOKEN_MISSING: "恢复配置没有可用的本机 Klei Token 引用；请在当前世界配置中保存 Token 后重试。",
-    WORLD_SECRET_FILE_INVALID: "本机受保护的 Token 文件缺失或无效；请重新保存 Token 后重试。",
-    WORLD_CONFIG_STATE_INVALID: "当前受保护的凭据引用无效；请重新保存 Token 后重试。",
-    BACKUP_SPACE_INSUFFICIENT: "远端可用空间不足。",
-    BACKUP_SOURCE_CHANGED: "采集期间有文件发生变化，归档未通过校验。",
-    BACKUP_ID_EXISTS: "备份编号已存在，原备份未覆盖。",
-    BACKUP_WORKER_FAILED: "备份任务启动失败，任务现场已保留。",
-    BACKUP_WORKER_NOT_STARTED: "备份 worker 未开始执行，专服未进入备份阶段。请刷新任务状态后重新创建备份。",
-    BACKUP_WORLD_DATA_MISSING: "专服没有可备份的世界存档；请确认世界已生成并至少保存过一次。",
-    BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING: "旧备份缺少配置快照，且当前已应用配置版本不同；恢复已阻止。",
-    BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID: "备份中的已应用配置快照校验失败；恢复已阻止。",
-    MOD_RELEASE_UNAVAILABLE: "主机库中没有可用的 MOD 版本，恢复已停止。",
+      ? "恢复后的专服未能通过启动核验；原部署已回滚"
+      : "无法确认恢复后的专服启动状态，请检查专服现场",
+    BACKUP_RECOVERY_REQUIRED: "任务中断后无法自动确认运行状态，请检查专服现场",
+    BACKUP_ROLLBACK_FAILED: "恢复失败且自动回滚未能完成；请勿重复恢复，先检查专服和恢复现场",
+    BACKUP_RESTORE_WORKER_FAILED: "恢复 worker 执行失败；请查看错误码和失败阶段",
+    BACKUP_RESTORE_STAGING_FAILED: "恢复文件准备失败；原部署应保留，请查看错误码和失败阶段",
+    WORLD_TOKEN_MISSING: "恢复配置没有可用的本机 Klei Token 引用；请在当前世界配置中保存 Token 后重试",
+    WORLD_SECRET_FILE_INVALID: "本机受保护的 Token 文件缺失或无效；请重新保存 Token 后重试",
+    WORLD_CONFIG_STATE_INVALID: "当前受保护的凭据引用无效；请重新保存 Token 后重试",
+    BACKUP_SPACE_INSUFFICIENT: "远端可用空间不足",
+    BACKUP_SOURCE_CHANGED: "采集期间有文件发生变化，归档未通过校验",
+    BACKUP_ID_EXISTS: "备份编号已存在，原备份未覆盖",
+    BACKUP_WORKER_FAILED: "备份任务启动失败，任务现场已保留",
+    BACKUP_WORKER_NOT_STARTED: "备份 worker 未开始执行，专服未进入备份阶段请刷新任务状态后重新创建备份",
+    BACKUP_WORLD_DATA_MISSING: "专服没有可备份的世界存档；请确认世界已生成并至少保存过一次",
+    BACKUP_WORLD_CONFIG_SNAPSHOT_MISSING: "旧备份缺少配置快照，且当前已应用配置版本不同；恢复已阻止",
+    BACKUP_WORLD_CONFIG_SNAPSHOT_INVALID: "备份中的已应用配置快照校验失败；恢复已阻止",
+    MOD_RELEASE_UNAVAILABLE: "主机库中没有可用的 MOD 版本，恢复已停止",
   };
-  const message = code ? labels[code] ?? "任务失败，任务现场已保留。" : "任务失败，任务现场已保留。";
+  const message = code ? labels[code] ?? "任务失败，任务现场已保留" : "任务失败，任务现场已保留";
   const stageLabel = activeTaskStageLabel({ operation, stage });
   const rollbackStages: Record<string, string> = {
     restoreFiles: "恢复原文件", restoreActiveRelease: "写回活动 Release", restoreManifest: "写回实例清单",
@@ -723,12 +723,12 @@ function taskErrorLabel(code: string | null | undefined, stage: string, operatio
   const restoreRuntime = runtimeCheckLabel(details.restoreRuntimeCheck);
   const rollbackRuntime = runtimeCheckLabel(details.rollbackRuntimeCheck);
   const rollbackDetail = typeof details.rollbackStage === "string"
-    ? ` 回滚${rollbackSucceeded ? "已完成" : "未完成"}：${rollbackStage ?? "未知"}${rollbackFailure ? `；失败原因：${rollbackFailure}` : ""}${rollbackHealth}。`
+    ? ` 回滚${rollbackSucceeded ? "已完成" : "未完成"}：${rollbackStage ?? "未知"}${rollbackFailure ? `；失败原因：${rollbackFailure}` : ""}${rollbackHealth}`
     : "";
-  const failureDetail = failureStep ? ` 失败子步骤：${failureStep}${failureCause ? `；原因：${failureCause}` : ""}。` : "";
+  const failureDetail = failureStep ? ` 失败子步骤：${failureStep}${failureCause ? `；原因：${failureCause}` : ""}` : "";
   const runtimeDetail = [restoreRuntime ? `恢复版核验：${restoreRuntime}` : null,
     rollbackRuntime ? `原部署核验：${rollbackRuntime}` : null].filter(Boolean).join("；");
-  return `${message} 错误码：${code ?? "未知"}；阶段：${stageLabel}。${failureDetail}${runtimeDetail ? ` ${runtimeDetail}。` : ""}${rollbackDetail}`;
+  return `${message} 错误码：${code ?? "未知"}；阶段：${stageLabel}${failureDetail}${runtimeDetail ? ` ${runtimeDetail}` : ""}${rollbackDetail}`;
 }
 function activeTaskStatusLabel(task: TaskSnapshot) {
   const restoring = task.operation === "backupRestore";
@@ -901,7 +901,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
       :cancel-label="visibleActiveTask.operation === 'backupRestore' ? '取消恢复' : '取消备份'" :busy="cancelBusy" @cancel="cancelActiveTask">
       <span v-if="visibleActiveTask.result?.backupId" class="mono muted-text">{{ visibleActiveTask.result.backupId }}</span>
       <span v-if="visibleActiveTask.error" class="backup-warning">{{ taskErrorLabel(visibleActiveTask.error.code, visibleActiveTask.stage, visibleActiveTask.operation, visibleActiveTask.error.details) }}</span>
-      <span v-if="visibleActiveTask.result?.modsWarnings?.length" class="backup-warning">{{ visibleActiveTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}。缺少 MOD 时世界可能崩溃。</span>
+      <span v-if="visibleActiveTask.result?.modsWarnings?.length" class="backup-warning">{{ visibleActiveTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}缺少 MOD 时世界可能崩溃</span>
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
 </FloatingTask>
@@ -920,8 +920,8 @@ const rowKey = (item: BackupSummary) => item.backupId;
           :disabled="createBusy || workspace.preview.value"/>
       </label>
       <p v-if="mode && previewLoading" class="muted-text">正在校验{{ modeLabel(mode) }}条件…</p>
-      <p v-else-if="mode && preview && !preview.worldDataPresent" class="environment-error">没有可备份的世界存档，请确认世界已生成并至少保存过一次。</p>
-      <p v-else-if="mode && preview && !preview.allowed" class="environment-error">当前条件不满足{{ modeLabel(mode) }}。</p>
+      <p v-else-if="mode && preview && !preview.worldDataPresent" class="environment-error">没有可备份的世界存档，请确认世界已生成并至少保存过一次</p>
+      <p v-else-if="mode && preview && !preview.allowed" class="environment-error">当前条件不满足{{ modeLabel(mode) }}</p>
       <template #footer>
         <NButton :disabled="createBusy" @click="closeCreateDialog(false)">取消</NButton>
         <NButton type="primary" :disabled="createBusy || previewLoading || !mode || !preview?.allowed || workspace.preview.value" @click="createBackup">
@@ -932,7 +932,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
 <AppDialog :open="!!restoreTarget" title="恢复备份" @update:open="value => { if (!value && !restoreBusy) { restoreTarget = null; restoreError = ''; restoreModWarnings = []; } }">
       <p v-if="restoreTarget">将恢复 <span class="mono">{{ restoreTarget.backupId }}</span></p>
       <p class="muted-text">MOD 使用主机库当前最新版本；主机库缺少 MOD 时会提示，但不会阻止恢复</p>
-      <p v-if="restoreModWarnings.length" class="backup-warning">{{ restoreModWarnings.join("；") }}。缺少 MOD 时继续恢复可能导致世界崩溃。</p>
+      <p v-if="restoreModWarnings.length" class="backup-warning">{{ restoreModWarnings.join("；") }}缺少 MOD 时继续恢复可能导致世界崩溃</p>
       <NCheckbox v-model:checked="restoreProtection" :disabled="restoreBusy" class="backup-restore-option">恢复前创建备份</NCheckbox>
       <p class="form-hint">保护备份用于失败回滚；不勾选会直接替换当前世界</p>
       <p v-if="restoreError" class="error-strip" role="alert">{{ restoreError }}</p>

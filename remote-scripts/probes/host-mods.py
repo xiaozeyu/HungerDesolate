@@ -269,6 +269,36 @@ def usage(workshop_id, content_digest, backup_refs=None):
     return used
 
 
+def desired_references():
+    # Only pending desired versions need the host artifact as an apply source;
+    # deployed copies, active releases and backups are self-contained.
+    refs = set()
+    for instance_id, path, display_name in instances():
+        state = read_json(path / "desired" / "mods.json", 2 * 1024 * 1024, missing=None)
+        if not isinstance(state, dict) or not isinstance(state.get("mods"), list):
+            continue
+        for item in state["mods"]:
+            if not isinstance(item, dict):
+                continue
+            workshop_id = str(item.get("workshopId"))
+            digest = str(item.get("artifactDigest"))
+            if WORKSHOP.fullmatch(workshop_id) and DIGEST.fullmatch(digest):
+                refs.add((workshop_id, digest))
+    return refs
+
+
+def desired_usage(workshop_id, content_digest):
+    used = []
+    for instance_id, path, display_name in instances():
+        state = read_json(path / "desired" / "mods.json", 2 * 1024 * 1024, missing=None)
+        if not isinstance(state, dict) or not isinstance(state.get("mods"), list):
+            continue
+        if any(isinstance(item, dict) and str(item.get("workshopId")) == workshop_id
+               and item.get("artifactDigest") == content_digest for item in state["mods"]):
+            used.append({"instanceId": instance_id, "displayName": display_name})
+    return used
+
+
 def collect_items():
     items = []
     references = backup_references()
@@ -355,7 +385,8 @@ def modinfo_source(request):
         if len(data) != info.st_size:
             continue
         total += len(data)
-        sources.append({"workshopId": workshop_id, "source": base64.b64encode(data).decode("ascii")})
+        sources.append({"workshopId": workshop_id, "contentDigest": latest[1].name,
+                        "source": base64.b64encode(data).decode("ascii")})
     return {"schemaVersion": 1, "items": sources, "truncated": truncated,
             "target": {"serverId": request["serverId"], "hostId": request["hostId"]},
             "requestId": request["requestId"], "recordVersion": request["expectedRecordVersion"]}
@@ -365,11 +396,13 @@ def reclaimable_items(items, keep=()):
     grouped = {}
     for item in items:
         grouped.setdefault(item["workshopId"], []).append(item)
+    protected = desired_references()
     result = []
     for versions in grouped.values():
         versions.sort(key=lambda item: (item.get("preparedAt") or "", item["contentDigest"]), reverse=True)
         for index, item in enumerate(versions):
-            if index == 0 or item["usedBy"] or (item["workshopId"], item["contentDigest"]) in keep:
+            pair = (item["workshopId"], item["contentDigest"])
+            if index == 0 or pair in protected or pair in keep:
                 continue
             result.append(item)
     result.sort(key=lambda item: (item["workshopId"], item.get("preparedAt") or ""))
@@ -419,7 +452,7 @@ def delete_item(request):
     lock_fd = os.open(MODS / "library.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        used = usage(workshop_id, content_digest, backup_references())
+        used = desired_usage(workshop_id, content_digest)
         if used:
             reject("HOST_MOD_IN_USE", {"usedBy": used})
         shutil.rmtree(artifact)

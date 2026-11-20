@@ -300,13 +300,13 @@ Workshop 通用缓存只提供元数据。实例 desired 记录 workshopId、ena
 
 配置表单按 schema 的候选项、布尔、数字和字符串类型渲染；复杂值与不支持字段只读。游戏界面按数组位置展示配置项，但持久化以 `name` 为键；同名项在应用中合并成一个共享值控件，候选值取所有同名定义的交集。类型冲突、无共同候选项或当前值不明的同名组只读，不阻塞同一 MOD 的其他字段。保存只合并用户实际修改的字段，保留未知字段及旧值，并可显式恢复 MOD 默认值。编辑请求绑定 workshopId、已准备 contentDigest、modinfoSha256 和 changedFields；Rust 在保存前按完整 target 与 expectedRevision 重新读取快照并复求 schema，校验内容/schema 摘要、所有同名定义的类型/候选值及未声明字段未变化。revision 已变化时跳过预校验，由远端 save controller 先处理 operationId 回执重放，再执行 CAS，保持丢失响应后的幂等行为。编辑成功固定当前内容摘要并更新 desired，不改 active-release/UGC，不宣称已部署。
 
-主机级 MOD 内容准备使用 HostTarget 和 `host-mod-tasks`。worker 从本地主机已验证 Release 中选择固定 digest 且带有 `steamcmd-workshop-v1` 能力标记的镜像作为 SteamCMD 工具容器；下载容器不挂 Docker socket，仅挂主机 task staging，以非 root 用户、只读根文件系统和资源限制运行 SteamCMD。完成后校验文件类型、路径、数量、总大小、modinfo 与逐文件摘要，将内容发布到只读 `mods/prepared/<workshopId>/<contentDigest>`（目录 `0555`、文件 `0444`、manifest `0600`），供所有实例选择。任务成功后在 `cleanup` 阶段自动删除未被引用的旧版本，本次产出和仍被实例/活动 Release/备份引用的版本保留；清理失败不影响更新结果。实例 desired 只记录 `workshopId/enabled/configurationOptions/artifactDigest`，不再写实例 `mods/prepared`。应用时从主机库复制内容到实例 MOD Release，并校验摘要。匿名 SteamCMD 下载、Linux amd64 网络路径和实际 Workshop 样本尚待实机验收。
+主机级 MOD 内容准备使用 HostTarget 和 `host-mod-tasks`。worker 从本地主机已验证 Release 中选择固定 digest 且带有 `steamcmd-workshop-v1` 能力标记的镜像作为 SteamCMD 工具容器；下载容器不挂 Docker socket，仅挂主机 task staging，以非 root 用户、只读根文件系统和资源限制运行 SteamCMD。完成后校验文件类型、路径、数量、总大小、modinfo 与逐文件摘要，将内容发布到只读 `mods/prepared/<workshopId>/<contentDigest>`（目录 `0555`、文件 `0444`、manifest `0600`），供所有实例选择。任务成功后在 `cleanup` 阶段自动删除未被引用的旧版本，本次产出和仍被实例期望引用的版本保留；已部署副本、活动 Release 与备份不阻止清理；清理失败不影响更新结果。实例 desired 只记录 `workshopId/enabled/configurationOptions/artifactDigest`，不再写实例 `mods/prepared`。应用时从主机库复制内容到实例 MOD Release，并校验摘要。匿名 SteamCMD 下载、Linux amd64 网络路径和实际 Workshop 样本尚待实机验收。
 
 应用流程：解析/去重/校验 → staging 顺序下载每分片需要的内容 → 记录可识别实际版本/摘要 → 验证一致性与权限 → 停目标分片 → 按请求可选创建冷保护备份（不请求时跳过） → 切换完整部署 → 启动/重读配置与运行证据。未创建备份时失败不做自动恢复，任务错误明确提示检查部署状态；MOD 应用不以主机恢复验收或已有备份作为放行门槛。
 
 下载成功、配置已部署、运行验证通过分别记录阶段。任何 MOD 自动下载或写 UGC 行为必须在阶段 0 核对；不得因启动时会下载就省略版本和失败证据。手动“检查更新”是只读查询，不占维护栏；真正下载/部署进入任务。
 
-主机级 MOD 内容库：`/var/lib/famine-hub/mods/prepared/<workshopId>/<contentDigest>` 保存公共 Workshop 内容；`host-mod-tasks` 保存主机级准备任务。实例应用只从主机库复制内容。主机库删除检查实例 desired/deployed、活动 MOD Release 和备份 metadata 引用；更新成功后自动清理未被引用的旧版本。备份不保存活动 MOD Release 内容，恢复从主机库最新内容重建 MOD Release；缺失 MOD 返回 warning 但继续恢复。
+主机级 MOD 内容库：`/var/lib/famine-hub/mods/prepared/<workshopId>/<contentDigest>` 保存公共 Workshop 内容；`host-mod-tasks` 保存主机级准备任务。实例应用只从主机库复制内容。主机库删除只检查实例 desired 引用（待应用内容的来源）；已部署副本、活动 MOD Release 与备份 metadata 不阻止删除。更新成功后自动清理未被引用的旧版本。备份不保存活动 MOD Release 内容，恢复从主机库最新内容重建 MOD Release；缺失 MOD 返回 warning 但继续恢复。
 
 当前代码已实现完整 desired → preview → 持久 apply task 路径：远端复核 revision/digest；按每实例独立 modsReleaseId 生成 Master/Caves UGC 内容和 setup 文件，逐分片复核内容 digest；停止后归档世界、MOD desired/deployed、活动 MOD Release、Compose 与配置，发布后重建容器。原来运行的实例需通过进程验证，原来停止的实例保持停止。请求冷保护备份时，失败或任务中断使用该保护点恢复原部署组合；未请求时不自动恢复。禁用和移除只改 desired，仍须走预览/应用才能部署。普通备份与恢复现已包含 MOD 状态和活动 MOD Release。
 

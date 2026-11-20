@@ -44,6 +44,7 @@ def render_cluster(settings, token, password, cluster_key):
         "cluster_description": settings["description"],
         "cluster_password": password.decode("utf-8"),
         "cluster_intention": "cooperative",
+        "cluster_language": settings["language"],
     }
     parser["MISC"] = {"console_enabled": "true"}
     parser["SHARD"] = {

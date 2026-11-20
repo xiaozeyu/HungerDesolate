@@ -94,20 +94,15 @@
 
 ## 5. 删除限制与自动清理
 
-删除主机 MOD 版本前会检查：
+删除主机 MOD 版本前只检查各实例 `desired/mods.json`：尚未应用的期望版本仍需要主机库内容作为应用源。已部署副本、活动 MOD Release 和备份不阻止删除——实例运行使用自己的 Release 副本，恢复时从主机库最新内容重建。
 
-- 各实例 `desired/mods.json`
-- 各实例 `deployed-mods.json`
-- 各实例活动 MOD Release manifest
-- 各实例备份 metadata 的 `mods[]` 引用
-
-仍被引用的版本返回 `HOST_MOD_IN_USE`，不会删除。
+仍被期望引用的版本返回 `HOST_MOD_IN_USE`，不会删除。
 
 主机 MOD 准备/更新任务成功后自动清理旧版本，不需要用户手动操作：
 
 - 每个 Workshop 保留最新版本；
 - 本次任务刚产出的版本始终保留；
-- 被实例期望/已部署、活动 MOD Release 或备份 metadata 引用的版本保留；
+- 被实例期望引用的版本保留；
 - 其余旧版本在任务 `cleanup` 阶段删除；
 - 更新失败不清理；清理失败不影响更新结果，下次更新会重试。
 

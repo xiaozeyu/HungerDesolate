@@ -128,6 +128,8 @@ const latestHostItem = (item: HostModItem | WorkshopItem) => {
   const versions = items.value.filter(entry => entry.workshopId === item.workshopId);
   return versions.sort((left, right) => (Date.parse(right.preparedAt ?? "") || 0) - (Date.parse(left.preparedAt ?? "") || 0))[0] ?? null;
 };
+const isOldHostMod = (item: HostModItem) => latestHostItem(item)?.contentDigest !== item.contentDigest;
+const visibleHostMods = computed(() => items.value.filter(item => !isOldHostMod(item)));
 const outdatedCandidates = computed(() => {
   const result = new Map<string, WorkshopItem>();
   for (const [workshopId, check] of Object.entries(updateChecks.value)) {
@@ -257,12 +259,13 @@ const queueSsh = createSerialQueue();
 interface SyncEntry {
   instanceId: string;
   displayName: string;
-  currentDigest: string | null;
+  currentVersion: string | null;
   revision: number;
   mods: { workshopId: string; enabled: boolean; configurationOptions: Record<string, unknown>; artifactDigest: string | null }[];
 }
 const syncTarget = ref<HostModItem | null>(null);
 const syncEntries = ref<SyncEntry[]>([]);
+const syncUpToDate = ref<string[]>([]);
 const syncErrors = ref<string[]>([]);
 const syncLoading = ref(false);
 const syncBusy = ref(false);
@@ -507,10 +510,30 @@ async function previewSync(item: HostModItem) {
   if (!connection || !hostTarget || syncLoading.value || workspace.preview.value) return;
   syncTarget.value = item;
   syncEntries.value = [];
+  syncUpToDate.value = [];
   syncErrors.value = [];
   syncLoading.value = true;
   const recordVersion = connection.recordVersion;
   try {
+    const libraryRequestId = crypto.randomUUID();
+    const library = await queueSsh(() => listHostMods({ schemaVersion: 1, requestId: libraryRequestId,
+      target: hostTarget, expectedRecordVersion: recordVersion }));
+    if (server.value?.recordVersion !== recordVersion) throw new Error("主机连接已变化，请重新同步");
+    if (library.requestId !== libraryRequestId || library.recordVersion !== recordVersion
+        || library.target.serverId !== hostTarget.serverId || library.target.hostId !== hostTarget.hostId) {
+      throw new Error("主机 MOD 库响应身份或版本不匹配");
+    }
+    const cards = library.items.filter(card => card.workshopId === item.workshopId);
+    const versionByDigest = new Map(cards.map(card => [card.contentDigest, card.version] as const));
+    const refsByInstance = new Map<string, Set<string>>();
+    for (const card of cards) {
+      for (const used of card.usedBy) {
+        if (used.instanceId === "backup") continue;
+        const refs = refsByInstance.get(used.instanceId) ?? new Set<string>();
+        refs.add(card.contentDigest);
+        refsByInstance.set(used.instanceId, refs);
+      }
+    }
     const listRequestId = crypto.randomUUID();
     const result = await queueSsh(() => listInstances({ schemaVersion: 1, requestId: listRequestId,
       serverId: connection.serverId, expectedRecordVersion: recordVersion }));
@@ -520,8 +543,10 @@ async function previewSync(item: HostModItem) {
       throw new Error("专服列表响应身份不匹配");
     }
     const entries: SyncEntry[] = [];
+    const upToDate: string[] = [];
     for (const instance of result.instances) {
       if (instance.lifecycle !== "ready" || instance.hostId !== hostTarget.hostId) continue;
+      const refs = refsByInstance.get(instance.instanceId) ?? new Set<string>();
       try {
         const requestId = crypto.randomUUID();
         const mods = await queueSsh(() => listInstanceMods({ schemaVersion: 1, requestId,
@@ -531,25 +556,51 @@ async function previewSync(item: HostModItem) {
             || mods.target.hostId !== hostTarget.hostId || server.value?.recordVersion !== recordVersion) {
           throw new Error("MOD 列表响应身份不匹配");
         }
-        const current = mods.items.find(entry => entry.workshopId === item.workshopId && entry.desiredEnabled === true);
-        if (!current || current.desiredArtifactDigest === item.contentDigest) continue;
+        const current = mods.items.find(entry => entry.workshopId === item.workshopId);
+        const inUse = current
+          ? (current.desiredEnabled === null ? current.deployedEnabled === true : current.desiredEnabled === true)
+          : refs.size > 0;
+        if (!inUse) continue;
+        const staleRefs = [...refs].filter(digest => digest !== item.contentDigest);
+        const stateStale = current !== undefined
+          && (current.desiredArtifactDigest !== item.contentDigest
+            || current.deployedArtifactDigest !== item.contentDigest);
+        if (!staleRefs.length && !stateStale) {
+          upToDate.push(instance.displayName);
+          continue;
+        }
+        if (!current) {
+          syncErrors.value.push(`${instance.displayName}：该专服引用了此 MOD，但应用内没有期望或部署状态，无法安全同步`);
+          continue;
+        }
+        const displayDigest = current.deployedArtifactDigest ?? staleRefs[0] ?? current.desiredArtifactDigest;
+        const currentVersion = displayDigest
+          ? versionByDigest.get(displayDigest) ?? displayDigest.slice(0, 12)
+          : null;
         entries.push({
           instanceId: instance.instanceId,
           displayName: instance.displayName,
-          currentDigest: current.desiredArtifactDigest,
+          currentVersion,
           revision: mods.configRevision,
-          mods: mods.items.filter(entry => entry.desiredEnabled !== null).map(entry => ({
-            workshopId: entry.workshopId,
-            enabled: entry.desiredEnabled === true,
-            configurationOptions: entry.desiredConfiguration ?? {},
-            artifactDigest: entry.workshopId === item.workshopId ? item.contentDigest : entry.desiredArtifactDigest,
-          })),
+          mods: mods.items
+            .filter(entry => entry.desiredEnabled !== null || entry.workshopId === item.workshopId)
+            .map(entry => ({
+              workshopId: entry.workshopId,
+              enabled: entry.workshopId === item.workshopId ? true : entry.desiredEnabled === true,
+              configurationOptions: entry.workshopId === item.workshopId
+                ? entry.desiredConfiguration ?? entry.deployedConfiguration ?? {}
+                : entry.desiredConfiguration ?? {},
+              artifactDigest: entry.workshopId === item.workshopId ? item.contentDigest : entry.desiredArtifactDigest,
+            })),
         });
       } catch (cause) {
         syncErrors.value.push(`${instance.displayName}：${describeError(cause).message}`);
       }
     }
-    if (server.value?.recordVersion === recordVersion) syncEntries.value = entries;
+    if (server.value?.recordVersion === recordVersion) {
+      syncEntries.value = entries;
+      syncUpToDate.value = upToDate;
+    }
   } catch (cause) {
     syncErrors.value.push(describeError(cause).message);
   } finally {
@@ -746,7 +797,7 @@ const candidateRowKey = (item: WorkshopItem) => item.workshopId;
 
 const syncColumns = computed<DataTableColumns<SyncEntry>>(() => [
   { title: "专服", key: "displayName", render: entry => entry.displayName },
-  { title: "当前期望版本", key: "currentDigest", render: entry => h("span", { class: "mono" }, entry.currentDigest ? entry.currentDigest.slice(0, 12) : "未固定版本") },
+  { title: "当前版本", key: "currentVersion", render: entry => h("span", { class: "mono" }, entry.currentVersion ?? "未知") },
 ]);
 const syncRowKey = (entry: SyncEntry) => entry.instanceId;
 </script>
@@ -777,7 +828,7 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
       <p class="muted-text">统一管理MOD，通过Workshop ID或合集链接添加</p>
     </div>
     <div v-else class="host-mod-grid">
-      <article v-for="item in items" :key="`${item.workshopId}:${item.contentDigest}`" class="host-mod-card" :class="{ checking: isChecking(item) }">
+      <article v-for="item in visibleHostMods" :key="`${item.workshopId}:${item.contentDigest}`" class="host-mod-card" :class="{ checking: isChecking(item) }">
         <div class="host-mod-cover">
           <img v-if="item.previewUrl" class="host-mod-cover-image" :src="versionedPreview(item.previewUrl, item.contentDigest)" :alt="item.name ?? item.workshopId" loading="lazy"/>
           <div v-else class="host-mod-cover-placeholder"><Package :size="28"/></div>
@@ -852,12 +903,15 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
     <AppDialog :open="!!syncTarget" title="同步到专服" @update:open="value => { if (!value && !syncBusy) syncTarget = null }">
       <div v-if="syncLoading" class="muted-text" role="status">正在检查使用此 MOD 的专服…</div>
       <template v-else-if="syncTarget">
-        <p>将把 <strong>{{ syncTarget.name ?? syncTarget.workshopId }}</strong> - <span class="mono">{{ syncTarget.version ?? "" }}</span> 的期望版本同步到 {{ syncEntries.length }} 个专服</p>
+        <p>将把 <strong>{{ syncTarget.name ?? syncTarget.workshopId }}</strong> - <span class="mono">{{ syncTarget.version ?? "" }}</span> <span class="mono muted-text">{{ syncTarget.contentDigest.slice(0, 12) }}</span> 的期望版本同步到 {{ syncEntries.length }} 个专服</p>
         <p class="form-hint">只更新期望 MOD 版本，不会自动应用或重启专服</p>
         <div v-if="syncEntries.length" class="table-wrap">
           <NDataTable :columns="syncColumns" :data="syncEntries" :bordered="false" :single-line="true" size="medium" :row-key="syncRowKey"/>
         </div>
-        <p v-else-if="!syncErrors.length" class="muted-text">没有使用此 MOD 的专服需要同步</p>
+        <p v-else-if="syncUpToDate.length && !syncErrors.length" class="muted-text">
+          使用此 MOD 的专服已是该版本：{{ syncUpToDate.join("、") }}
+        </p>
+        <p v-else-if="!syncErrors.length" class="muted-text">没有使用此 MOD 的专服</p>
         <div v-if="syncErrors.length" class="environment-error" role="alert">
           <strong>同步检查未完成</strong>
           <ul><li v-for="error in syncErrors" :key="error">{{ error }}</li></ul>
@@ -872,7 +926,7 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
       </template>
     </AppDialog>
     <AppDialog :open="!!deleteTarget" title="删除主机 MOD" @update:open="value => { if (!value && !deleteBusy) deleteTarget = null }">
-      <p>删除后，新专服将无法选择该版本。仍被实例引用的版本不会被删除；引用该版本的备份可能无法完整恢复。</p>
+      <p>删除后，新专服将无法选择该版本。仍被专服期望引用的版本不会被删除。</p>
       <p class="mono">{{ deleteTarget?.workshopId }} · {{ deleteTarget?.contentDigest.slice(0, 12) }}</p>
       <template #footer>
         <NButton :disabled="deleteBusy" @click="deleteTarget = null">取消</NButton>

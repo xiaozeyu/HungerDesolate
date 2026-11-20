@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -153,6 +154,16 @@ def read_state(instance, shard):
             "warnings": warnings}
 
 
+def read_state_retry(instance, shard):
+    # The game rewrites the state key by truncating it in place, so a
+    # concurrent read can see a partial file; re-read once before flagging.
+    try:
+        return read_state(instance, shard)
+    except ProbeRejected:
+        time.sleep(0.05)
+        return read_state(instance, shard)
+
+
 def query(request):
     if (not isinstance(request, dict) or request.get("schemaVersion") != 1
             or not isinstance(request.get("requestId"), str)
@@ -193,7 +204,7 @@ def query(request):
         if not safe_directory(directory, runtime=True):
             continue
         try:
-            state = read_state(instance, shard)
+            state = read_state_retry(instance, shard)
         except ProbeRejected:
             invalid_shards.append(shard)
             continue

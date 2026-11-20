@@ -72,7 +72,7 @@ def safe_directory(path, runtime=False):
 
 
 def safe_artifact_path(root, path, runtime=False):
-    if not safe_directory(root):
+    if not safe_directory(root, runtime=runtime):
         return False
     current = root
     for part in path.relative_to(root).parts:
@@ -182,6 +182,10 @@ def candidate_paths(instance_id, workshop_id, release_id, artifact_digest=None):
         except FileNotFoundError:
             continue
     if isinstance(release_id, str) and release_id:
+        for shard in ("Master", "Caves"):
+            release_content = root / "mods" / "releases" / release_id / shard / "content" / "322330"
+            for name in names:
+                yield release_content / name / "modinfo.lua"
         bases.extend([root / "mods" / "releases" / release_id / "Master", root / "mods" / "releases" / release_id])
     bases.extend([root / "mods" / "releases" / "Master", root / "mods" / "releases"])
     for base in bases:
@@ -242,6 +246,25 @@ def read_modinfo(instance_id, workshop_id, release_id, artifact_digest=None):
     return None
 
 
+def release_prepared_paths(instance_id, workshop_id):
+    active = read_json(ROOT / "instances" / instance_id / "active-release.json", {})
+    release_id = active.get("modsReleaseId") if isinstance(active, dict) else None
+    if not isinstance(release_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", release_id):
+        return None
+    release_root = ROOT / "instances" / instance_id / "mods" / "releases" / release_id
+    for shard in ("Master", "Caves"):
+        for name in (workshop_id, "workshop-" + workshop_id):
+            path = release_root / shard / "content" / "322330" / name / "modinfo.lua"
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                    and info.st_nlink == 1 and info.st_size <= MAX_MODINFO):
+                return release_root, path
+    return None
+
+
 def read_prepared_artifact(instance_id, workshop_id, content_digest):
     if not isinstance(content_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", content_digest):
         return None
@@ -250,7 +273,8 @@ def read_prepared_artifact(instance_id, workshop_id, content_digest):
         if parent.exists() or parent.is_symlink():
             safe_directory(parent)
     directory = None
-    for root, safe_root in roots:
+    safe_root = None
+    for root, candidate_root in roots:
         candidate = root / content_digest
         try:
             if not safe_directory(root) or not safe_directory(candidate):
@@ -258,20 +282,29 @@ def read_prepared_artifact(instance_id, workshop_id, content_digest):
         except FileNotFoundError:
             continue
         directory = candidate
+        safe_root = candidate_root
         break
+    metadata = {}
+    runtime_owned = False
     if directory is None:
-        return None
-    metadata = read_json(directory / "manifest.json", None)
-    if (not isinstance(metadata, dict) or metadata.get("workshopId") != workshop_id
-            or metadata.get("contentDigest") != content_digest):
-        reject("MOD_ARTIFACT_INVALID")
-    path = directory / "content" / "modinfo.lua"
-    if not safe_artifact_path(safe_root, path.parent):
+        fallback = release_prepared_paths(instance_id, workshop_id)
+        if fallback is None:
+            return None
+        safe_root, path = fallback
+        runtime_owned = True
+    else:
+        metadata = read_json(directory / "manifest.json", None)
+        if (not isinstance(metadata, dict) or metadata.get("workshopId") != workshop_id
+                or metadata.get("contentDigest") != content_digest):
+            reject("MOD_ARTIFACT_INVALID")
+        path = directory / "content" / "modinfo.lua"
+    if not safe_artifact_path(safe_root, path.parent, runtime=runtime_owned):
         reject("MOD_ARTIFACT_INVALID")
     try:
         info = path.lstat()
+        owners = (0, os.geteuid(), 1000) if runtime_owned else (0, os.geteuid())
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_MODINFO
-                or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022):
+                or info.st_uid not in owners or info.st_mode & 0o022):
             reject("MOD_ARTIFACT_INVALID")
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:

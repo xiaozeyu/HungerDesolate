@@ -1,0 +1,62 @@
+# 推送 v* tag 或手动触发；构建 macOS universal dmg 与 Windows NSIS exe。
+# 构建完成后由 tauri-action 创建 draft Release，检查后再手动发布。
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: '--target universal-apple-darwin --bundles dmg'
+          - os: windows-latest
+            args: '--bundles nsis'
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add macOS targets
+        if: matrix.os == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync version
+        run: npm run version:sync
+
+      - name: Build and upload release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: '荒野中枢 v__VERSION__'
+          releaseBody: |
+            macOS：下载 `.dmg`
+            Windows：下载 `*-setup.exe`
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

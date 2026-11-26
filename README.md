@@ -166,6 +166,7 @@ npm run tauri -- build --bundles nsis
 ```text
 .
 ├── LICENSE                  # MIT
+├── THIRD_PARTY_NOTICES.md   # 第三方许可
 ├── src/                     # Vue 3 前端
 │   ├── pages/               # 主机、专服、环境、Release、世界、MOD、备份、诊断、设置
 │   ├── components/          # 通用组件、任务面板、对话框
@@ -202,7 +203,9 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。你可以自由使用、修改、分发和商用，但需保留版权声明与许可声明。
+本项目采用 [MIT License](LICENSE)，Copyright (c) 2026 xiaozeyu。你可以自由使用、修改、分发和商用，但需保留版权声明与许可声明。
+
+第三方组件许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 除非另有说明，提交到本仓库的贡献均按 MIT License 授权。
 

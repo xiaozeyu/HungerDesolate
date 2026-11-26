@@ -2,6 +2,7 @@
 name = "hunger-desolate"
 version = "1.3.8"
 description = "Desktop console for isolated DST instances"
+license = "MIT"
 edition = "2021"
 
 [lib]

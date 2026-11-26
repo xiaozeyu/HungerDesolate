@@ -224,4 +224,4 @@ Release 导入成功后，您可以：
 3. 分配端口
 4. 创建并启动专服
 
-创建流程见 [项目 README](../README.md#新建专服与-dst-release)。
+创建流程见 [项目 README](../README.md)。

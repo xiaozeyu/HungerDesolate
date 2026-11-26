@@ -69,7 +69,8 @@ def render_shard_ini(settings, shard, port_plan):
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str
     parser["NETWORK"] = {"server_port": str(ports["game"])}
-    parser["SHARD"] = {"is_master": str(shard == "master").lower()}
+    parser["SHARD"] = {"is_master": str(shard == "master").lower(),
+                       "name": "Master" if shard == "master" else "Caves"}
     parser["STEAM"] = {
         "authentication_port": str(ports["steamAuth"]),
         "master_server_port": str(ports["steamMaster"]),

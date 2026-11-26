@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 ROOT = Path("/var/lib/famine-hub")
 MAX_BYTES = 1024 * 1024
 MAX_REVISION = 9007199254740991
-RENDERER_VERSION = 2
+# 记录渲染输出版本，供升级诊断；apply 每次都会按当前渲染器核对文件。
+RENDERER_VERSION = 3
 DST_RUNTIME_UID = 1000
 OPTION_SCHEMA = globals().get("OPTION_SCHEMA", [])
 GAME_MODES = {"relaxed", "survival", "endless", "wilderness", "lightsout"}
@@ -711,22 +712,6 @@ def apply_config(request):
             if not result:
                 reject("WORLD_CONFIG_STATE_INVALID")
             result["requestId"] = request_id
-            return result
-        previous_deployed = deployed_world(instance_id, manifest, schema)
-        if (previous_deployed is not None and previous_deployed.get("revision") == desired.get("revision")
-                and previous_deployed.get("digest") == settings_digest
-                and previous_deployed.get("rendererVersion") == RENDERER_VERSION):
-            result = {"schemaVersion": 1, "requestId": request_id,
-                      "target": {"serverId": request["serverId"], "hostId": host_id, "instanceId": instance_id},
-                      "revision": expected_revision, "activeReleaseId": expected_release_id,
-                      "desiredDigest": settings_digest,
-                      "runtimeVerified": False, "runningShards": []}
-            atomic_json(receipt_path, {"schemaVersion": 1, "operationId": operation_id,
-                                      "revision": expected_revision, "desiredDigest": settings_digest,
-                                      "result": result})
-            stale_work = instance / "staging" / "world-apply" / operation_id
-            if stale_work.exists():
-                shutil.rmtree(stale_work, ignore_errors=True)
             return result
         if not token_present:
             reject("WORLD_TOKEN_MISSING")

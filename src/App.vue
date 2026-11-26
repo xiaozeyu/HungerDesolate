@@ -167,7 +167,7 @@ onUnmounted(() => {
             版本
           </span>
           <span>
-            {{ appVersion }} Beta
+            {{ appVersion }} 正式版
           </span>
         </div>
       </div>

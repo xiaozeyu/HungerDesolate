@@ -2,7 +2,7 @@
 
 当前已提供只读环境检查 `probes/host-environment.sh`、Docker 安装预检 `probes/docker-install-preview.py`、管理元数据初始化 `actions/initialize-host.py`，以及 Docker 安装 admission/controller/worker。实例创建已有 `actions/instance-create-control.py` 短接纳内核和 `actions/instance-create-task.py` / `actions/instance-create-worker.py` 持久任务基础设施；它们尚未接入 Tauri command，当前 worker 只会报告部署门禁阻断。游戏部署唯一采用 Docker Compose，不添加原生专服部署实现。
 
-后续按 `spec/backend-implementation.md` 的 §4、§7–11 实现受控脚本包：身份/路径检查、flock、原子文件、任务接纳/controller、对账、worker 操作。脚本必须经过固定版本/摘要验证，先通过 SSH 信任与目标归属验证。
+后续实现受控脚本包：身份/路径检查、flock、原子文件、任务接纳/controller、对账、worker 操作。脚本必须经过固定版本/摘要验证，先通过 SSH 信任与目标归属验证。
 
 只有实现生产调用时才创建具体脚本；不得添加返回成功的空脚本。安装、更新与恢复的断线持续执行须在阶段 0 实机证明。
 

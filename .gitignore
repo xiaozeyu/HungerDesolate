@@ -4,16 +4,40 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 .DS_Store
+Thumbs.db
+desktop.ini
 *.log
+
+# 本地环境与凭据
 .env
-.env.local
-.env.*.local
-spec/evidence/screenshots/
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite3-journal
+*.sqlite-wal
+*.sqlite-shm
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# 本地构建产物
+*.dmg
+*.exe
+*.msi
+*.app
+*.zip
+*.tar.gz
 
 # 本地工具与生成物
 __pycache__/
 *.py[cod]
 .idea/
+.vscode/
 .claude/
 .tmp*/
 poc/

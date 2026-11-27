@@ -18,6 +18,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License" /></a>
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/QQ%E7%BE%A4-1042919482-12B7F5?logo=tencentqq&logoColor=white&style=for-the-badge" alt="QQ 群 1042919482" />
+</p>
+
 > 当前版本 **1.3.8**（正式版） · 远端固定 Linux amd64 + Docker Compose 路线 · 安装包尚未签名
 
 [简介](#简介) · [功能](#功能) · [界面展示](#界面展示) · [技术栈](#技术栈) · [快速开始](#快速开始) · [构建与打包](#构建与打包)

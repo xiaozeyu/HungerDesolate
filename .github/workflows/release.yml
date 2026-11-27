@@ -23,6 +23,9 @@ jobs:
           - os: windows-latest
             args: '--bundles nsis'
     runs-on: ${{ matrix.os }}
+    env:
+      # Use the bundled OpenSSL-backed libssh2, not a runner's vcpkg copy.
+      LIBSSH2_NO_VCPKG: '1'
 
     steps:
       - name: Checkout
@@ -43,6 +46,10 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify Windows SSH host-key support
+        if: matrix.os == 'windows-latest'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib ssh::tests::embedded_ssh_supports_ed25519_host_keys -- --exact
 
       - name: Sync version
         run: npm run version:sync

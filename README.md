@@ -151,9 +151,10 @@ npm run tauri -- build --debug --no-bundle
 <details>
 <summary>Windows 构建说明</summary>
 
-在 Windows 上安装 Node.js 22.18+、Rust stable（MSVC）、Visual Studio Build Tools、WebView2 和 Strawberry Perl。`ssh2` 使用 `vendored-openssl`，构建 OpenSSL 需要 Perl。
+在 Windows 上安装 Node.js 22.18+、Rust stable（MSVC）、Visual Studio Build Tools、WebView2 和 Strawberry Perl。`ssh2` 使用 `openssl-on-win32` 和 `vendored-openssl`，与 macOS 一样支持 Ed25519 SSH 主机密钥。构建内置 OpenSSL 需要 Perl。
 
 ```powershell
+$env:LIBSSH2_NO_VCPKG = '1'
 npm ci
 npm run version:sync
 npm run tauri -- build --bundles nsis

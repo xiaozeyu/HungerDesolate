@@ -325,6 +325,14 @@ mod tests {
         }
     }
     #[test]
+    fn embedded_ssh_supports_ed25519_host_keys() -> Result<(), ssh2::Error> {
+        let session = Session::new()?;
+        let algorithms = session.supported_algs(ssh2::MethodType::HostKey)?;
+        assert!(algorithms.contains(&"ssh-ed25519"));
+        Ok(())
+    }
+
+    #[test]
     fn never_allows_untrusted_or_changed_keys() {
         assert!(
             matches!(require_trust(None,&key(b"a")),Err(error) if error.code=="SSH_TRUST_REQUIRED")

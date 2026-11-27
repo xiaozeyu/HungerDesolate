@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 import uuid
 
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ROOT = Path("/var/lib/famine-hub")
 UPDATES = ROOT / "updates"
 CACHE = UPDATES / "dst-latest.json"
@@ -178,22 +179,26 @@ def check_tool(release):
     return {"image": release["imageDigest"], "steamcmd": STEAMCMD, "home": "/home/famine"}
 
 
-def parse_build(output):
-    match = re.search(r'"public"\s*\{', output)
+def vdf_block(output, key):
+    match = re.search(rf'"{key}"\s*\{{', output)
     if not match:
         reject("DST_UPDATE_CHECK_INVALID")
+    body = output[match.end():]
     depth = 0
-    start = match.end()
-    for index in range(start, len(output)):
-        if output[index] == "{":
+    for token in re.finditer(r'"(?:[^"\\]|\\.)*"|[{}]', body):
+        if token[0] == "{":
             depth += 1
-        elif output[index] == "}":
+        elif token[0] == "}":
             if depth == 0:
-                section = output[start:index]
-                break
+                return body[:token.start()]
             depth -= 1
-    else:
-        reject("DST_UPDATE_CHECK_INVALID")
+    reject("DST_UPDATE_CHECK_INVALID")
+
+
+def parse_build(output):
+    # Depot manifests also have a "public" block, but only branches carry build IDs.
+    branches = vdf_block(ANSI.sub("", output), "branches")
+    section = vdf_block(branches, "public")
     buildids = re.findall(r'"buildid"\s+"([0-9]+)"', section)
     unique = set(buildids)
     if len(unique) != 1:
@@ -235,7 +240,7 @@ def docker_server_version():
 
 
 def detail_text(data):
-    text = data.decode("utf-8", errors="replace").replace("\r", "\n")
+    text = ANSI.sub("", data.decode("utf-8", errors="replace")).replace("\r", "\n")
     text = "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n".join(lines)[-MAX_DETAIL:]

@@ -2,7 +2,7 @@ import { computed, shallowRef } from "vue";
 import { mergeTask } from "../lib/taskReducer";
 import { loadTasks, saveTasks } from "../lib/taskStorage";
 import { queryClient } from "../lib/queryClient";
-import type { TaskSnapshot } from "../types/contracts";
+import type { ServerSummary, TaskSnapshot } from "../types/contracts";
 const tasks = shallowRef<ReadonlyMap<string, TaskSnapshot>>(new Map(loadTasks().map(task => [task.taskId, task])));
 const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 function invalidateForTask(task: TaskSnapshot) {
@@ -32,5 +32,22 @@ export function useTasks() {
         tasks.value = next;
         saveTasks([...next.values()]);
     }
-    return { tasks: computed(() => [...tasks.value.values()]), receive, discard };
+    function restoreUpdateTargets(servers: ServerSummary[]) {
+        let next: Map<string, TaskSnapshot> | undefined;
+        for (const task of tasks.value.values()) {
+            const target = task.target;
+            // Older DST update receipts omitted the connection ID inside the task.
+            if (task.operation !== "instanceUpdate" || terminalStatuses.has(task.status)
+                || !target || !("instanceId" in target) || !target.hostId || target.serverId !== undefined) continue;
+            const matches = servers.filter(server => server.hostId === target.hostId);
+            if (matches.length !== 1) continue;
+            next ??= new Map(tasks.value);
+            next.set(task.taskId, { ...task, target: { ...target, serverId: matches[0].serverId } });
+        }
+        if (next) {
+            tasks.value = next;
+            saveTasks([...next.values()]);
+        }
+    }
+    return { tasks: computed(() => [...tasks.value.values()]), receive, discard, restoreUpdateTargets };
 }

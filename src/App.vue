@@ -66,6 +66,9 @@ const activityTarget = computed(() => runningOperation.value
 let unlisten: UnlistenFn | undefined;
 let disposed = false;
 let taskPoller: ReturnType<typeof setInterval> | undefined;
+watch(workspace.servers, servers => {
+    if (!workspace.preview.value) taskStore.restoreUpdateTargets(servers);
+}, { immediate: true, flush: "sync" });
 function pollTasks() {
     void refreshActiveTasks(taskStore.tasks.value, workspace.servers.value, task => taskStore.receive(task));
     void refreshBuildTasks(workspace.servers.value);

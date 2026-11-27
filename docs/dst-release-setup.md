@@ -47,7 +47,9 @@ Release 登记会自动执行基础验证，通过后即可用于创建实例：
 
 日志中的 SteamCMD 自更新、Steam 匿名登录和 DST 内容下载是不同阶段。仅凭末尾 `CWorkThreadPool` 清理信息或退出码 8，不能断定具体网络、权限或空间问题。
 
-当前本地构建和远端下载容器共用 `docker/runtime/install-dst.sh`：本地镜像构建先 bootstrap 再下载，远端由 `dst-build-base` 完成 bootstrap，宿主机挂载目录执行 `install-dst.sh download`。对退出码 8、42 和超时 124 最多尝试 3 次；其他错误立即失败。失败输出 `STEAMCMD_BOOTSTRAP_FAILED` 或 `STEAMCMD_DOWNLOAD_FAILED`、原始退出码、隔离构建目录下 SteamCMD 内部日志末尾及磁盘/ inode 信息。重试耗尽不登记 Release。
+当前本地构建和远端下载容器共用 `docker/runtime/install-dst.sh`：本地镜像构建先 bootstrap 再下载，远端由 `dst-build-base` 完成 bootstrap，宿主机挂载目录执行 `install-dst.sh download`。安装脚本对退出码 8、42 和超时 124 最多尝试 3 次。失败输出 `STEAMCMD_BOOTSTRAP_FAILED` 或 `STEAMCMD_DOWNLOAD_FAILED`、原始退出码、SteamCMD 内部日志末尾及磁盘 / inode 信息。
+
+远端构建若复用了旧 DST 目录，增量下载失败后会清空本次任务的临时下载目录和 `steamapps` 缓存，再启动一轮不带增量基线的全量下载。旧 Release 和旧镜像不变；全量下载仍失败则不登记 Release。
 
 软件内构建状态使用宿主脚本的最终结果标记；SteamCMD 重试期间的 `error:` 日志不会让页面提前停止观察。只有镜像构建和 Release 登记均完成后才标记成功。
 
@@ -136,7 +138,7 @@ docker pull --platform linux/amd64 docker.m.daocloud.io/library/debian:12-slim
 
 **原因**: 退出码 124 表示 `timeout` 终止了 SteamCMD。bootstrap 需要先完成 SteamCMD 自更新；服务器到 Steam CDN 速度较慢时，10 分钟可能不够。
 
-**解决**: 当前默认 bootstrap 超时为 3600 秒，DST 下载阶段为 1800 秒。远端构建把 bootstrap 超时传给 `Dockerfile.build-base`，宿主机下载容器使用 `STEAMCMD_DOWNLOAD_DEADLINE` 作为 `timeout`；本地路线仍通过 Dockerfile 的 `ARG` 传入两个超时。必须使用正整数与 `s`/`m`/`h` 单位，`0s`、无限等待与非法格式会拒绝执行。退出码 124 只能确认触及等待上限，不能据此认定网络慢是唯一原因。
+**解决**: 当前默认 bootstrap 和 DST 下载超时均为 3600 秒。远端构建把 bootstrap 超时传给 `Dockerfile.build-base`，宿主机下载容器使用 `STEAMCMD_DOWNLOAD_DEADLINE` 作为 `timeout`；本地路线仍通过 Dockerfile 的 `ARG` 传入两个超时。必须使用正整数与 `s`/`m`/`h` 单位，`0s`、无限等待与非法格式会拒绝执行。退出码 124 只能确认触及等待上限，不能据此认定网络慢是唯一原因。
 
 对已经下发脚本的任务，手动运行远端构建脚本时可明确设置预算（环境变量须设置在服务器执行命令中，路径中的 Release ID 与参数保持一致）：
 

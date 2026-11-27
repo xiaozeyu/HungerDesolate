@@ -606,7 +606,14 @@ fn task_response(
             "更新任务响应身份或字段无效",
         ));
     }
-    Ok(json!({"schemaVersion":1,"requestId":request_id,"target":target,"task":remote}))
+    let target = serde_json::to_value(target)
+        .map_err(|_| work_error("UPDATE_PROTOCOL_INVALID", OP_UPDATE, "更新任务目标编码失败"))?;
+    let mut task = remote;
+    task["target"] = target.clone();
+    if let Some(error_target) = task.pointer_mut("/error/target") {
+        *error_target = target.clone();
+    }
+    Ok(json!({"schemaVersion":1,"requestId":request_id,"target":target,"task":task}))
 }
 
 pub fn run(database: &Path, request: RunRequest) -> CommandResult<Value> {
@@ -795,6 +802,28 @@ mod tests {
         let error = map_error("SOMETHING_NEW", None);
         assert_eq!(error.code, "UPDATE_FAILED");
         assert_eq!(error.category, "update");
+    }
+
+    #[test]
+    fn task_response_restores_the_verified_connection_target() {
+        let target = super::InstanceTarget {
+            server_id: "local-server".to_string(),
+            host_id: "remote-host".to_string(),
+            instance_id: "remote-instance".to_string(),
+        };
+        let mut remote = json!({
+            "schemaVersion": 1, "taskId": "task", "operationId": "task",
+            "operation": "instanceUpdate", "status": "failed", "stage": "preflight", "sequence": 2,
+            "target": {"hostId": "remote-host", "instanceId": "remote-instance"},
+            "error": {"target": {"hostId": "remote-host", "instanceId": "remote-instance"}}
+        });
+        let response = super::task_response(remote.clone(), "request", &target, "task").unwrap();
+        assert_eq!(response["task"]["target"], json!(target));
+        assert_eq!(response["task"]["error"]["target"], response["target"]);
+
+        remote["target"]["instanceId"] = json!("other-instance");
+        let error = super::task_response(remote, "request", &target, "task").unwrap_err();
+        assert_eq!(error.code, "UPDATE_PROTOCOL_INVALID");
     }
 
     #[test]

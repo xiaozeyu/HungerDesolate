@@ -157,10 +157,21 @@ if [ -e "$DST_ROOT/$RELEASE_ID" ]; then
     exit 1
 fi
 
+reset_download_dirs() {
+    rm -rf -- "$DST_DOWNLOAD" "$BUILD_DIR/steamapps"
+    mkdir -p -- "$DST_DOWNLOAD" "$BUILD_DIR/steamapps"
+    chown 1000:1000 "$DST_DOWNLOAD" "$BUILD_DIR/steamapps"
+}
+
+download_dst() {
+    docker run 9>&- --rm --network bridge --user 1000:1000 --env HOME=/home/steam \
+        -v "$DST_DOWNLOAD:/dst" -v "$BUILD_DIR/steamapps:/home/steam/steamapps" --env DST_DIR=/dst \
+        --env "STEAMCMD_DOWNLOAD_DEADLINE=${STEAMCMD_DOWNLOAD_DEADLINE}" \
+        "$BUILD_BASE_IMAGE" /bin/bash /home/steam/install-dst.sh download
+}
+
 echo '==> 下载 DST 服务端到宿主机'
-rm -rf "$DST_DOWNLOAD"
-mkdir -p "$DST_DOWNLOAD"
-chown 1000:1000 "$DST_DOWNLOAD"
+reset_download_dirs
 DST_BASE=""
 if [ -d "$DST_ROOT" ]; then
     DST_BASE=$(ls -1dt "$DST_ROOT"/*/ 2>/dev/null | head -n 1) || DST_BASE=""
@@ -170,13 +181,14 @@ if [ -n "$DST_BASE" ]; then
     echo "==> 复用最近 DST 目录作为增量基线: ${DST_BASE}"
     cp -a "$DST_BASE/." "$DST_DOWNLOAD/"
     chown -R 1000:1000 "$DST_DOWNLOAD"
+    download_dst || {
+        printf '==> 增量下载失败（退出码 %s），清空临时目录后全量重试\n' "$?" >&2
+        reset_download_dirs
+        download_dst
+    }
+else
+    download_dst
 fi
-mkdir -p "$BUILD_DIR/steamapps"
-chown 1000:1000 "$BUILD_DIR/steamapps"
-docker run 9>&- --rm --network bridge --user 1000:1000 --env HOME=/home/steam \
-    -v "$DST_DOWNLOAD:/dst" -v "$BUILD_DIR/steamapps:/home/steam/steamapps" --env DST_DIR=/dst \
-    --env "STEAMCMD_DOWNLOAD_DEADLINE=${STEAMCMD_DOWNLOAD_DEADLINE}" \
-    "$BUILD_BASE_IMAGE" /bin/bash /home/steam/install-dst.sh download
 
 if [ ! -x "$DST_DOWNLOAD/bin64/dontstarve_dedicated_server_nullrenderer_x64" ] \
     || [ ! -s "$DST_DOWNLOAD/version.txt" ] \

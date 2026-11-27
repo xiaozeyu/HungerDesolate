@@ -920,9 +920,9 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
     </PageHeader>
     <PreviewNotice/>
 
-    <ErrorNotice :error="error"/>
-    <ErrorNotice :error="taskError"/>
-    <ErrorNotice :error="applyTaskError"/>
+    <ErrorNotice title="MOD 操作失败" :error="error" :pending="loading"/>
+    <ErrorNotice title="准备 MOD 失败" :error="taskError"/>
+    <ErrorNotice title="提交 MOD 应用失败" :error="applyTaskError"/>
 
     <template v-if="loading || items.length">
       <div class="table-wrap">
@@ -940,7 +940,7 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
     </TaskPanel>
 </FloatingTask>
     <AppDialog v-model:open="hostLibraryOpen" title="从主机 MOD 库添加" size="lg">
-      <ErrorNotice :error="hostLibraryError"/>
+      <ErrorNotice title="读取主机 MOD 库失败" :error="hostLibraryError" :pending="hostLibraryLoading"/>
       <div v-if="hostLibraryLoading" class="muted-text" role="status">读取主机 MOD 库…</div>
       <template v-else-if="hostLibraryItems.length">
         <div class="host-library-toolbar">
@@ -1000,8 +1000,7 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
           </IconButton>
         </div>
       </div>
-      <ErrorNotice :error="configError"/>
-      <div v-if="configValidationError" class="error-strip">{{ configValidationError }}</div>
+      <ErrorNotice title="MOD 配置未保存" :error="configError || configValidationError" :pending="configSaving"/>
       <template #footer>
         <NButton :disabled="configSaving" @click="configEditorOpen = false">取消</NButton>
         <NButton type="primary"
@@ -1012,9 +1011,9 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
 
     <AppDialog v-model:open="applyPreviewOpen" title="MOD 应用预览" description="只读核对目标内容与恢复条件" size="lg">
       <LoadingState v-if="applyPreviewLoading" compact description="正在核对应用条件"/>
-      <ErrorNotice v-else-if="applyPreviewError" :error="applyPreviewError"/>
-      <div v-else-if="applyPreview" class="mod-apply-preview">
-        <div v-if="applyPreviewStale" class="error-strip">MOD 配置已变化，此预览已失效。请重新生成。</div>
+      <ErrorNotice title="核对 MOD 应用条件失败" :error="applyPreviewError" :pending="applyPreviewLoading"/>
+      <div v-if="!applyPreviewLoading && !applyPreviewError && applyPreview" class="mod-apply-preview">
+        <StatusLabel v-if="applyPreviewStale" tone="warning" label="预览已过期"/>
         <section class="mod-apply-section">
           <h3>MOD 变更 <span class="muted-text">{{ applyPreview.changes.length }}</span></h3>
           <p v-if="!applyPreview.changes.length" class="muted-text">期望与已部署状态一致</p>
@@ -1052,7 +1051,7 @@ const hostLibraryRowKey = (item: HostModItem) => hostLibraryKey(item);
           <div><span>MOD</span><strong>{{ instanceModName(removeTarget) }}</strong></div>
           <div><span>Workshop ID</span><strong class="mono">{{ removeTarget.workshopId }}</strong></div>
         </div>
-        <ErrorNotice :error="removeError"/>
+        <ErrorNotice title="删除 MOD 失败" :error="removeError"/>
       </div>
       <template #footer>
         <NButton :disabled="removeBusy" @click="removeTarget = null">取消</NButton>

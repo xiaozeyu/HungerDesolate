@@ -10,6 +10,7 @@ import PreviewNotice from "../components/PreviewNotice.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import IconButton from "../components/IconButton.vue";
 import LoadingState from "../components/LoadingState.vue";
+import ErrorNotice from "../components/ErrorNotice.vue";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { getInstanceDiagnostics, type DiagnosticsResponse } from "../api/diagnostics";
@@ -126,13 +127,10 @@ const taskRowKey = (task: DiagnosticsTask) => task.taskId;
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <div v-if="error" class="environment-error" role="alert">
-      <strong>{{ error.message }}</strong>
-      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
-    </div>
-    <div v-if="stale" class="error-strip" role="status">诊断刷新失败，当前显示上次结果</div>
+    <ErrorNotice :key="key ?? undefined" title="读取专服诊断失败" :error="error" :pending="loading"/>
+    <StatusLabel v-if="stale && data" tone="warning" label="结果已过期"/>
     <LoadingState v-if="loading && !data" description="读取专服诊断…"/>
-    <div v-else-if="!data" class="empty-state" role="alert">
+    <div v-else-if="!data" class="empty-state">
       <h2>{{ workspace.preview.value ? "诊断需要桌面连接" : "暂无诊断结果" }}</h2>
     </div>
     <template v-else>

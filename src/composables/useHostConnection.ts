@@ -12,7 +12,6 @@ const busyServerId = ref("");
 const challenge = ref<FingerprintChallenge | null>(null);
 const challengeServer = ref<ServerSummary | null>(null);
 const error = ref<UserError | null>(null);
-const errorServerId = ref("");
 const trustError = ref("");
 const verifiedServerVersions = ref<Record<string, number>>({});
 let pending: {server: ServerSummary; onConnected: ConnectedHandler; ticket: number} | null = null;
@@ -42,10 +41,6 @@ export function useHostConnection() {
     trustError.value = "";
     pending = null;
   }
-  function clearError() {
-    error.value = null;
-    errorServerId.value = "";
-  }
   function markVerified(server: ServerSummary) {
     verifiedServerVersions.value = {...verifiedServerVersions.value, [server.serverId]: server.recordVersion};
   }
@@ -56,15 +51,14 @@ export function useHostConnection() {
   }
   function fail(cause: unknown, server: ServerSummary) {
     const failure = describeError(cause);
-    error.value = failure;
-    errorServerId.value = server.serverId;
+    error.value = { ...failure, message: `${server.displayName}：${failure.message}` };
     if (CREDENTIAL_CODES.has(failure.code)) connectionDialog.openConnection(server.serverId);
     return failure;
   }
   async function connect(server: ServerSummary, onConnected: ConnectedHandler) {
     if (workspace.preview.value) return;
     clearTrust();
-    clearError();
+    error.value = null;
     const ticket = ++sequence;
     clearVerified(server.serverId);
     busyServerId.value = server.serverId;
@@ -135,6 +129,6 @@ export function useHostConnection() {
   function closeTrust() {
     clearTrust();
   }
-  return {busyServerId, challenge, challengeServer, error, errorServerId, trustError, trustOpen,
-    verifiedServerVersions, markVerified, connect, confirmTrust, closeTrust, clearError};
+  return {busyServerId, challenge, challengeServer, error, trustError, trustOpen,
+    verifiedServerVersions, markVerified, connect, confirmTrust, closeTrust};
 }

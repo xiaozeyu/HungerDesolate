@@ -14,6 +14,8 @@ import { useBuildTasks } from "./composables/useBuildTasks";
 import { useTaskDrawer } from "./composables/useTaskDrawer";
 import { getBootstrapSnapshot } from "./api/bootstrap";
 import IconButton from "./components/IconButton.vue";
+import ErrorNotice from "./components/ErrorNotice.vue";
+import { useHostConnection } from "./composables/useHostConnection";
 import TaskDrawer from "./components/TaskDrawer.vue";
 import ConnectionSettingsDialog from "./components/ConnectionSettingsDialog.vue";
 import { operationKindLabel, operationTargetLabel, taskOperationLabel, taskTargetLabel } from "./lib/operationView";
@@ -23,6 +25,7 @@ import type { TaskSnapshot } from "./types/contracts";
 const route = useRoute();
 const router = useRouter();
 const workspace = useWorkspace();
+const hostConnection = useHostConnection();
 const taskStore = useTasks();
 const operations = useOperations();
 const buildTasks = useBuildTasks();
@@ -207,6 +210,9 @@ onUnmounted(() => {
       </NLayoutFooter>
     </NLayout>
   </NLayout>
+  <ErrorNotice title="读取主机列表失败" :error="workspace.error.value" :pending="workspace.loading.value"/>
+  <ErrorNotice title="连接主机失败" :error="hostConnection.error.value"/>
+  <ErrorNotice title="确认 SSH 指纹失败" :error="hostConnection.trustError.value"/>
   <TaskDrawer/>
   <ConnectionSettingsDialog/>
   </NConfigProvider>

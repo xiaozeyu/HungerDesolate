@@ -17,13 +17,16 @@ import { useTasks } from "../composables/useTasks";
 import { useTaskDrawer } from "../composables/useTaskDrawer";
 import { controlInstance, listInstanceReleases, type InstanceReleaseSummary } from "../api/instances";
 import { previewInstanceUpdate, runInstanceUpdate, type UpdatePreview } from "../api/updates";
-import { describeError, type UserError } from "../lib/commandError";
+import { describeError } from "../lib/commandError";
+import ErrorNotice from "../components/ErrorNotice.vue";
+import { notifyError } from "../naive/notify";
+import { sameTarget } from "../lib/navigationGuard";
 import { formatBytes } from "../lib/environmentView";
 import { inSession } from "../lib/session";
 import { hasReadyShardListeners } from "../lib/instanceRuntime";
 import { activeContext } from "../context/activeContext";
 import { operationTargetKey, stageLabel, taskOperationLabel } from "../lib/operationView";
-const { data, error, loading, stale, refresh, pausePolling, resumePolling } = useInstanceOverview({ poll: false });
+const { data, error, loading, stale, refresh, updateInProgress } = useInstanceOverview();
 const { server, target } = usePageTarget();
 const workspace = useWorkspace();
 const operations = useOperations();
@@ -34,8 +37,7 @@ const instanceTasks = computed(() => {
   const selected = target.value;
   if (!selected) return [];
   return [...taskStore.tasks.value]
-    .filter(task => "hostId" in task.target && task.target.hostId === selected.hostId
-      && "instanceId" in task.target && task.target.instanceId === selected.instanceId)
+    .filter(task => "instanceId" in task.target && sameTarget(task.target, selected))
     .sort((left, right) => (Date.parse(right.createdAt) || 0) - (Date.parse(left.createdAt) || 0));
 });
 const visibleTask = computed(() => instanceTasks.value.find(task => ["queued", "running"].includes(task.status))
@@ -62,12 +64,7 @@ const runtimeAction = computed<"start"|"stop"|"restart"|null>(() => {
   return operation && (operation.kind === "start" || operation.kind === "stop" || operation.kind === "restart")
     ? operation.kind : null;
 });
-const startError = ref<UserError|null>(null);
 let mounted = true;
-watch([() => activeContext.value.epoch, () => server.value?.recordVersion,
-  () => target.value?.serverId, () => target.value?.hostId, () => target.value?.instanceId], () => {
-  startError.value = null;
-}, { flush: "sync" });
 onBeforeUnmount(() => { mounted = false; });
 const name = computed(() => data.value?.identity.displayName ?? "专服");
 const runtimeStatus = computed(() => data.value?.runtime?.status ?? data.value?.identity.runtimeStatus ?? "unknown");
@@ -80,7 +77,7 @@ const installedBuild = computed(() => runtime.value?.installedBuild ?? null);
 const revision = computed(() => data.value?.manifestSummary?.configRevision ?? null);
 const updateOpen = ref(false);
 const updateLoading = ref(false);
-const updateError = ref("");
+let updateSequence = 0;
 const updateReleases = ref<InstanceReleaseSummary[]>([]);
 const updateSelected = ref("");
 const updatePreview = ref<UpdatePreview | null>(null);
@@ -98,26 +95,63 @@ const updateWarningLabel = (value: string) => ({
   DST_RELEASE_RUNTIME_UNVERIFIED: "目标 Release 未做运行时验证",
 }[value] ?? value);
 
+function captureContext() {
+  const selected = target.value;
+  const version = server.value?.recordVersion;
+  const epoch = activeContext.value.epoch;
+  const preview = workspace.preview.value;
+  return () => mounted && sameTarget(selected, target.value) && server.value?.recordVersion === version
+    && activeContext.value.epoch === epoch && workspace.preview.value === preview;
+}
+
+function updateTicket() {
+  const current = captureContext();
+  const sequence = ++updateSequence;
+  return () => current() && sequence === updateSequence;
+}
+
+watch([() => activeContext.value.epoch, targetKey, () => server.value?.recordVersion, workspace.preview], () => {
+  updateSequence++;
+  updateOpen.value = false;
+  updateLoading.value = false;
+  updateBusy.value = false;
+  updatePreview.value = null;
+  updateReleases.value = [];
+  updateSelected.value = "";
+}, { flush: "sync" });
+
+function closeUpdateDialog() {
+  if (updateBusy.value) return;
+  updateSequence++;
+  updateOpen.value = false;
+  updatePreview.value = null;
+}
+
 async function openUpdateDialog() {
   const connection = server.value;
   const instanceTarget = target.value;
-  if (!connection?.hostId || !instanceTarget || updateLoading.value) return;
+  if (!connection?.hostId || !instanceTarget || updateLoading.value || updateInProgress.value) return;
+  const current = updateTicket();
+  const requestId = crypto.randomUUID();
   updateLoading.value = true;
-  updateError.value = "";
   updatePreview.value = null;
   updateSelected.value = "";
+  updateReleases.value = [];
   try {
-    const response = await listInstanceReleases({ schemaVersion: 1, requestId: crypto.randomUUID(),
+    const response = await listInstanceReleases({ schemaVersion: 1, requestId,
       serverId: connection.serverId, expectedRecordVersion: connection.recordVersion });
-    if (response.serverId !== connection.serverId || response.hostId !== connection.hostId) return;
+    if (!current()) return;
+    if (response.requestId !== requestId || response.serverId !== instanceTarget.serverId
+        || response.hostId !== instanceTarget.hostId || response.recordVersion !== connection.recordVersion) {
+      throw new Error("Release 列表响应身份或版本不匹配");
+    }
     updateReleases.value = response.releases;
     updateSelected.value = updateCandidates.value[0]?.releaseId ?? "";
     updateOpen.value = true;
   } catch (cause) {
-    updateError.value = describeError(cause).message;
-    updateOpen.value = true;
+    if (current()) notifyError("读取 Release 失败", describeError(cause));
   } finally {
-    updateLoading.value = false;
+    if (current()) updateLoading.value = false;
   }
 }
 
@@ -125,22 +159,30 @@ async function previewUpdate() {
   const connection = server.value;
   const instanceTarget = target.value;
   const release = selectedRelease.value;
-  if (!connection?.hostId || !instanceTarget || !release || revision.value === null || updateBusy.value) return;
+  const expectedRevision = revision.value;
+  if (!connection?.hostId || !instanceTarget || !release || expectedRevision === null || updateBusy.value || updateInProgress.value) return;
+  const current = updateTicket();
+  const requestId = crypto.randomUUID();
   updateBusy.value = true;
-  updateError.value = "";
   updatePreview.value = null;
   try {
-    const preview = await previewInstanceUpdate({ schemaVersion: 1, requestId: crypto.randomUUID(),
+    const preview = await previewInstanceUpdate({ schemaVersion: 1, requestId,
       target: instanceTarget, expectedRecordVersion: connection.recordVersion,
-      expectedRevision: revision.value, targetReleaseId: release.releaseId });
+      expectedRevision, targetReleaseId: release.releaseId });
+    if (!current()) return;
+    if (preview.requestId !== requestId || !sameTarget(preview.target, instanceTarget)
+        || preview.baseRevision !== expectedRevision || preview.targetRelease.releaseId !== release.releaseId) {
+      throw new Error("切换预览响应身份或版本不匹配");
+    }
     updatePreview.value = preview;
   } catch (cause) {
+    if (!current()) return;
     const failure = describeError(cause);
     const blockers = Array.isArray(failure.details?.blockers)
       ? failure.details.blockers.filter((item): item is string => typeof item === "string") : [];
-    updateError.value = blockers.length ? `${failure.message}：${blockers.join("、")}` : failure.message;
+    notifyError("预览切换失败", { ...failure, recoverySteps: [...blockers, ...failure.recoverySteps] });
   } finally {
-    updateBusy.value = false;
+    if (current()) updateBusy.value = false;
   }
 }
 
@@ -148,24 +190,28 @@ async function confirmUpdate() {
   const connection = server.value;
   const instanceTarget = target.value;
   const preview = updatePreview.value;
-  if (!connection?.hostId || !instanceTarget || !preview || revision.value === null || updateBusy.value) return;
-  updateBusy.value = true;
-  updateError.value = "";
+  if (!connection?.hostId || !instanceTarget || !preview?.allowed || revision.value !== preview.baseRevision
+      || !sameTarget(preview.target, instanceTarget) || updateBusy.value || updateInProgress.value) return;
+  const current = updateTicket();
+  const requestId = crypto.randomUUID();
   const operationId = crypto.randomUUID();
+  updateBusy.value = true;
   try {
-    const response = await runInstanceUpdate({ schemaVersion: 1, requestId: crypto.randomUUID(),
+    const response = await runInstanceUpdate({ schemaVersion: 1, requestId,
       target: instanceTarget, expectedRecordVersion: connection.recordVersion,
-      expectedRevision: revision.value, planId: preview.planId, operationId });
-    if (response.task.operationId !== operationId || response.task.operation !== "instanceUpdate") {
+      expectedRevision: preview.baseRevision, planId: preview.planId, operationId });
+    const { task } = response;
+    if (response.requestId !== requestId || !sameTarget(response.target, instanceTarget)
+        || task.taskId !== operationId || task.operationId !== operationId || task.operation !== "instanceUpdate"
+        || !("instanceId" in task.target) || !sameTarget(task.target, instanceTarget)) {
       throw new Error("切换任务回执身份不匹配");
     }
-    taskStore.receive(response.task);
-    updateOpen.value = false;
-    await refresh();
+    taskStore.receive(task);
+    if (current()) updateOpen.value = false;
   } catch (cause) {
-    updateError.value = describeError(cause).message;
+    if (current()) notifyError("未能提交 DST 切换", describeError(cause));
   } finally {
-    updateBusy.value = false;
+    if (current()) updateBusy.value = false;
   }
 }
 const shardName = (shard: "master" | "caves") => shard === "master" ? "主世界 · Master" : "洞穴 · Caves";
@@ -190,9 +236,10 @@ const shardStateLabel = (shard: (typeof shards.value)[number]) =>
 const shardPortLabel = (shard: (typeof shards.value)[number]) =>
   shard.ready ? "端口就绪" : shard.missingPorts.length ? `缺少 ${shard.missingPorts.length} 个端口` : "未就绪";
 const canStart = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
-  && !workspace.preview.value && !loading.value && !runtimeAction.value && runtimeStatus.value !== "running");
+  && !workspace.preview.value && !loading.value && !runtimeAction.value && !updateInProgress.value && !updateBusy.value
+  && runtimeStatus.value !== "running");
 const canStop = computed(() => !!target.value && !!server.value && !!data.value?.manifestSummary
-  && !workspace.preview.value && !loading.value && !runtimeAction.value && shards.value.length > 0
+  && !workspace.preview.value && !loading.value && !runtimeAction.value && !updateInProgress.value && !updateBusy.value && shards.value.length > 0
   && runtimeStatus.value !== "stopped" && runtimeStatus.value !== "unknown");
 const canRestart = computed(() => canStop.value && runtimeStatus.value === "running");
 
@@ -202,8 +249,7 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
   if (!selectedTarget || !connection || !overview?.manifestSummary || !allowed) return;
   const cavesEnabled = overview.manifestSummary.cavesEnabled;
   const revision = overview.manifestSummary.configRevision;
-  startError.value = null;
-  pausePolling();
+  const current = captureContext();
   const outcome = await operations.run({
     kind: action,
     target: selectedTarget,
@@ -235,11 +281,9 @@ async function operateRuntime(action: "start"|"stop"|"restart") {
       return response;
     },
   });
-  resumePolling();
-  if (!mounted || target.value?.instanceId !== selectedTarget.instanceId
-      || server.value?.recordVersion !== connection.recordVersion) return;
+  if (!current()) return;
   if (outcome.error) {
-    startError.value = outcome.error;
+    notifyError(action === "start" ? "启动专服失败" : action === "stop" ? "停止专服失败" : "重启专服失败", outcome.error);
     return;
   }
   await refresh();
@@ -263,9 +307,10 @@ const updateOptions = computed(() => updateCandidates.value.map(release => ({
 <template>
   <div class="page">
     <PageHeader :eyebrow="name" title="专服概览">
+      <template #status><span v-if="installedBuild" class="mono muted-text">DST {{ installedBuild }}</span></template>
       <template #actions>
-        <NButton size="small" :disabled="loading || !!runtimeAction" @click="openUpdateDialog"><template #icon><ArrowUpCircle :size="16"/></template>切换 DST 版本</NButton>
-        <NButton size="small" :disabled="loading || !!runtimeAction" @click="refresh"><template #icon><RotateCw :size="16"/></template>刷新</NButton>
+        <NButton size="small" :disabled="loading || !!runtimeAction || updateLoading || updateInProgress" @click="openUpdateDialog"><template #icon><ArrowUpCircle :size="16"/></template>切换 DST 版本</NButton>
+        <NButton size="small" :disabled="loading || !!runtimeAction || updateBusy || updateInProgress" @click="refresh"><template #icon><RotateCw :size="16"/></template>刷新</NButton>
         <NButton v-if="runtimeStatus==='running'" size="small" :disabled="!canRestart" :loading="runtimeAction==='restart'" @click="operateRuntime('restart')">
           <template #icon><RotateCw :size="16"/></template>{{runtimeAction==='restart'?'重启并验证中…':'重启'}}
         </NButton>
@@ -278,19 +323,10 @@ const updateOptions = computed(() => updateCandidates.value.map(release => ({
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <div v-if="startError" class="environment-error" role="alert">
-      <strong>{{startError.message}}</strong>
-      <ul v-if="startError.recoverySteps.length"><li v-for="step in startError.recoverySteps" :key="step">{{step}}</li></ul>
-    </div>
-
+    <ErrorNotice :key="targetKey" :title="stale ? '运行状态刷新失败' : '读取运行状态失败'" :pending="loading"
+      :error="error && stale ? { ...error, recoverySteps: ['当前显示上次采集结果', ...error.recoverySteps] } : error"/>
     <LoadingState v-if="loading && !data" description="读取当前专服…"/>
-    <div v-else-if="error && !data" class="error-strip" role="alert">
-      {{error}}
-    </div>
     <template v-if="data">
-      <div v-if="error && stale" class="error-strip" role="status">
-        运行状态刷新失败，当前显示上次采集结果：{{error}}
-      </div>
       <section class="section-block shard-section">
         <div class="section-heading">
           <div><h2>分片状态</h2></div>
@@ -322,6 +358,7 @@ const updateOptions = computed(() => updateCandidates.value.map(release => ({
         </div>
         <p v-else class="muted-text">端口信息尚未采集</p>
       </section>
+    </template>
 <FloatingTask v-if="dockTask" label="专服任务" :tone="taskTone" :summary="taskStatusText" :progress="taskPercent" :dismissible="taskDismissible" @dismiss="dismissTask">
     <TaskPanel v-if="dockTask" dock :title="taskOperationLabel(dockTask.operation)" :status-label="taskStatusText"
       :stage-label="stageLabel(dockTask.stage)" :tone="taskTone" :queue-position="dockTask.queuePosition"
@@ -329,13 +366,12 @@ const updateOptions = computed(() => updateCandidates.value.map(release => ({
       <template #actions><NButton text size="small" @click="openTaskDrawer">任务记录</NButton></template>
     </TaskPanel>
 </FloatingTask>
-<AppDialog :open="updateOpen" title="切换 DST 版本" @update:open="value => { if (!value && !updateBusy) { updateOpen = false; updatePreview = null; updateError = ''; } }">
+<AppDialog :open="updateOpen" title="切换 DST 版本" @update:open="value => { if (!value) closeUpdateDialog(); }">
   <div class="update-dialog">
     <p v-if="!updateCandidates.length" class="muted-text">没有更高 build 的已验证 Release。请先在 Release 管理页检查并构建。</p>
     <label v-else>目标版本
       <NSelect v-model:value="updateSelected" :options="updateOptions" :disabled="updateBusy" @update:value="updatePreview = null"/>
     </label>
-    <div v-if="updateError" class="environment-error" role="alert">{{ updateError }}</div>
     <div v-if="updatePreview" class="update-preview">
       <p>当前 build {{ updatePreview.current.build ?? "未知" }} → 目标 build {{ updatePreview.targetRelease.build ?? "未知" }}</p>
       <p>将停止 {{ updatePreview.shards.join(" / ") }}；世界存档保护点约 {{ formatBytes(updatePreview.backup.estimatedBytes) }}；可用 {{ formatBytes(updatePreview.backup.availableBytes) }}</p>
@@ -344,16 +380,15 @@ const updateOptions = computed(() => updateCandidates.value.map(release => ({
     </div>
   </div>
   <template #footer>
-    <NButton :disabled="updateBusy" @click="updateOpen = false">取消</NButton>
+    <NButton :disabled="updateBusy" @click="closeUpdateDialog">取消</NButton>
     <NButton v-if="!updatePreview" type="primary" :disabled="updateBusy || !updateSelected || !updateCandidates.length || revision === null" @click="previewUpdate">
       {{ updateBusy ? "检测中…" : "预览切换" }}
     </NButton>
-    <NButton v-else type="primary" :disabled="updateBusy || revision === null" @click="confirmUpdate">
+    <NButton v-else type="primary" :disabled="updateBusy || updateInProgress || !updatePreview.allowed || revision !== updatePreview.baseRevision" @click="confirmUpdate">
       {{ updateBusy ? "创建备份…" : "创建备份并切换" }}
     </NButton>
   </template>
 </AppDialog>
-    </template>
   </div>
 </template>
 

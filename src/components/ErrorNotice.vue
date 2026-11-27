@@ -1,16 +1,20 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { UserError } from "../lib/commandError";
+import { watch } from "vue";
+import { errorContent, notifyError, type ErrorContent } from "../naive/notify";
 
-const props = withDefaults(defineProps<{ error?: UserError | string | null }>(), { error: null });
-const message = computed(() => typeof props.error === "string" ? props.error : props.error?.message ?? "");
-const steps = computed(() => typeof props.error === "string" || !props.error ? [] : props.error.recoverySteps);
+const props = withDefaults(defineProps<{
+  title?: string;
+  error?: ErrorContent | null;
+  pending?: boolean;
+}>(), { title: "操作失败", error: null, pending: false });
+
+let last = "";
+watch(() => [props.title, errorContent(props.error), props.pending] as const, ([title, content, pending]) => {
+  if (pending) return;
+  const signature = content ? `${title}\n${content}` : "";
+  if (content && signature !== last) notifyError(title, content);
+  last = signature;
+}, { immediate: true, flush: "post" });
 </script>
 
-<template>
-  <div v-if="error" class="error-notice" role="alert">
-    <strong>{{ message }}</strong>
-    <ul v-if="steps.length"><li v-for="step in steps" :key="step">{{ step }}</li></ul>
-    <slot/>
-  </div>
-</template>
+<template><!-- Naive UI renders the notification outside the page. --></template>

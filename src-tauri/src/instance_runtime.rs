@@ -420,10 +420,11 @@ fn execute(session: &Session, request: &Value) -> CommandResult<Value> {
         }
     }
     session.set_blocking(true);
+    let timeout = session.timeout();
     session.set_timeout(1000);
-    channel
-        .wait_close()
-        .map_err(|_| error("INSTANCE_START_CHANNEL_FAILED", "远端启动通道未正常结束"))?;
+    let closed = channel.wait_close();
+    session.set_timeout(timeout);
+    closed.map_err(|_| error("INSTANCE_START_CHANNEL_FAILED", "远端启动通道未正常结束"))?;
     let envelope: Value = serde_json::from_slice(&output)
         .map_err(|_| error("INSTANCE_START_PROTOCOL_INVALID", "远端启动响应格式无效"))?;
     if envelope.get("ok") != Some(&Value::Bool(true)) {

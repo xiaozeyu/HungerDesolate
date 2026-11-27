@@ -7,12 +7,13 @@ import PreviewNotice from "../components/PreviewNotice.vue";
 import LoadingState from "../components/LoadingState.vue";
 import AppDialog from "../components/AppDialog.vue";
 import ErrorNotice from "../components/ErrorNotice.vue";
+import StatusLabel from "../components/StatusLabel.vue";
 import { useInstancePlayers } from "../composables/useInstancePlayers";
 import { usePageTarget } from "../composables/usePageTarget";
 import { useWorkspace } from "../composables/useWorkspace";
 import { characterLabel } from "../lib/characters";
 import { describeError, type UserError } from "../lib/commandError";
-import { notifyError, notifyInfo, notifySuccess } from "../naive/notify";
+import { notifyInfo, notifySuccess } from "../naive/notify";
 import {
   installInstancePlayerBridge, previewInstancePlayerBridge,
   type PlayerBridgeStatusResponse, type PlayerEntry,
@@ -21,10 +22,8 @@ import {
 const { server, target, instanceName } = usePageTarget();
 const workspace = useWorkspace();
 const { data, error, loading, stale, refresh } = useInstancePlayers();
-let refreshFailureNotified = false;
 let notifiedWarnings = "";
 watch(data, response => {
-  refreshFailureNotified = false;
   if (!response) return;
   const warnings = response.data.warnings;
   if (!warnings.length) { notifiedWarnings = ""; return; }
@@ -42,11 +41,6 @@ watch(() => data.value?.freshness, (freshness, previous) => {
   } else if (freshness === "fresh" && previous === "stale") {
     notifySuccess("玩家状态已更新");
   }
-});
-watch(stale, value => {
-  if (!value || refreshFailureNotified) return;
-  refreshFailureNotified = true;
-  notifyError("玩家列表刷新失败", "当前显示上次结果。");
 });
 const enableOpen = ref(false);
 const enableLoading = ref(false);
@@ -150,9 +144,8 @@ watch([() => target.value?.instanceId, () => server.value?.recordVersion], () =>
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <div v-if="error" class="environment-error" role="alert">
-      <strong>{{ error }}</strong>
-    </div>
+    <ErrorNotice :key="targetKey()" :title="stale ? '玩家列表刷新失败' : '读取玩家列表失败'" :pending="loading"
+      :error="error && stale ? `${error}\n当前显示上次结果` : error"/>
     <LoadingState v-if="loading && !data" description="读取玩家列表…"/>
     <template v-else-if="data">
       <section v-if="bridgeDisabled" class="empty-state">
@@ -165,6 +158,7 @@ watch([() => target.value?.instanceId, () => server.value?.recordVersion], () =>
         <div class="section-heading">
           <div>
             <p class="muted-text">更新于 {{ new Date(data.capturedAt).toLocaleTimeString() }}</p>
+            <StatusLabel v-if="stale" tone="warning" label="结果已过期"/>
           </div>
         </div>
         <div v-if="!players.length" class="empty-state">
@@ -175,14 +169,14 @@ watch([() => target.value?.instanceId, () => server.value?.recordVersion], () =>
         </div>
       </section>
     </template>
-    <div v-else class="empty-state" role="alert">
+    <div v-else class="empty-state">
       <h2>暂无玩家列表</h2>
     </div>
 
     <AppDialog v-model:open="enableOpen" title="启用玩家列表" size="sm">
       <LoadingState v-if="enableLoading" compact description="正在检查安装条件"/>
-      <ErrorNotice v-else-if="enableError" :error="enableError"/>
-      <template v-else-if="enablePreview">
+      <ErrorNotice title="启用玩家列表失败" :error="enableError" :pending="enableLoading || enableBusy"/>
+      <template v-if="!enableLoading && !enableError && enablePreview">
         <ul v-if="enablePreview.blockers.length" class="environment-error">
           <li v-for="blocker in enablePreview.blockers" :key="blocker">{{ blocker === 'PLAYER_BRIDGE_OVERRIDES_UNMANAGED'
             ? '现有 MOD 覆盖文件不是应用生成的格式，无法安全合并' : '当前实例布局不支持玩家桥接' }}</li>

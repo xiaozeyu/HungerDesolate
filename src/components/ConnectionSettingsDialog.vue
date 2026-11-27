@@ -48,7 +48,6 @@ function testConnection() {
 <template>
   <AppDialog :open="!!dialog.serverId.value" title="连接设置" size="md" @update:open="value => { if (!value) close() }">
     <div v-if="server" class="connection-dialog">
-      <p v-if="workspace.error.value" class="error-strip" role="alert">{{ workspace.error.value }}</p>
       <section class="connection-block">
         <div class="section-heading"><div><h2>连接信息</h2></div></div>
         <ServerForm ref="serverForm" :server="server" :readonly="workspace.preview.value" form-id="edit-server"
@@ -56,17 +55,12 @@ function testConnection() {
           @saved="saved" @tested="tested" @busy="saving = $event"/>
       </section>
       <SshConnectionPanel :server="server" :preview="workspace.preview.value" @state="sshStateChanged"/>
-      <p v-if="hostConnection.error.value && hostConnection.errorServerId.value === server.serverId" class="error-strip" role="alert">
-        <strong>{{ hostConnection.error.value.message }}</strong>
-        <span v-if="hostConnection.error.value.recoverySteps.length"> {{ hostConnection.error.value.recoverySteps.join("；") }}</span>
-      </p>
       <FingerprintTrustDialog :open="hostConnection.trustOpen.value"
         :display-name="hostConnection.challengeServer.value?.displayName ?? ''"
         :host="hostConnection.challengeServer.value?.host ?? ''"
         :ssh-port="hostConnection.challengeServer.value?.sshPort ?? 22"
         :challenge="hostConnection.challenge.value"
         :busy="hostConnection.busyServerId.value === hostConnection.challengeServer.value?.serverId"
-        :error="hostConnection.trustError.value"
         @update:open="value => { if (!value) hostConnection.closeTrust() }"
         @confirm="hostConnection.confirmTrust"/>
     </div>

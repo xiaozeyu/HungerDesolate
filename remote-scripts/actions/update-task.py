@@ -192,13 +192,13 @@ def set_status(directory, status, stage, completed=None, result=None, error=None
     if status in ("succeeded", "failed", "cancelled", "interrupted"):
         state["finishedAt"] = now()
         state["cancelAllowed"] = False
+        # Clients refresh the instance as soon as they observe the terminal state.
+        release_pending(directory.name)
     atomic_json(directory / "status.json", state)
     journal = directory / "journal.jsonl"
     previous = journal.read_bytes() if journal.exists() else b""
     atomic_bytes(journal, previous + canonical({"sequence": sequence, "status": status, "stage": stage, "at": now()}) + b"\n")
     state["journal"] = journal_tail(directory)
-    if status in ("succeeded", "failed", "cancelled", "interrupted"):
-        release_pending(directory.name)
     return state
 
 
@@ -574,7 +574,6 @@ def start(request):
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, timeout=10, check=False)
     if launch.returncode != 0:
-        release_pending(request["operationId"])
         return set_status(directory, "failed", "queued",
                           error=error_payload("UPDATE_CONTROLLER_START_FAILED", request, request["operationId"], False))
     return load(request["operationId"])
@@ -610,10 +609,14 @@ def status(request):
         active = subprocess.run(["systemctl", "is-active", "--quiet", "famine-update-" + task_id],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, timeout=5, check=False)
-        if active.returncode != 0 and not queued_recently(state) and not (TASKS / task_id / "cancel.request").exists():
-            return set_status(TASKS / task_id, "interrupted", state["stage"],
-                              error=error_payload("UPDATE_TASK_INTERRUPTED", request, task_id, False),
-                              fields={"observation": "reconciling"})
+        if active.returncode != 0:
+            # The worker may have completed between loading status and checking its unit.
+            state = load(task_id)
+            if (state["status"] in ("queued", "running") and not queued_recently(state)
+                    and not (TASKS / task_id / "cancel.request").exists()):
+                return set_status(TASKS / task_id, "interrupted", state["stage"],
+                                  error=error_payload("UPDATE_TASK_INTERRUPTED", request, task_id, False),
+                                  fields={"observation": "reconciling"})
     return state
 
 

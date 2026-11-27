@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, reactive, ref, watch } from "vue";
+import { computed, h, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { RefreshCw, RotateCcw, Upload } from "@lucide/vue";
 import {
   NAlert, NButton, NCard, NDivider, NEmpty, NForm, NFormItem, NFormItemGi, NGrid,
@@ -8,6 +8,7 @@ import {
 } from "naive-ui";
 import AppSelect from "../components/AppSelect.vue";
 import LoadingState from "../components/LoadingState.vue";
+import ErrorNotice from "../components/ErrorNotice.vue";
 import { notifyError, notifyInfo, notifySuccess } from "../naive/notify";
 import PageHeader from "../components/PageHeader.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
@@ -53,6 +54,7 @@ const selectedShard = ref<DstWorldShard>("master");
 const activeGroup = ref("");
 const draftVersion = ref(0), pendingOperationId = ref("");
 let epoch = 0, querySequence = 0, latestRequestId = "";
+onBeforeUnmount(() => { epoch++; });
 
 const hasChanges = computed(() => {
   if (!baseDesired.value) return false;
@@ -143,6 +145,8 @@ async function refresh() {
     recordVersion: connection.recordVersion,
     target: `${instanceTarget.serverId}:${instanceTarget.hostId}:${instanceTarget.instanceId}` };
   loading.value = true;
+  revealLoading.value = false;
+  secretError.value = "";
   error.value = null;
   try {
     if (workspace.preview.value) {
@@ -220,12 +224,18 @@ async function revealSavedSecrets() {
   const connection = server.value, instanceTarget = target.value;
   if (!connection || !instanceTarget || workspace.preview.value || revealLoading.value
       || (revealedToken.value && revealedPassword.value)) return;
+  const requestEpoch = epoch;
+  const sequence = querySequence;
+  const version = draftVersion.value;
+  const ownsRequest = () => requestEpoch === epoch && sequence === querySequence
+    && targetKey.value === operationTargetKey(instanceTarget) && server.value?.recordVersion === connection.recordVersion;
   revealLoading.value = true;
   secretError.value = "";
   try {
     const requestId = crypto.randomUUID();
     const response = await revealWorldSecrets({ schemaVersion: 1, requestId, target: instanceTarget,
       expectedRecordVersion: connection.recordVersion });
+    if (!ownsRequest() || version !== draftVersion.value) return;
     if (response.requestId !== requestId || response.target.serverId !== instanceTarget.serverId
         || response.target.hostId !== instanceTarget.hostId || response.target.instanceId !== instanceTarget.instanceId) {
       throw new Error("凭据读取响应身份不匹配");
@@ -233,9 +243,9 @@ async function revealSavedSecrets() {
     revealedToken.value = response.token ?? "";
     revealedPassword.value = response.serverPassword ?? "";
   } catch (cause) {
-    secretError.value = describeError(cause).message;
+    if (ownsRequest()) secretError.value = describeError(cause).message;
   } finally {
-    revealLoading.value = false;
+    if (ownsRequest()) revealLoading.value = false;
   }
 }
 
@@ -436,6 +446,10 @@ watch([() => target.value?.serverId, () => target.value?.hostId, () => target.va
   pendingOperationId.value = "";
   tokenValue.value = "";
   passwordValue.value = "";
+  revealedToken.value = "";
+  revealedPassword.value = "";
+  secretError.value = "";
+  revealLoading.value = false;
   assignSettings(defaultWorldSettings(instance.value?.cavesEnabled ?? false));
   if (target.value) void refresh();
 }, { immediate: true, flush: "sync" });
@@ -464,11 +478,9 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <NAlert v-if="error" type="error" :bordered="false" show-icon class="world-alert" role="alert">
-      <strong>{{ error.message }}</strong>
-      <ul v-if="applyBlockers.length"><li v-for="code in applyBlockers" :key="code">{{ applyBlockerLabel(code) }}</li></ul>
-      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
-    </NAlert>
+    <ErrorNotice title="世界配置操作失败" :pending="loading || saving || applyBusy"
+      :error="error && { ...error, recoverySteps: [...applyBlockers.map(applyBlockerLabel), ...error.recoverySteps] }"/>
+    <ErrorNotice title="读取联机凭据失败" :error="secretError" :pending="revealLoading"/>
     <LoadingState v-if="loading && !data" description="读取世界配置…"/>
     <NEmpty v-else-if="!target && !workspace.preview.value" class="world-empty" description="无法确定专服">
       <template #extra><span class="muted-text">返回专服列表后重新进入</span></template>
@@ -518,7 +530,6 @@ watch([tokenValue, passwordValue], () => { draftVersion.value++; pendingOperatio
                 </NFormItemGi>
               </NGrid>
             </NForm>
-            <NAlert v-if="secretError" type="error" :bordered="false" show-icon class="world-alert" role="alert">{{ secretError }}</NAlert>
           </section>
 
           <section class="world-section">

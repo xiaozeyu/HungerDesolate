@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch, onBeforeUnmount } from "vue";
+import { computed, nextTick, reactive, ref, watch, onBeforeUnmount } from "vue";
 import { NInput } from "naive-ui";
 import { isTauri } from "@tauri-apps/api/core";
 import AppSelect from "./AppSelect.vue";
 import CredentialFields from "./CredentialFields.vue";
+import ErrorNotice from "./ErrorNotice.vue";
+import { notifyError } from "../naive/notify";
 import { emptyCredentials, credentialInput, credentialError, type CredentialFields as CredentialValues } from "../lib/credentialFields";
 import { saveNewServer, type NewServerProgress } from "../lib/saveNewServer";
 import { saveServer } from "../api/servers";
@@ -54,18 +56,24 @@ watch(() => props.server?.recordVersion, () => { if (!dirty.value) reset(); });
 function edited() { dirty.value = true; }
 function authChanged(value: string) { if (value === "password" || value === "key") { fields.authKind = value; edited(); } }
 async function save(test = false) {
+  if (busy.value || props.readonly) return;
+  const epoch = contextEpoch;
   errors.value = validateServerForm(fields); failure.value = null;
   const credentialRequired = !props.server || authKindChanged.value || !hasStoredCredential.value;
   const newCredential = hasNewCredential();
   credentialFailure.value = (credentialRequired || newCredential)
     ? credentialError(fields.authKind, credentials.value) : null;
-  if (Object.keys(errors.value).length || credentialFailure.value || busy.value || props.readonly) return;
+  if (Object.keys(errors.value).length || credentialFailure.value) {
+    notifyError("请检查连接信息", [...Object.values(errors.value), credentialFailure.value].filter(Boolean).join("\n"));
+    await nextTick();
+    if (epoch === contextEpoch) document.getElementById(props.formId)?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    return;
+  }
   if (!isTauri()) { failure.value = describeError(new Error("请用 npm run desktop:dev 启动桌面环境后保存")); return; }
   if (props.server && !dirty.value && !authKindChanged.value && !newCredential) {
     if (test) emit("tested", props.server); else emit("saved", props.server);
     return;
   }
-  const epoch = contextEpoch;
   const payload = JSON.stringify({serverId: props.server?.serverId ?? null, expectedRecordVersion: baseVersion.value, input: serverInput(fields)});
   if (attempt?.payload !== payload) attempt = {payload, request: {schemaVersion: 1, requestId: crypto.randomUUID(), operationId: crypto.randomUUID(), serverId: props.server?.serverId ?? null, expectedRecordVersion: baseVersion.value, input: serverInput(fields)}};
   busy.value = true; emit("busy", true);
@@ -145,14 +153,14 @@ defineExpose({testConnection});
 <template>
   <form :id="formId" novalidate @submit.prevent="save(false)" @input="edited">
     <p v-if="progress?.server && failure" class="form-hint" role="status">主机“{{progress.server.displayName}}”已创建，凭据保存未完成。可重试或到连接设置补充。</p>
-    <div v-if="changedElsewhere" class="error-strip" role="alert">此记录已在其他位置修改。当前输入已保留，请先比较最新记录。<p class="muted-text">当前记录：{{server?.displayName}} · {{server?.username}}@{{server?.host}}:{{server?.sshPort}} · 版本 {{server?.recordVersion}}</p></div>
-    <div v-if="failure" class="error-strip" role="alert"><strong>{{failure.message}}</strong><p v-for="step in failure.recoverySteps" :key="step">{{step}}</p></div>
+    <ErrorNotice title="连接记录已变化" :pending="busy" :error="changedElsewhere && !failure ? `当前输入已保留，请先比较最新记录。\n${server?.displayName} · ${server?.username}@${server?.host}:${server?.sshPort} · 版本 ${server?.recordVersion}` : null"/>
+    <ErrorNotice title="保存连接失败" :error="failure" :pending="busy"/>
     <fieldset :disabled="busy || readonly || !!progress" class="server-form-fields">
       <div class="form-grid">
-        <label :for="`${formId}-name`">显示名称<NInput v-model:value="fields.displayName" placeholder="" maxlength="64" :input-props="{ id: `${formId}-name`, autocomplete: 'off', 'aria-invalid': !!errors.displayName, 'aria-describedby': errors.displayName ? `${formId}-name-error` : undefined }"/><span v-if="errors.displayName" :id="`${formId}-name-error`" class="field-error">{{errors.displayName}}</span></label>
-        <label :for="`${formId}-host`">主机地址<NInput v-model:value="fields.host" placeholder="192.0.2.24" :input-props="{ id: `${formId}-host`, autocomplete: 'off', spellcheck: 'false', class: 'mono', 'aria-invalid': !!errors.host, 'aria-describedby': errors.host ? `${formId}-host-error` : undefined }"/><span v-if="errors.host" :id="`${formId}-host-error`" class="field-error">{{errors.host}}</span></label>
-        <label :for="`${formId}-port`">SSH 端口<NInput v-model:value="fields.sshPort" placeholder="" :input-props="{ id: `${formId}-port`, inputmode: 'numeric', 'aria-invalid': !!errors.sshPort, 'aria-describedby': errors.sshPort ? `${formId}-port-error` : undefined }"/><span v-if="errors.sshPort" :id="`${formId}-port-error`" class="field-error">{{errors.sshPort}}</span></label>
-        <label :for="`${formId}-user`">用户名<NInput v-model:value="fields.username" placeholder="" maxlength="64" :input-props="{ id: `${formId}-user`, autocomplete: 'off', 'aria-invalid': !!errors.username, 'aria-describedby': errors.username ? `${formId}-user-error` : undefined }"/><span v-if="errors.username" :id="`${formId}-user-error`" class="field-error">{{errors.username}}</span></label>
+        <label :for="`${formId}-name`">显示名称<NInput v-model:value="fields.displayName" :status="errors.displayName ? 'error' : undefined" placeholder="" maxlength="64" :input-props="{ id: `${formId}-name`, autocomplete: 'off', 'aria-invalid': !!errors.displayName, 'aria-describedby': errors.displayName ? `${formId}-name-error` : undefined }"/><span v-if="errors.displayName" :id="`${formId}-name-error`" class="visually-hidden">{{errors.displayName}}</span></label>
+        <label :for="`${formId}-host`">主机地址<NInput v-model:value="fields.host" :status="errors.host ? 'error' : undefined" placeholder="192.0.2.24" :input-props="{ id: `${formId}-host`, autocomplete: 'off', spellcheck: 'false', class: 'mono', 'aria-invalid': !!errors.host, 'aria-describedby': errors.host ? `${formId}-host-error` : undefined }"/><span v-if="errors.host" :id="`${formId}-host-error`" class="visually-hidden">{{errors.host}}</span></label>
+        <label :for="`${formId}-port`">SSH 端口<NInput v-model:value="fields.sshPort" :status="errors.sshPort ? 'error' : undefined" placeholder="" :input-props="{ id: `${formId}-port`, inputmode: 'numeric', 'aria-invalid': !!errors.sshPort, 'aria-describedby': errors.sshPort ? `${formId}-port-error` : undefined }"/><span v-if="errors.sshPort" :id="`${formId}-port-error`" class="visually-hidden">{{errors.sshPort}}</span></label>
+        <label :for="`${formId}-user`">用户名<NInput v-model:value="fields.username" :status="errors.username ? 'error' : undefined" placeholder="" maxlength="64" :input-props="{ id: `${formId}-user`, autocomplete: 'off', 'aria-invalid': !!errors.username, 'aria-describedby': errors.username ? `${formId}-user-error` : undefined }"/><span v-if="errors.username" :id="`${formId}-user-error`" class="visually-hidden">{{errors.username}}</span></label>
         <div class="form-field"><span>认证方式</span><AppSelect :model-value="fields.authKind" :options="authOptions" label="认证方式" :disabled="busy || readonly || !!progress" @update:model-value="authChanged"/></div>
       </div>
     </fieldset>

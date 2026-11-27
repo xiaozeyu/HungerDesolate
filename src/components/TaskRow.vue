@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { NSpin } from "naive-ui";
+import { NButton, NSpin } from "naive-ui";
+import { notifyError } from "../naive/notify";
 
 withDefaults(defineProps<{
   title: string;
@@ -20,7 +21,7 @@ withDefaults(defineProps<{
       <span class="task-row-kicker">{{ title }}</span>
       <strong>{{ target }}</strong>
       <p>{{ stage }}</p>
-      <small v-if="error">{{ error }}</small>
+      <NButton v-if="error" text size="tiny" @click="notifyError(`${title}未完成`, error, 0)">错误详情</NButton>
     </div>
     <div class="task-row-meta">
       <span class="task-row-status"><NSpin v-if="running" size="small"/>{{ statusLabel }}</span>

@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { NButton } from "naive-ui";
-export interface TaskPanelError {
-  message?: string;
-  code?: string;
-}
+import ErrorNotice from "./ErrorNotice.vue";
+import { notifyError } from "../naive/notify";
+import type { CommandError } from "../types/contracts";
+
+type TaskPanelError = Pick<CommandError, "message" | "code" | "recoverySteps">;
 const props = withDefaults(defineProps<{
   title: string;
   statusLabel: string;
@@ -12,6 +14,7 @@ const props = withDefaults(defineProps<{
   queuePosition?: number | null;
   progress?: string | null;
   error?: TaskPanelError | null;
+  errorDetail?: string;
   cancellable?: boolean;
   cancelLabel?: string;
   busy?: boolean;
@@ -27,6 +30,11 @@ const props = withDefaults(defineProps<{
   dock: false,
 });
 defineEmits<{ cancel: [] }>();
+
+const details = computed(() => props.error ? {
+  message: props.errorDetail || [props.error.message, props.error.code].filter(Boolean).join(" · "),
+  recoverySteps: props.error.recoverySteps,
+} : null);
 </script>
 
 <template>
@@ -39,15 +47,13 @@ defineEmits<{ cancel: [] }>();
         {{ props.stageLabel }}
         <span v-if="props.queuePosition"> · 排队第 {{ props.queuePosition }} 位</span>
       </p>
-      <p v-if="props.error?.message" class="task-panel-error">
-        {{ props.error.message }}
-        <span v-if="props.error.code" class="mono">{{ props.error.code }}</span>
-      </p>
+      <ErrorNotice :title="`${props.title}未完成`" :error="details"/>
       <slot/>
     </div>
     <div class="task-panel-side">
       <span v-if="!props.dock" class="task-panel-status">{{ props.statusLabel }}</span>
       <span v-if="props.progress" class="task-panel-progress mono">{{ props.progress }}</span>
+      <NButton v-if="details" text size="tiny" @click="notifyError(`${props.title}未完成`, details, 0)">错误详情</NButton>
       <NButton v-if="props.cancellable" size="small" :disabled="props.busy" @click="$emit('cancel')">
         {{ props.busy ? "提交中…" : props.cancelLabel }}
       </NButton>

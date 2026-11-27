@@ -18,12 +18,14 @@ function invalidateForTask(task: TaskSnapshot) {
 }
 export function useTasks() {
     function receive(snapshot: TaskSnapshot) {
+        const current = tasks.value.get(snapshot.taskId);
+        const merged = mergeTask(current, snapshot);
+        if (merged === current) return;
         const next = new Map(tasks.value);
-        const merged = mergeTask(next.get(snapshot.taskId), snapshot);
         next.set(snapshot.taskId, merged);
+        if (terminalStatuses.has(merged.status)) invalidateForTask(merged);
         tasks.value = next;
         saveTasks([...next.values()]);
-        if (terminalStatuses.has(merged.status)) invalidateForTask(merged);
     }
     function discard(taskId: string) {
         if (!tasks.value.has(taskId)) return;

@@ -11,7 +11,6 @@ const props = defineProps<{
   sshPort: number;
   challenge: FingerprintChallenge | null;
   busy: boolean;
-  error: string;
 }>();
 const emit = defineEmits<{"update:open": [value: boolean]; confirm: []}>();
 const acknowledged = ref(false);
@@ -38,7 +37,6 @@ function confirm() {
       <p class="form-hint">有效至 {{ new Date(challenge.expiresAtUnixSeconds * 1000).toLocaleTimeString() }}</p>
     </template>
     <p v-else class="form-hint">主机指纹尚未读取</p>
-    <p v-if="error" class="error-strip" role="alert">{{ error }}</p>
     <template #footer>
       <NButton @click="emit('update:open', false)">关闭</NButton>
       <NButton type="primary" :disabled="!acknowledged || busy" @click="confirm">{{ busy ? "处理中…" : "确认指纹" }}</NButton>

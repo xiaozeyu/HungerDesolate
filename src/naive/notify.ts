@@ -1,5 +1,6 @@
 import { createDiscreteApi, darkTheme, lightTheme, zhCN } from "naive-ui";
-import { computed } from "vue";
+import { computed, h } from "vue";
+import type { UserError } from "../lib/commandError";
 import { useTheme } from "../composables/useTheme";
 import { buildThemeOverrides } from "./theme";
 
@@ -16,8 +17,22 @@ const { notification } = createDiscreteApi(["notification"], {
 export function notifySuccess(title: string, content?: string) {
   notification.success({ title, content, duration: 3000, keepAliveOnHover: true });
 }
-export function notifyError(title: string, content?: string) {
-  notification.error({ title, content, duration: 5000, keepAliveOnHover: true });
+export type ErrorContent = string | Pick<UserError, "message" | "recoverySteps">;
+
+export function errorContent(error?: ErrorContent | null): string {
+  if (typeof error === "string") return error.trim();
+  return error ? [error.message, ...(error.recoverySteps ?? [])].filter(Boolean).join("\n") : "";
+}
+
+export function notifyError(title: string, error?: ErrorContent, duration = 5000) {
+  const content = errorContent(error);
+  notification.error({
+    title: content ? title : () => h("span", { role: "alert" }, title),
+    content: content ? () => h("span", { role: "alert" }, content) : undefined,
+    duration,
+    closable: true,
+    keepAliveOnHover: true,
+  });
 }
 export function notifyInfo(title: string, content?: string) {
   notification.info({ title, content, duration: 3500, keepAliveOnHover: true });

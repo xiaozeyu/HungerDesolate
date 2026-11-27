@@ -361,11 +361,7 @@ async function runDownload(backupId:string, operationId:string, destination:stri
     const failure = describeError(cause);
     progress.status = "interrupted";
     progress.error = failure.message;
-    if (requestEpoch === epoch && targetKey.value === requestKey && server.value?.recordVersion === recordVersion) {
-      error.value = failure;
-    } else {
-      close();
-    }
+    if (requestEpoch !== epoch || targetKey.value !== requestKey || server.value?.recordVersion !== recordVersion) close();
   } finally {
     activeDownloadIds.delete(operationId);
   }
@@ -880,7 +876,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <ErrorNotice :error="error"/>
+    <ErrorNotice title="备份操作失败" :error="error" :pending="pageLoading || previewLoading"/>
     <div class="table-wrap">
       <NDataTable :columns="columns" :data="tableItems" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="pageLoading">
         <template #empty><span class="muted-text">暂无备份</span></template>
@@ -897,10 +893,10 @@ const rowKey = (item: BackupSummary) => item.backupId;
     <TaskPanel v-if="visibleActiveTask" dock :title="visibleActiveTask.operation === 'backupRestore' ? '恢复备份' : '创建备份'"
       :status-label="activeTaskStatusLabel(visibleActiveTask)" :stage-label="activeTaskStageLabel(visibleActiveTask)" :tone="activeTaskTone"
       :queue-position="visibleActiveTask.queuePosition" :error="visibleActiveTask.error"
+      :error-detail="visibleActiveTask.error ? taskErrorLabel(visibleActiveTask.error.code, visibleActiveTask.stage, visibleActiveTask.operation, visibleActiveTask.error.details) : undefined"
       :cancellable="['backupCreate','backupRestore'].includes(visibleActiveTask.operation) && !!visibleActiveTask.cancelAllowed && ['queued','running'].includes(visibleActiveTask.status)"
       :cancel-label="visibleActiveTask.operation === 'backupRestore' ? '取消恢复' : '取消备份'" :busy="cancelBusy" @cancel="cancelActiveTask">
       <span v-if="visibleActiveTask.result?.backupId" class="mono muted-text">{{ visibleActiveTask.result.backupId }}</span>
-      <span v-if="visibleActiveTask.error" class="backup-warning">{{ taskErrorLabel(visibleActiveTask.error.code, visibleActiveTask.stage, visibleActiveTask.operation, visibleActiveTask.error.details) }}</span>
       <span v-if="visibleActiveTask.result?.modsWarnings?.length" class="backup-warning">{{ visibleActiveTask.result.modsWarnings.map(code => code.startsWith('MOD_MISSING:') ? `缺少 MOD ${code.slice(12)}` : `MOD ${code.slice(19)} 已使用主机库最新版本`).join('；') }}缺少 MOD 时世界可能崩溃</span>
       <span v-if="cancelMessage" class="muted-text">{{ cancelMessage }}</span>
     </TaskPanel>
@@ -935,7 +931,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
       <p v-if="restoreModWarnings.length" class="backup-warning">{{ restoreModWarnings.join("；") }}缺少 MOD 时继续恢复可能导致世界崩溃</p>
       <NCheckbox v-model:checked="restoreProtection" :disabled="restoreBusy" class="backup-restore-option">恢复前创建备份</NCheckbox>
       <p class="form-hint">保护备份用于失败回滚；不勾选会直接替换当前世界</p>
-      <p v-if="restoreError" class="error-strip" role="alert">{{ restoreError }}</p>
+      <ErrorNotice title="未能提交备份恢复" :error="restoreError" :pending="restoreBusy"/>
       <template #footer><NButton :disabled="restoreBusy" @click="restoreTarget = null; restoreError = ''; restoreModWarnings = []">取消</NButton><NButton type="primary" :disabled="restoreBusy || workspace.preview.value" @click="restoreBackup">{{ restoreBusy ? "检测并开始恢复…" : "确认恢复" }}</NButton></template>
     </AppDialog>
     <AppDialog :open="!!noteTarget" title="编辑备注" @update:open="value => { if (!value && !noteBusy) { noteTarget = null; noteError = ''; } }">
@@ -944,7 +940,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
         <NInput v-model:value="noteDraft" :maxlength="96" show-count autofocus placeholder="例如：换 MOD 前"
           :disabled="noteBusy"/>
       </label>
-      <p v-if="noteError" class="error-strip" role="alert">{{ noteError }}</p>
+      <ErrorNotice title="保存备份备注失败" :error="noteError" :pending="noteBusy"/>
       <template #footer>
         <NButton :disabled="noteBusy" @click="noteTarget = null; noteError = ''">取消</NButton>
         <NButton type="primary" :disabled="noteBusy || workspace.preview.value" @click="saveNote">{{ noteBusy ? "保存中…" : "保存" }}</NButton>
@@ -952,7 +948,7 @@ const rowKey = (item: BackupSummary) => item.backupId;
     </AppDialog>
     <AppDialog :open="!!deleteTarget" title="删除备份"  @update:open="value => { if (!value && !deleteBusy) { deleteTarget = null; deleteError = ''; } }">
       <p v-if="deleteTarget">确定删除 <span class="mono">{{ deleteTarget.backupId }}</span>（{{ formatBytes(deleteTarget.sizeBytes) }}）？</p>
-      <p v-if="deleteError" class="error-strip" role="alert">{{ deleteError }}</p>
+      <ErrorNotice title="删除备份失败" :error="deleteError" :pending="deleteBusy"/>
       <template #footer><NButton :disabled="deleteBusy" @click="deleteTarget = null">取消</NButton><NButton type="error" ghost :disabled="deleteBusy || workspace.preview.value" @click="deleteBackup">{{ deleteBusy ? "删除中…" : "永久删除" }}</NButton></template>
     </AppDialog>
   </div>

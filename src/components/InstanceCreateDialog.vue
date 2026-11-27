@@ -5,6 +5,8 @@ import { NButton, NCheckbox, NInput } from "naive-ui";
 import AppDialog from "./AppDialog.vue";
 import AppSelect from "./AppSelect.vue";
 import StatusLabel from "./StatusLabel.vue";
+import ErrorNotice from "./ErrorNotice.vue";
+import { notifyError } from "../naive/notify";
 import { useInstanceCreation } from "../composables/useInstanceCreation";
 import { creationBlockerLabel } from "../lib/instanceCreation";
 import { creationTaskErrorLabel, creationTaskStageLabel } from "../lib/instanceCreationTask";
@@ -25,13 +27,25 @@ const taskStatusLabel=computed(()=>{
 const taskProgressLabel=computed(()=>{
   const current=task.value;
   if(!current)return "";
-  if(current.status==="failed")return creationTaskErrorLabel(current.error?.code);
   if(current.status==="succeeded")return "容器环境已完成验证，可进入世界配置";
-  if(current.status==="interrupted")return "创建任务进程已结束，请核对现场后继续或清理";
   if(current.status==="cancelled")return "创建任务已取消";
   return creationTaskStageLabel(current.stage);
 });
-const taskErrorVisible=computed(()=>!!task.value?.error&&["failed","interrupted"].includes(task.value.status));
+const taskError = computed(() => {
+  const current = task.value;
+  const failure = current?.error;
+  if (!current || !failure || !["failed", "interrupted"].includes(current.status)) return null;
+  const details = failure.details ?? {};
+  return {
+    message: [creationTaskErrorLabel(failure.code), failure.message, `${creationTaskStageLabel(current.stage)} · ${failure.code}`]
+      .filter((line, index, lines) => line && lines.indexOf(line) === index).join("\n"),
+    recoverySteps: [
+      ...[details.composeDiagnostic, details.dockerDiagnostic].filter((value): value is string => typeof value === "string"),
+      ...(failure.recoverySteps ?? []),
+      `任务 ${current.taskId}`,
+    ],
+  };
+});
 const blockers=computed(()=>{
   const value=error.value?.details?.blockers;
   return Array.isArray(value)?value.filter((item):item is string=>typeof item==="string"):[];
@@ -48,8 +62,8 @@ function goRelease(){if(!props.server)return;emit("update:open",false);void rout
           <div class="creation-release-heading"><span>DST Release</span><button class="text-button" type="button" :disabled="releaseLoading || loading" @click="refreshReleaseCatalog">{{releaseLoading?'读取中…':'刷新 Release'}}</button></div>
           <AppSelect v-model="selectedReleaseId" :options="availableReleases" label="DST Release" :placeholder="releaseLoading?'读取 Release…':'选择 Release'" :disabled="releaseLoading || loading || !availableReleases.length"/>
           <div v-if="selectedRelease && releaseReady()" class="creation-release-meta"><StatusLabel tone="success" label="基础验证通过"/><span class="mono" aria-label="Release ID">{{selectedRelease.releaseId}}</span></div>
-          <p v-if="releaseError" class="creation-release-error" role="alert">{{releaseError.message}}</p>
-          <p v-else-if="!releaseLoading && !availableReleases.length" class="muted-text" role="status">暂无通过基础验证的 Release。<button class="text-button" type="button" @click="goRelease">前往 Release 管理构建</button></p>
+          <ErrorNotice title="读取 DST Release 失败" :error="releaseError" :pending="releaseLoading"/>
+          <p v-if="!releaseError && !releaseLoading && !availableReleases.length" class="muted-text" role="status">暂无通过基础验证的 Release。<button class="text-button" type="button" @click="goRelease">前往 Release 管理构建</button></p>
         </div>
         <fieldset class="creation-option-group"><legend>启动策略</legend><NCheckbox v-model:checked="fields.autostart" :disabled="loading" class="creation-switch">主机启动时自动拉起容器</NCheckbox></fieldset>
         <fieldset class="creation-option-group"><legend>是否启用洞穴</legend><NCheckbox v-model:checked="fields.cavesEnabled" :disabled="loading" class="creation-switch">启用 Caves 分片</NCheckbox></fieldset>
@@ -64,22 +78,21 @@ function goRelease(){if(!props.server)return;emit("update:open",false);void rout
         <StatusLabel :tone="taskTone" :label="taskStatusLabel"/>
         <span>{{taskProgressLabel}}</span>
       </div>
-      <div v-if="taskErrorVisible && task.error" class="environment-error" role="alert">
-        <strong>{{creationTaskStageLabel(task.stage)}} · {{task.error.code}}</strong>
-        <p>{{task.error.message}}</p>
-        <pre v-if="typeof task.error.details.composeDiagnostic==='string'">{{task.error.details.composeDiagnostic}}</pre>
-        <pre v-if="typeof task.error.details.dockerDiagnostic==='string'">{{task.error.details.dockerDiagnostic}}</pre>
-        <ul v-if="task.error.recoverySteps?.length"><li v-for="step in task.error.recoverySteps" :key="step">{{step}}</li></ul>
-        <ol v-if="task.journal?.length" class="task-journal"><li v-for="entry in task.journal" :key="entry.sequence"><time>{{new Date(entry.at).toLocaleString()}}</time><span>{{entry.stage}}</span><StatusLabel :tone="entry.status==='failed'?'danger':entry.status==='succeeded'?'success':'muted'" :label="entry.status"/></li></ol>
-        <small class="mono">任务 {{task.taskId}}</small>
-      </div>
+      <ErrorNotice :key="task.taskId" title="创建专服未完成" :error="taskError"/>
+      <details v-if="taskError && task.journal?.length">
+        <summary>任务日志</summary>
+        <ol class="task-journal">
+          <li v-for="entry in task.journal" :key="entry.sequence">
+            <time>{{ new Date(entry.at).toLocaleString() }}</time><span>{{ entry.stage }}</span>
+            <StatusLabel :tone="entry.status === 'failed' ? 'danger' : entry.status === 'succeeded' ? 'success' : 'muted'" :label="entry.status"/>
+          </li>
+        </ol>
+      </details>
     </template>
-    <div v-if="error" class="environment-error" role="alert">
-      <strong>{{error.message}}</strong>
-      <ul v-if="blockers.length"><li v-for="code in blockers" :key="code">{{creationBlockerLabel(code)}}</li></ul>
-      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul>
-    </div>
+    <ErrorNotice title="未能创建专服" :pending="loading"
+      :error="error && { ...error, recoverySteps: [...blockers.map(creationBlockerLabel), ...error.recoverySteps] }"/>
     <template #footer>
+      <NButton v-if="taskError" text @click="notifyError('创建专服未完成', taskError, 0)">错误详情</NButton>
       <NButton @click="emit('update:open',false)">关闭</NButton>
       <NButton v-if="!task" attr-type="submit" form="instance-create-form" type="primary" :disabled="loading || creating || !releaseReady()" :loading="loading || creating">{{loading?'检查并创建中…':'创建专服'}}</NButton>
     </template>

@@ -5,6 +5,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { useWorkspace } from "../composables/useWorkspace";
 import { cleanupCredentials, getCleanupStatus } from "../api/ssh";
 import { describeError } from "../lib/commandError";
+import ErrorNotice from "./ErrorNotice.vue";
 const workspace = useWorkspace();
 const count = ref(0), error = ref(""), busy = ref(false);
 let epoch = 0, sequence = 0;
@@ -22,4 +23,10 @@ async function cleanup() {
   finally { if (context === epoch) busy.value = false; }
 }
 </script>
-<template><div v-if="count || error" class="credential-cleanup" role="status"><div><p v-if="count">{{count}} 项凭据待清理</p><p v-if="error" class="field-error">{{error}}</p></div><NButton size="small" :disabled="busy" @click="cleanup">{{busy ? '清理中…' : '清理旧凭据'}}</NButton></div></template>
+<template>
+  <ErrorNotice title="清理旧凭据未完成" :error="error" :pending="busy"/>
+  <div v-if="count || error" class="credential-cleanup">
+    <span v-if="count" role="status">{{ count }} 项凭据待清理</span>
+    <NButton size="small" :disabled="busy" @click="cleanup">{{ busy ? '清理中…' : '清理旧凭据' }}</NButton>
+  </div>
+</template>

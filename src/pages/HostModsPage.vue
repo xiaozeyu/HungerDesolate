@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { ArrowLeftRight, DownloadCloud, Package, Plus, RefreshCw, Trash2 } from "@lucide/vue";
 import { useRoute } from "vue-router";
 import { NButton, NDataTable, NInput, type DataTableColumns } from "naive-ui";
@@ -94,7 +94,6 @@ function dismissDock() {
 }
 const loading = libraryQuery.loading;
 const error = libraryQuery.error;
-const mutationError = ref("");
 const cancelBusy = ref(false);
 const cancelMessage = ref("");
 const refresh = libraryQuery.refresh;
@@ -108,6 +107,7 @@ const manualSelection = ref<Set<string>>(new Set());
 const queryBusy = ref(false);
 const queryError = ref("");
 let queryGeneration = 0;
+let hostEpoch = 0;
 function invalidateQuery() { queryGeneration += 1; queryBusy.value = false; manualSelection.value = new Set(); }
 const candidates = ref<WorkshopItem[]>([]);
 const isHostModPresent = (item: WorkshopItem) => items.value.some(entry => entry.workshopId === item.workshopId);
@@ -156,6 +156,7 @@ async function checkUpdates(targets: HostModItem[]) {
   }
   const ids = [...latest.keys()];
   if (!ids.length) return;
+  const epoch = hostEpoch;
   checkingUpdates.value = true;
   const checks = { ...updateChecks.value };
   for (const id of ids) checks[id] = { status: "checking", message: "", candidate: null };
@@ -166,8 +167,8 @@ async function checkUpdates(targets: HostModItem[]) {
       const requestId = crypto.randomUUID();
       const response = await getWorkshopMetadata({ schemaVersion: 1, requestId,
         serverId: connection.serverId, expectedRecordVersion: connection.recordVersion, workshopIds: chunk });
-      if (server.value?.serverId !== connection.serverId || server.value.recordVersion !== connection.recordVersion
-          || response.requestId !== requestId || response.serverId !== connection.serverId
+      if (epoch !== hostEpoch) return;
+      if (response.requestId !== requestId || response.serverId !== connection.serverId
           || response.recordVersion !== connection.recordVersion) throw new Error("Workshop 更新检查响应身份不匹配");
       const byId = new Map(response.items.map(item => [item.workshopId, item]));
       const next = { ...updateChecks.value };
@@ -199,6 +200,7 @@ async function checkUpdates(targets: HostModItem[]) {
       else notifySuccess("更新检查完成", summary);
     }
   } catch (cause) {
+    if (epoch !== hostEpoch) return;
     const failure = describeError(cause);
     for (const id of ids) {
       if (updateChecks.value[id]?.status === "checking") {
@@ -208,7 +210,7 @@ async function checkUpdates(targets: HostModItem[]) {
     operations.recordFailure({ kind: "hostModCheck", target: hostTarget, title: "检查主机 MOD 更新", stage: "查询 Workshop", error: failure });
     notifyError("更新检查失败", failure.message);
   } finally {
-    checkingUpdates.value = false;
+    if (epoch === hostEpoch) checkingUpdates.value = false;
   }
 }
 
@@ -263,7 +265,7 @@ interface SyncEntry {
   revision: number;
   mods: { workshopId: string; enabled: boolean; configurationOptions: Record<string, unknown>; artifactDigest: string | null }[];
 }
-const syncTarget = ref<HostModItem | null>(null);
+const syncTarget = shallowRef<HostModItem | null>(null);
 const syncEntries = ref<SyncEntry[]>([]);
 const syncUpToDate = ref<string[]>([]);
 const syncErrors = ref<string[]>([]);
@@ -425,8 +427,7 @@ async function importCollection() {
     notifySuccess("已提交合集导入", `${selected.length} 个 MOD`);
   } catch (cause) {
     const failure = describeError(cause);
-    queryError.value = failure.message;
-    notifyError("合集导入失败", failure.message);
+    notifyError("合集导入失败", failure);
   } finally {
     importingCollection.value = false;
   }
@@ -452,8 +453,7 @@ async function addCandidate(item: WorkshopItem) {
     notifySuccess("已提交添加到主机库", item.title ?? item.workshopId);
   } catch (cause) {
     const failure = describeError(cause);
-    queryError.value = failure.message;
-    notifyError("添加主机 MOD 失败", failure.message);
+    notifyError("添加主机 MOD 失败", failure);
   } finally {
     addingWorkshopId.value = null;
   }
@@ -466,7 +466,6 @@ async function updateHostMod(item: HostModItem) {
   const requestEpoch = connection.recordVersion;
   addingWorkshopId.value = item.workshopId;
   queryError.value = "";
-  mutationError.value = "";
   const operationId = operations.begin({ kind: "hostModUpdate", target: hostTarget, title: "更新主机 MOD", stage: "检查最新版本" });
   try {
     const metadataRequestId = crypto.randomUUID();
@@ -514,11 +513,13 @@ async function previewSync(item: HostModItem) {
   syncErrors.value = [];
   syncLoading.value = true;
   const recordVersion = connection.recordVersion;
+  const epoch = hostEpoch;
+  const ownsContext = () => epoch === hostEpoch;
   try {
     const libraryRequestId = crypto.randomUUID();
     const library = await queueSsh(() => listHostMods({ schemaVersion: 1, requestId: libraryRequestId,
       target: hostTarget, expectedRecordVersion: recordVersion }));
-    if (server.value?.recordVersion !== recordVersion) throw new Error("主机连接已变化，请重新同步");
+    if (!ownsContext() || syncTarget.value !== item) return;
     if (library.requestId !== libraryRequestId || library.recordVersion !== recordVersion
         || library.target.serverId !== hostTarget.serverId || library.target.hostId !== hostTarget.hostId) {
       throw new Error("主机 MOD 库响应身份或版本不匹配");
@@ -537,7 +538,7 @@ async function previewSync(item: HostModItem) {
     const listRequestId = crypto.randomUUID();
     const result = await queueSsh(() => listInstances({ schemaVersion: 1, requestId: listRequestId,
       serverId: connection.serverId, expectedRecordVersion: recordVersion }));
-    if (server.value?.recordVersion !== recordVersion) throw new Error("主机连接已变化，请重新同步");
+    if (!ownsContext() || syncTarget.value !== item) return;
     if (result.requestId !== listRequestId || result.serverId !== connection.serverId
         || result.recordVersion !== recordVersion || result.hostId !== hostTarget.hostId) {
       throw new Error("专服列表响应身份不匹配");
@@ -552,6 +553,7 @@ async function previewSync(item: HostModItem) {
         const mods = await queueSsh(() => listInstanceMods({ schemaVersion: 1, requestId,
           target: { serverId: connection.serverId, hostId: hostTarget.hostId, instanceId: instance.instanceId },
           expectedRecordVersion: recordVersion }));
+        if (!ownsContext() || syncTarget.value !== item) return;
         if (mods.requestId !== requestId || mods.target.instanceId !== instance.instanceId
             || mods.target.hostId !== hostTarget.hostId || server.value?.recordVersion !== recordVersion) {
           throw new Error("MOD 列表响应身份不匹配");
@@ -594,17 +596,18 @@ async function previewSync(item: HostModItem) {
             })),
         });
       } catch (cause) {
+        if (!ownsContext() || syncTarget.value !== item) return;
         syncErrors.value.push(`${instance.displayName}：${describeError(cause).message}`);
       }
     }
-    if (server.value?.recordVersion === recordVersion) {
+    if (ownsContext() && syncTarget.value === item) {
       syncEntries.value = entries;
       syncUpToDate.value = upToDate;
     }
   } catch (cause) {
-    syncErrors.value.push(describeError(cause).message);
+    if (ownsContext() && syncTarget.value === item) syncErrors.value.push(describeError(cause).message);
   } finally {
-    syncLoading.value = false;
+    if (ownsContext()) syncLoading.value = false;
   }
 }
 
@@ -616,10 +619,11 @@ async function confirmSync() {
   syncBusy.value = true;
   syncErrors.value = [];
   let done = 0;
+  const epoch = hostEpoch;
   const recordVersion = connection.recordVersion;
   try {
     for (const [index, entry] of entries.entries()) {
-      if (server.value?.recordVersion !== recordVersion) throw new Error("主机连接已变化，已停止同步");
+      if (epoch !== hostEpoch) return;
       syncProgress.value = `${index + 1}/${entries.length} · ${entry.displayName}`;
       try {
         const requestId = crypto.randomUUID();
@@ -627,24 +631,29 @@ async function confirmSync() {
         const response = await queueSsh(() => saveInstanceMods({ schemaVersion: 1, requestId, operationId,
           target: { serverId: connection.serverId, hostId: hostTarget.hostId, instanceId: entry.instanceId },
           expectedRecordVersion: recordVersion, expectedRevision: entry.revision, mods: entry.mods }));
+        if (epoch !== hostEpoch) return;
         if (response.requestId !== requestId || response.target.instanceId !== entry.instanceId
             || response.target.hostId !== hostTarget.hostId || response.operationId !== operationId
             || response.verifiedRevision <= entry.revision) throw new Error("保存响应身份或版本不匹配");
         done += 1;
       } catch (cause) {
+        if (epoch !== hostEpoch) return;
         syncErrors.value.push(`${entry.displayName}：${describeError(cause).message}`);
       }
     }
     await refresh();
+    if (epoch !== hostEpoch) return;
     if (!syncErrors.value.length) syncTarget.value = null;
   } catch (cause) {
+    if (epoch !== hostEpoch) return;
     syncErrors.value.push(describeError(cause).message);
   } finally {
-    syncBusy.value = false;
-    syncProgress.value = "";
+    if (epoch === hostEpoch) {
+      syncBusy.value = false;
+      syncProgress.value = "";
+    }
   }
-  if (syncErrors.value.length) notifyError("同步未全部完成", `${done}/${entries.length} 个专服已同步`);
-  else notifySuccess("期望版本已同步", `${done} 个专服`);
+  if (!syncErrors.value.length) notifySuccess("期望版本已同步", `${done} 个专服`);
 }
 
 async function cancelPrepare() {
@@ -660,7 +669,6 @@ async function cancelPrepare() {
     notifyInfo("已提交取消请求");
   } catch (cause) {
     const failure = describeError(cause);
-    mutationError.value = failure.message;
     notifyError("取消任务失败", failure.message);
   } finally {
     cancelBusy.value = false;
@@ -673,7 +681,6 @@ async function remove() {
   const item = deleteTarget.value;
   if (!connection || !hostTarget || !item || deleteBusy.value) return;
   deleteBusy.value = true;
-  mutationError.value = "";
   try {
     const requestId = crypto.randomUUID();
     const response = await deleteHostMod({ schemaVersion: 1, requestId, target: hostTarget,
@@ -684,7 +691,6 @@ async function remove() {
     notifySuccess("主机 MOD 版本已删除", item.name ?? item.workshopId);
   } catch (cause) {
     const failure = describeError(cause);
-    mutationError.value = failure.message;
     notifyError("删除主机 MOD 失败", failure.message);
   } finally {
     deleteBusy.value = false;
@@ -694,10 +700,6 @@ async function remove() {
 watch(task, async (next, previous) => {
   if (!next || next.status === "queued" || next.status === "running") return;
   if (previous?.taskId === next.taskId && previous.status === next.status) return;
-  if (next.status === "failed" || next.status === "interrupted") {
-    notifyError("主机 MOD 任务未完成", next.error?.message ?? "任务未完成");
-    return;
-  }
   if (next.status === "cancelled") {
     notifyInfo("主机 MOD 任务已取消");
     return;
@@ -722,11 +724,22 @@ function openAdd() {
   addOpen.value = true;
 }
 
-watch([() => server.value?.serverId, () => server.value?.recordVersion, () => workspace.preview.value], () => {
-  mutationError.value = "";
+watch([key, workspace.preview], () => {
+  hostEpoch++;
+  invalidateQuery();
+  addOpen.value = false;
+  queryError.value = "";
   cancelMessage.value = "";
   deleteTarget.value = null;
-}, { immediate: true });
+  syncTarget.value = null;
+  syncErrors.value = [];
+  syncProgress.value = "";
+  syncLoading.value = false;
+  syncBusy.value = false;
+  checkingUpdates.value = false;
+  updateChecks.value = {};
+}, { flush: "sync" });
+onBeforeUnmount(() => { hostEpoch++; invalidateQuery(); });
 watch(workshopInput, () => { invalidateQuery(); if (addMode.value === 'manual') { candidates.value = []; queryError.value = ""; } });
 watch(collectionInput, () => { invalidateQuery(); if (addMode.value === 'collection') { candidates.value = []; collectionTitle.value = ""; collectionSelection.value = new Set(); queryError.value = ""; } });
 
@@ -819,8 +832,7 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
       </template>
     </PageHeader>
     <PreviewNotice/>
-    <ErrorNotice :error="error"/>
-    <ErrorNotice :error="mutationError"/>
+    <ErrorNotice :key="key ?? undefined" title="读取主机 MOD 库失败" :error="error" :pending="loading"/>
 
     <LoadingState v-if="loading && !items.length" description="正在读取主机 MOD 库"/>
     <div v-else-if="!items.length" class="empty-state">
@@ -870,7 +882,7 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
         <label for="host-mod-collection">Steam 合集链接或 ID</label>
         <NInput v-model:value="collectionInput" placeholder="https://steamcommunity.com/sharedfiles/filedetails/?id=..." :input-props="{ id: 'host-mod-collection' }" @keydown.enter="loadCollection"/>
       </div>
-      <ErrorNotice :error="queryError"/>
+      <ErrorNotice title="Workshop 查询未完成" :error="queryError" :pending="queryBusy"/>
       <div v-if="queryBusy" class="muted-text" role="status">{{ addMode === 'collection' ? "正在读取合集…" : "正在查询 Workshop…" }}</div>
       <template v-else-if="candidates.length">
         <div v-if="addMode === 'collection'" class="collection-toolbar">
@@ -912,10 +924,7 @@ const syncRowKey = (entry: SyncEntry) => entry.instanceId;
           使用此 MOD 的专服已是该版本：{{ syncUpToDate.join("、") }}
         </p>
         <p v-else-if="!syncErrors.length" class="muted-text">没有使用此 MOD 的专服</p>
-        <div v-if="syncErrors.length" class="environment-error" role="alert">
-          <strong>同步检查未完成</strong>
-          <ul><li v-for="error in syncErrors" :key="error">{{ error }}</li></ul>
-        </div>
+        <ErrorNotice title="同步 MOD 未完成" :error="syncErrors.join('\n')" :pending="syncLoading || syncBusy"/>
         <p v-if="syncProgress" class="muted-text" role="status">{{ syncProgress }}</p>
       </template>
       <template #footer>

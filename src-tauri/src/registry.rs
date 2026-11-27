@@ -291,34 +291,43 @@ pub(crate) fn list_at(
             .collect(),
     })
 }
+fn read_consistent<T>(mut read: impl FnMut() -> CommandResult<T>) -> CommandResult<T> {
+    match read() {
+        Err(error) if matches!(error.code, "REGISTRY_CHANGED" | "REVISION_CONFLICT") => read(),
+        result => result,
+    }
+}
+
 pub fn list(database: &Path, request: ConnectionRequest) -> CommandResult<InstanceListResponse> {
     with_verified_session(database, &request, |session, host_id| {
         let host_id =
             host_id.ok_or_else(|| error("HOST_UNINITIALIZED", "远端管理目录尚未初始化"))?;
-        let mut response = list_at(session, Path::new(ROOT), &request, &host_id)?;
-        let ids: Vec<String> = response
-            .instances
-            .iter()
-            .filter(|item| item.manifest_available)
-            .map(|item| item.instance_id.clone())
-            .collect();
-        let snapshots = crate::instance_runtime::inspect_many(
-            session,
-            &host_id,
-            &request.request_id,
-            response.registry_revision,
-            &ids,
-        )?;
-        for snapshot in snapshots {
-            if let Some(identity) = response
+        read_consistent(|| {
+            let mut response = list_at(session, Path::new(ROOT), &request, &host_id)?;
+            let ids: Vec<String> = response
                 .instances
-                .iter_mut()
-                .find(|item| item.instance_id == snapshot.instance_id)
-            {
-                apply_runtime(identity, &snapshot);
+                .iter()
+                .filter(|item| item.manifest_available)
+                .map(|item| item.instance_id.clone())
+                .collect();
+            let snapshots = crate::instance_runtime::inspect_many(
+                session,
+                &host_id,
+                &request.request_id,
+                response.registry_revision,
+                &ids,
+            )?;
+            for snapshot in snapshots {
+                if let Some(identity) = response
+                    .instances
+                    .iter_mut()
+                    .find(|item| item.instance_id == snapshot.instance_id)
+                {
+                    apply_runtime(identity, &snapshot);
+                }
             }
-        }
-        Ok(response)
+            Ok(response)
+        })
     })
     .map_err(|mut error| {
         error.operation = "listInstances";
@@ -337,61 +346,63 @@ pub fn overview(database: &Path, request: OverviewRequest) -> CommandResult<Over
                 "专服目标与远端主机身份不一致",
             ));
         }
-        let discovered = discover(
-            &mut ManagedFiles::new(session, Path::new(ROOT))?,
-            &request.target.host_id,
-            Some(&request.target.instance_id),
-        )?;
-        let registry_revision = discovered.registry_revision;
-        let (mut identity, manifest) = discovered
-            .instances
+        read_consistent(|| {
+            let discovered = discover(
+                &mut ManagedFiles::new(session, Path::new(ROOT))?,
+                &request.target.host_id,
+                Some(&request.target.instance_id),
+            )?;
+            let registry_revision = discovered.registry_revision;
+            let (mut identity, manifest) = discovered
+                .instances
+                .into_iter()
+                .find(|item| item.0.instance_id == request.target.instance_id)
+                .ok_or_else(|| error("INSTANCE_NOT_FOUND", "专服已移除或不存在"))?;
+            let mut manifest =
+                manifest.ok_or_else(|| error("MANIFEST_NOT_FOUND", "专服创建尚未完成"))?;
+            let runtime = crate::instance_runtime::inspect_many(
+                session,
+                &request.target.host_id,
+                &request.request_id,
+                registry_revision,
+                std::slice::from_ref(&request.target.instance_id),
+            )?
             .into_iter()
-            .find(|item| item.0.instance_id == request.target.instance_id)
-            .ok_or_else(|| error("INSTANCE_NOT_FOUND", "专服已移除或不存在"))?;
-        let mut manifest =
-            manifest.ok_or_else(|| error("MANIFEST_NOT_FOUND", "专服创建尚未完成"))?;
-        let runtime = crate::instance_runtime::inspect_many(
-            session,
-            &request.target.host_id,
-            &request.request_id,
-            registry_revision,
-            std::slice::from_ref(&request.target.instance_id),
-        )?
-        .into_iter()
-        .next()
-        .ok_or_else(|| error("INSTANCE_RUNTIME_PROTOCOL_INVALID", "运行采集结果缺失"))?;
-        if runtime.config_revision != manifest.config_revision {
-            return Err(error("REVISION_CONFLICT", "读取期间配置已变化，请刷新"));
-        }
-        apply_runtime(&mut identity, &runtime);
-        manifest.game_mode = runtime.game_mode.clone().or(manifest.game_mode);
-        manifest.pvp = runtime.pvp.or(manifest.pvp);
-        Ok(OverviewResponse {
-            schema_version: 1,
-            request_id: request.request_id.clone(),
-            target: InstanceTarget {
-                server_id: request.target.server_id.clone(),
-                host_id: request.target.host_id.clone(),
-                instance_id: request.target.instance_id.clone(),
-            },
-            snapshot_id: uuid::Uuid::new_v4().to_string(),
-            captured_at_unix_seconds: ssh_state::now()?,
-            record_version: connection.expected_record_version,
-            config_revision: manifest.config_revision,
-            source: "remote",
-            freshness: "fresh",
-            data: InstanceOverview {
-                identity,
-                manifest_summary: manifest,
-                verification_level: runtime.verification_level.clone(),
-                blockers: runtime
-                    .warnings
-                    .iter()
-                    .map(|code| runtime_warning(code).to_string())
-                    .collect(),
-                desired_vs_deployed: runtime.desired_vs_deployed.clone(),
-                runtime,
-            },
+            .next()
+            .ok_or_else(|| error("INSTANCE_RUNTIME_PROTOCOL_INVALID", "运行采集结果缺失"))?;
+            if runtime.config_revision != manifest.config_revision {
+                return Err(error("REVISION_CONFLICT", "读取期间配置已变化，请刷新"));
+            }
+            apply_runtime(&mut identity, &runtime);
+            manifest.game_mode = runtime.game_mode.clone().or(manifest.game_mode);
+            manifest.pvp = runtime.pvp.or(manifest.pvp);
+            Ok(OverviewResponse {
+                schema_version: 1,
+                request_id: request.request_id.clone(),
+                target: InstanceTarget {
+                    server_id: request.target.server_id.clone(),
+                    host_id: request.target.host_id.clone(),
+                    instance_id: request.target.instance_id.clone(),
+                },
+                snapshot_id: uuid::Uuid::new_v4().to_string(),
+                captured_at_unix_seconds: ssh_state::now()?,
+                record_version: connection.expected_record_version,
+                config_revision: manifest.config_revision,
+                source: "remote",
+                freshness: "fresh",
+                data: InstanceOverview {
+                    identity,
+                    manifest_summary: manifest,
+                    verification_level: runtime.verification_level.clone(),
+                    blockers: runtime
+                        .warnings
+                        .iter()
+                        .map(|code| runtime_warning(code).to_string())
+                        .collect(),
+                    desired_vs_deployed: runtime.desired_vs_deployed.clone(),
+                    runtime,
+                },
+            })
         })
     })
     .map_err(|mut error| {
@@ -443,6 +454,36 @@ pub(crate) mod tests {
     fn bytes(value: serde_json::Value) -> Vec<u8> {
         serde_json::to_vec(&value).expect("fixture serialization")
     }
+    #[test]
+    fn snapshot_retries_only_consistency_conflicts_once() -> CommandResult<()> {
+        for code in ["REGISTRY_CHANGED", "REVISION_CONFLICT"] {
+            let mut attempts = 0;
+            let revision = read_consistent(|| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(error(code, "read crossed a registry update"))
+                } else {
+                    Ok(parse_registry(REGISTRY, HOST)?.registry_revision)
+                }
+            })?;
+            assert_eq!(
+                revision,
+                registry_json()["registryRevision"].as_u64().unwrap()
+            );
+            assert_eq!(attempts, 2);
+        }
+        for (code, expected) in [("REGISTRY_CHANGED", 2), ("HOST_IDENTITY_MISMATCH", 1)] {
+            let mut attempts = 0;
+            let result = read_consistent(|| {
+                attempts += 1;
+                Err::<(), _>(error(code, "snapshot rejected"))
+            });
+            assert_eq!(result.unwrap_err().code, code);
+            assert_eq!(attempts, expected);
+        }
+        Ok(())
+    }
+
     #[test]
     fn parses_identity_metadata_without_promoting_runtime_claims() -> CommandResult<()> {
         let mut value = manifest_json();

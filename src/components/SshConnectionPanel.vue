@@ -5,13 +5,13 @@ import { Fingerprint } from "@lucide/vue";
 import CredentialCleanupNotice from "./CredentialCleanupNotice.vue";
 import * as api from "../api/ssh";
 import { describeError } from "../lib/commandError";
+import { notifyError } from "../naive/notify";
 import { currentConnection, matchesConnection, type ConnectionTicket } from "../lib/connectionGuard";
 import type { ConnectionRequest, ServerSummary, SshConnectionState } from "../types/contracts";
 
 const props = defineProps<{server: ServerSummary; preview: boolean}>();
 const emit = defineEmits<{state: [value: SshConnectionState | null]}>();
 const state = ref<SshConnectionState | null>(null);
-const failure = ref("");
 let epoch = 0, sequence = 0;
 let latestRequestId = "";
 
@@ -32,7 +32,6 @@ function clearContext() {
   epoch++;
   sequence++;
   state.value = null;
-  failure.value = "";
   emit("state", null);
 }
 watch([() => props.server.serverId, () => props.server.recordVersion, () => props.preview], async () => {
@@ -46,7 +45,7 @@ watch([() => props.server.serverId, () => props.server.recordVersion, () => prop
       emit("state", result);
     }
   } catch (cause) {
-    if (current(captured)) failure.value = describeError(cause).message;
+    if (current(captured)) notifyError("读取 SSH 状态失败", describeError(cause));
   }
 }, {immediate: true});
 onBeforeUnmount(clearContext);
@@ -55,7 +54,6 @@ onBeforeUnmount(clearContext);
 <template>
   <section class="connection-section ssh-panel">
     <div class="section-heading"><div><h2>SSH 主机指纹</h2></div></div>
-    <p v-if="failure" class="error-strip" role="alert">{{ failure }}</p>
     <div class="ssh-step">
       <Fingerprint :size="18"/>
       <div>

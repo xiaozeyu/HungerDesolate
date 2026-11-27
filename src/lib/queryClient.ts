@@ -14,8 +14,13 @@ interface CacheEntry {
   updatedAt: number;
 }
 
+interface QueryRequest {
+  epoch: number;
+  promise: Promise<unknown>;
+}
+
 const cache = new Map<string, CacheEntry>();
-const inFlight = new Map<string, Promise<unknown>>();
+const inFlight = new Map<string, QueryRequest>();
 
 export const queryClient = {
   get(key: string): CacheEntry | undefined {
@@ -28,67 +33,62 @@ export const queryClient = {
     for (const key of cache.keys()) {
       if (key.startsWith(prefix)) cache.delete(key);
     }
+    for (const key of inFlight.keys()) {
+      if (key.startsWith(prefix)) inFlight.delete(key);
+    }
   },
   clear(): void {
     cache.clear();
   },
 };
 
-export function useQuery<T>(key: Ref<string | null>, fetcher: (key: string) => Promise<T>) {
+export function useQuery<T>(key: Ref<string | null>, fetcher: (key: string) => Promise<T>,
+  { epoch = () => 0, paused = () => false }: { epoch?: () => number; paused?: () => boolean } = {}) {
   const state = shallowRef<QueryState<T>>({ data: null, error: null, loading: false, stale: false, updatedAt: null });
   let sequence = 0;
   let disposed = false;
-
-  function reset() {
-    state.value = { data: null, error: null, loading: false, stale: false, updatedAt: null };
-  }
-
-  function hydrate(queryKey: string) {
-    const entry = cache.get(queryKey);
-    state.value = entry
-      ? { data: entry.data as T, error: null, loading: false, stale: false, updatedAt: entry.updatedAt }
-      : { data: null, error: null, loading: false, stale: false, updatedAt: null };
-    return entry;
-  }
+  let stateKey: string | null = null;
 
   async function run(force = false) {
+    if (disposed) return;
     const queryKey = key.value;
-    if (!queryKey) return;
+    const generation = epoch();
+    const waiting = paused();
     const token = ++sequence;
-    const cached = cache.get(queryKey);
+    const cached = queryKey ? cache.get(queryKey) : undefined;
+    const previous = queryKey && stateKey === queryKey ? state.value : null;
+    stateKey = queryKey;
+    const snapshot = (cached?.data as T | undefined) ?? previous?.data ?? null;
     state.value = {
-      data: cached?.data as T ?? null,
+      data: snapshot,
       error: null,
-      loading: true,
-      stale: false,
-      updatedAt: cached?.updatedAt ?? null,
+      loading: !!queryKey && !waiting,
+      stale: previous?.stale ?? false,
+      updatedAt: cached?.updatedAt ?? previous?.updatedAt ?? null,
     };
-    let promise = inFlight.get(queryKey);
-    if (!promise || force) {
-      promise = fetcher(queryKey);
-      inFlight.set(queryKey, promise);
-    }
+    if (!queryKey || waiting) return;
+    const current = () => !disposed && token === sequence && key.value === queryKey && epoch() === generation && !paused();
+    let entry: QueryRequest | undefined;
     try {
-      const data = (await promise) as T;
-      if (disposed || token !== sequence || key.value !== queryKey) return;
+      const shared = inFlight.get(queryKey);
+      entry = !force && shared?.epoch === generation ? shared : { epoch: generation, promise: fetcher(queryKey) };
+      inFlight.set(queryKey, entry);
+      const data = (await entry.promise) as T;
+      if (!current()) return;
       queryClient.set(queryKey, data);
       state.value = { data, error: null, loading: false, stale: false, updatedAt: Date.now() };
     } catch (cause) {
-      if (disposed || token !== sequence || key.value !== queryKey) return;
-      state.value = { ...state.value, error: describeError(cause), loading: false, stale: !!cached };
+      if (!current()) return;
+      state.value = { ...state.value, error: describeError(cause), loading: false, stale: snapshot !== null };
     } finally {
-      if (inFlight.get(queryKey) === promise) inFlight.delete(queryKey);
+      // Only remove the request we used, never a newer in-flight request.
+      if (entry && inFlight.get(queryKey) === entry) inFlight.delete(queryKey);
     }
   }
 
-  watch(key, queryKey => {
-    if (!queryKey) {
-      sequence++;
-      reset();
-      return;
-    }
-    hydrate(queryKey);
-    void run(false);
+  watch([key, epoch, paused], ([, , waiting], previous) => {
+    // A new snapshot is needed when a switch finishes, even if a pre-switch read is still in flight.
+    void run(!waiting && previous?.[2] === true);
   }, { immediate: true });
 
   onBeforeUnmount(() => {

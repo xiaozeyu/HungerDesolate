@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { Plus, RefreshCw, ArrowRight, ServerCog, Trash2, AlertTriangle } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 import { NButton, NDataTable, NInput, type DataTableColumns } from "naive-ui";
@@ -9,22 +9,23 @@ import PageHeader from "../components/PageHeader.vue";
 import StatusLabel from "../components/StatusLabel.vue";
 import PreviewNotice from "../components/PreviewNotice.vue";
 import IconButton from "../components/IconButton.vue";
-import { notifySuccess } from "../naive/notify";
+import ErrorNotice from "../components/ErrorNotice.vue";
+import { notifyError, notifySuccess } from "../naive/notify";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useOperations } from "../composables/useOperations";
 import { useInstanceList } from "../composables/useInstanceList";
 import { instanceState, canInspectInstance, gameModeLabel, formatBeijingDateTime } from "../lib/instanceList";
 import { deleteInstance, previewInstanceDelete, type InstanceDeletePreview } from "../api/instances";
 import { describeError } from "../lib/commandError";
-import type { UserError } from "../lib/commandError";
 import type { InstanceSummary } from "../types/contracts";
 const route=useRoute(), router=useRouter(), workspace=useWorkspace(), operations=useOperations();
 const server=computed(()=>workspace.servers.value.find(item=>item.serverId===route.params.serverId) ?? null);
 const {data,error,loading,stale,refresh}=useInstanceList(server,workspace.preview);
 const createOpen=ref(false);
-const deleteTarget=ref<InstanceSummary|null>(null), deletePlan=ref<InstanceDeletePreview|null>(null), deleteName=ref(""), deleteOperationId=ref(""), deleteBusy=ref(false), deletePreviewBusy=ref(false), deleteError=ref("");
-const deleteDiagnostics=ref<UserError|null>(null);
-watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.recordVersion,()=>data.value?.registryRevision,()=>workspace.preview.value],()=>{createOpen.value=false;deleteTarget.value=null;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deleteBusy.value=false;deletePreviewBusy.value=false;deleteError.value="";deleteDiagnostics.value=null;});
+const deleteTarget=shallowRef<InstanceSummary|null>(null), deletePlan=ref<InstanceDeletePreview|null>(null), deleteName=ref(""), deleteOperationId=ref(""), deleteBusy=ref(false), deletePreviewBusy=ref(false);
+let deleteSequence = 0;
+onBeforeUnmount(() => { deleteSequence++; });
+watch([()=>server.value?.serverId,()=>server.value?.hostId,()=>server.value?.recordVersion,()=>data.value?.registryRevision,()=>workspace.preview.value],()=>{deleteSequence++;createOpen.value=false;deleteTarget.value=null;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deleteBusy.value=false;deletePreviewBusy.value=false;}, { flush: "sync" });
 const instances=computed(()=>data.value?.instances ?? []);
 const rowKey = (item: InstanceSummary) => item.instanceId;
 function playersLabel(item: InstanceSummary) {
@@ -47,29 +48,36 @@ function canDeleteInstance(instance:InstanceSummary){return !workspace.preview.v
 async function openDelete(instance:InstanceSummary){
   const target=server.value,snapshot=data.value;
   if(!canDeleteInstance(instance)||!target?.hostId||!snapshot)return;
-  deleteTarget.value=instance;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deleteError.value="";deleteDiagnostics.value=null;deletePreviewBusy.value=true;
+  deleteTarget.value=instance;deletePlan.value=null;deleteName.value="";deleteOperationId.value="";deletePreviewBusy.value=true;
+  const sequence = ++deleteSequence;
+  const current = () => sequence === deleteSequence && deleteTarget.value === instance && server.value?.serverId === target.serverId
+    && server.value.hostId === target.hostId && server.value.recordVersion === target.recordVersion
+    && data.value?.registryRevision === snapshot.registryRevision;
   try{
     const requestId=crypto.randomUUID();
     const response=await previewInstanceDelete({schemaVersion:1,requestId,
       target:{serverId:target.serverId,hostId:instance.hostId,instanceId:instance.instanceId},
       expectedRecordVersion:target.recordVersion,expectedRegistryRevision:snapshot.registryRevision});
-    if(deleteTarget.value?.instanceId!==instance.instanceId||server.value?.serverId!==target.serverId
-      ||server.value.recordVersion!==target.recordVersion||data.value?.registryRevision!==snapshot.registryRevision)return;
+    if (!current()) return;
     if(response.requestId!==requestId||response.recordVersion!==target.recordVersion
       ||response.target.serverId!==target.serverId||response.target.hostId!==instance.hostId
       ||response.target.instanceId!==instance.instanceId||response.registryRevision!==snapshot.registryRevision)
       throw new Error("删除预览目标或注册版本不匹配");
     deletePlan.value=response;
-  }catch(cause){if(deleteTarget.value?.instanceId===instance.instanceId){deleteDiagnostics.value=describeError(cause);deleteError.value=deleteDiagnostics.value.message;}}
-  finally{deletePreviewBusy.value=false;}
+  } catch (cause) {
+    if (current()) showDeleteError("读取删除预览失败", describeError(cause));
+  } finally {
+    if (current()) deletePreviewBusy.value = false;
+  }
 }
 async function deleteSelectedInstance(){
   const instance=deleteTarget.value,target=server.value,snapshot=data.value,plan=deletePlan.value;
   if(!instance||!target?.hostId||!snapshot||!plan||!plan.allowed||deleteBusy.value||deleteName.value!==instance.displayName)return;
   if(!deleteOperationId.value)deleteOperationId.value=crypto.randomUUID();
+  const sequence = ++deleteSequence;
   const operationId=deleteOperationId.value;
   const instanceTarget={serverId:target.serverId,hostId:instance.hostId,instanceId:instance.instanceId};
-  deleteBusy.value=true;deleteError.value="";
+  deleteBusy.value=true;
   const outcome=await operations.run({
     kind:"instanceDelete",target:instanceTarget,title:`删除专服 ${instance.displayName}`,stage:"删除专服",
     work:async setStage=>{
@@ -86,10 +94,20 @@ async function deleteSelectedInstance(){
       return response;
     },
   });
-  deleteBusy.value=false;
-  if(server.value?.serverId!==target.serverId||server.value.recordVersion!==target.recordVersion)return;
-  if(outcome.error){deleteDiagnostics.value=outcome.error;deleteError.value=outcome.error.message;return;}
+  if (sequence !== deleteSequence || deleteTarget.value !== instance || deleteOperationId.value !== operationId
+      || server.value?.serverId !== target.serverId || server.value?.hostId !== target.hostId
+      || server.value.recordVersion !== target.recordVersion) return;
+  deleteBusy.value = false;
+  if (outcome.error) { showDeleteError("删除专服失败", outcome.error); return; }
   deleteTarget.value=null;deletePlan.value=null;deleteName.value="";await refresh();
+}
+function showDeleteError(title: string, failure: ReturnType<typeof describeError>) {
+  const { remoteCode, pythonException, pythonLine, errno } = failure.details ?? {};
+  const diagnostic = [typeof remoteCode === "string" && `错误码 ${remoteCode}`,
+    typeof pythonException === "string" && `异常 ${pythonException}`,
+    typeof pythonLine === "number" && `脚本行 ${pythonLine}`,
+    typeof errno === "number" && `errno ${errno}`].filter(Boolean).join(" · ");
+  notifyError(title, { ...failure, recoverySteps: [...(diagnostic ? [diagnostic] : []), ...failure.recoverySteps] });
 }
 function deleteBlockerLabel(code:string){const labels:Record<string,string>={ACTIVE_TASK:"实例仍有未结束任务",TASK_STATUS_MISSING:"任务状态缺失，结果待核实",CONTAINER_RUNNING:"容器尚未全部停止",TASK_STATUS_UNKNOWN:"无法核对任务状态",RESOURCE_IDENTITY_INVALID:"Docker 资源归属不匹配",DATA_UNSAFE:"实例目录权限或文件类型不安全",DATA_CONFLICT:"归档目标已存在"};return labels[code]??"删除条件未满足";}
 function openDeletePreviewForPilot() {
@@ -105,8 +123,6 @@ function openDeletePreviewForPilot() {
     blockers: ["CONTAINER_RUNNING"], allowed: true, planId: "pilot-plan",
   };
   deleteName.value = "";
-  deleteDiagnostics.value = null;
-  deleteError.value = "";
   deletePreviewBusy.value = false;
 }
 const columns = computed<DataTableColumns<InstanceSummary>>(() => {
@@ -168,7 +184,7 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
     </PageHeader>
     <PreviewNotice/>
     <InstanceCreateDialog v-model:open="createOpen" :server="server" :registry-revision="data?.registryRevision ?? 0" @creation-succeeded="creationSucceeded"/>
-    <div v-if="error" class="environment-error" role="alert"><strong>{{error.message}}</strong><ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{step}}</li></ul></div>
+    <ErrorNotice :key="server?.serverId" title="读取专服列表失败" :error="error" :pending="loading"/>
     <template v-if="loading || data">
       <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
       <div class="table-wrap"><NDataTable :columns="columns" :data="instances" :bordered="false" :single-line="true" size="medium" :row-key="rowKey" :loading="loading">
@@ -188,20 +204,6 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
           </div>
           <label v-if="deletePlan.allowed">输入专服名称确认(该专服的备份也会一并删除)<NInput v-model:value="deleteName" placeholder="" :input-props="{ autocomplete: 'off' }" :disabled="deleteBusy"/></label>
         </template>
-        <div v-if="deleteError" class="delete-error" role="alert">
-          <div class="delete-error-head"><AlertTriangle :size="16"/><strong>删除未完成</strong></div>
-          <p class="delete-error-message">{{deleteError}}</p>
-          <div v-if="deleteDiagnostics?.details?.remoteCode || deleteDiagnostics?.details?.pythonException || deleteDiagnostics?.details?.pythonLine || deleteDiagnostics?.details?.errno" class="delete-error-meta">
-            <span v-if="deleteDiagnostics?.details?.remoteCode">错误码 <code>{{deleteDiagnostics.details.remoteCode}}</code></span>
-            <span v-if="deleteDiagnostics?.details?.pythonException">异常 <code>{{deleteDiagnostics.details.pythonException}}</code></span>
-            <span v-if="deleteDiagnostics?.details?.pythonLine">脚本行 <code>{{deleteDiagnostics.details.pythonLine}}</code></span>
-            <span v-if="deleteDiagnostics?.details?.errno">errno <code>{{deleteDiagnostics.details.errno}}</code></span>
-          </div>
-          <div v-if="deleteDiagnostics?.recoverySteps.length" class="delete-error-steps">
-            <span>处理建议</span>
-            <ol><li v-for="step in deleteDiagnostics.recoverySteps" :key="step">{{step}}</li></ol>
-          </div>
-        </div>
       </div>
       <template #footer><div class="dialog-footer-actions"><NButton :disabled="deleteBusy" @click="deleteTarget=null;deletePlan=null">取消</NButton><NButton v-if="deletePlan?.allowed" type="error" ghost :disabled="deleteBusy || deleteName!==deleteTarget?.displayName" @click="deleteSelectedInstance">{{deleteBusy?'正在删除…':'确认永久删除'}}</NButton></div></template>
     </AppDialog>
@@ -210,14 +212,9 @@ const columns = computed<DataTableColumns<InstanceSummary>>(() => {
 
 
 <style scoped>
-.delete-blockers, .delete-error { border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border)); background: color-mix(in srgb, var(--danger) 4%, var(--surface)); padding: 14px 16px; }
-.delete-error { display: grid; gap: 10px; }
+.delete-blockers { border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border)); background: color-mix(in srgb, var(--danger) 4%, var(--surface)); padding: 14px 16px; }
 .delete-error-head { display: flex; align-items: center; gap: 8px; color: var(--danger); font-size: 12px; }
 .delete-error-head svg { flex: 0 0 auto; }
-.delete-blockers ul, .delete-error-steps ol { margin: 8px 0 0; padding-left: 20px; color: var(--text-secondary); font-size: 12px; }
-.delete-blockers li + li, .delete-error-steps li + li { margin-top: 5px; }
-.delete-error-message { margin: 0; color: var(--text); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
-.delete-error-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text-tertiary); font-size: 10px; }
-.delete-error-meta code { margin-left: 4px; color: var(--text-secondary); font-size: 10px; }
-.delete-error-steps > span { color: var(--text-tertiary); font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+.delete-blockers ul { margin: 8px 0 0; padding-left: 20px; color: var(--text-secondary); font-size: 12px; }
+.delete-blockers li + li { margin-top: 5px; }
 </style>

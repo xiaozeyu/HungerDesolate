@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onUnmounted, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, ref, watch } from "vue";
 import { AlertCircle, CheckCircle, Hammer, Package, RefreshCw, Trash2 } from "@lucide/vue";
 import { useRoute } from "vue-router";
 import { NAlert, NButton, NDataTable, NInput, NLog, NProgress, NSpin, type DataTableColumns } from "naive-ui";
@@ -10,7 +10,8 @@ import StatusLabel from "../components/StatusLabel.vue";
 import IconButton from "../components/IconButton.vue";
 import AppDialog from "../components/AppDialog.vue";
 import FingerprintTrustDialog from "../components/FingerprintTrustDialog.vue";
-import { notification, notifySuccess } from "../naive/notify";
+import ErrorNotice from "../components/ErrorNotice.vue";
+import { notification, notifyError, notifySuccess } from "../naive/notify";
 import { useWorkspace } from "../composables/useWorkspace";
 import { useReleaseList } from "../composables/useReleaseList";
 import { useBuildTasks } from "../composables/useBuildTasks";
@@ -27,7 +28,7 @@ import {
   type InstanceReleaseSummary,
   type InstanceReleaseDeletePreview,
 } from "../api/instances";
-import { describeError } from "../lib/commandError";
+import { describeError, type UserError } from "../lib/commandError";
 import { sessionStartedAt } from "../lib/session";
 import { cleanupBuildCache, previewBuildCache, type BuildCachePreview } from "../api/buildCache";
 import { checkDstUpdates, getDstUpdateStatus, type HostDstUpdateStatus } from "../api/updates";
@@ -44,7 +45,6 @@ const buildTasks = useBuildTasks();
 const hostConnection = useHostConnection();
 const hostEnvironment = useHostEnvironment(server, workspace.preview, (hostId, recordVersion) => workspace.bindHost(server.value?.serverId ?? "", recordVersion, hostId));
 const buildStarting = ref(false);
-const buildStartError = ref("");
 const buildEntry = computed(() => buildTasks.forHost(server.value?.hostId));
 const building = computed(() => buildStarting.value || buildEntry.value?.status.status === "building");
 const buildStatus = computed<BuildStatusResponse | null>(() => buildEntry.value?.status ?? null);
@@ -55,7 +55,7 @@ const buildObservationError = computed(() => buildEntry.value?.observationError 
 const buildError = computed(() => buildEntry.value?.status.status === "failed"
   ? buildEntry.value.status.logTail.at(-1) ?? "构建失败，请查看主机构建日志"
   : buildEntry.value?.status.status === "notFound" ? "构建任务不存在，请重新构建"
-  : buildStartError.value);
+  : "");
 const buildTone = computed<"running" | "danger" | "success" | "muted">(() => building.value ? "running"
   : buildError.value ? "danger" : buildMessage.value ? "success" : "muted");
 const dismissedBuildKey = ref<string | null>(null);
@@ -81,21 +81,20 @@ const dockerNotice = computed(() => {
 });
 const pendingReleaseId = ref("");
 const pendingStage = ref<"base" | "delete" | "" >("");
-const actionError = ref<{ releaseId: string; message: string } | null>(null);
 const deletePreview = ref<InstanceReleaseDeletePreview|null>(null);
 const deleteTypedName = ref("");
 const deleteBusy = ref(false);
-const deleteError = ref("");
 const cachePreview = ref<BuildCachePreview | null>(null);
 const updateStatus = ref<HostDstUpdateStatus | null>(null);
 const updateCheckBusy = ref(false);
 let updatePollTimer: number | undefined;
 let updatePollStartedAt = 0;
 let updateDisposed = false;
+let contextEpoch = 0, updateStatusSequence = 0;
 const reclaimableReleases = computed(() => releases.value.filter(release => release.reclaimable));
 const cleanupOpen = ref(false);
 const cleanupBusy = ref(false);
-const cleanupError = ref("");
+const cleanupError = ref<UserError | null>(null);
 let actionSequence = 0;
 
 function targetSnapshot() {
@@ -106,7 +105,7 @@ function targetSnapshot() {
 
 function isCurrent(target: { serverId: string; hostId: string; recordVersion: number }, sequence?: number) {
   const value = server.value;
-  return !!value && value.serverId === target.serverId && value.hostId === target.hostId
+  return !updateDisposed && !!value && value.serverId === target.serverId && value.hostId === target.hostId
     && value.recordVersion === target.recordVersion && (sequence === undefined || actionSequence === sequence);
 }
 
@@ -116,7 +115,7 @@ function notifyUpdateResult(status: HostDstUpdateStatus | null) {
   if (!updateNotifyPending.value) return;
   updateNotifyPending.value = false;
   if (!status) {
-    notification.error({ title: "DST 更新检查失败", content: "未能读取检查结果", duration: 0, closable: true });
+    notifyError("DST 更新检查失败", "未能读取检查结果", 0);
     return;
   }
   if (status.lastCheckError) {
@@ -127,12 +126,7 @@ function notifyUpdateResult(status: HostDstUpdateStatus | null) {
       .slice(-3)
       .map(line => line.slice(0, 160))
       .join(" · ");
-    notification.error({
-      title: "DST 更新检查失败",
-      content: detail ? `${status.lastCheckError.message} · ${detail}` : status.lastCheckError.message,
-      duration: 0,
-      closable: true,
-    });
+    notifyError("DST 更新检查失败", detail ? `${status.lastCheckError.message} · ${detail}` : status.lastCheckError.message, 0);
     return;
   }
   if (status.latest) {
@@ -147,10 +141,10 @@ function notifyUpdateResult(status: HostDstUpdateStatus | null) {
   notification.info({ title: "DST 更新检查完成", content: "未发现可用 Release", duration: 5000, closable: true });
 }
 
-function notifyUpdateError(message: string) {
+function notifyUpdateError(message: string | UserError) {
   if (!updateNotifyPending.value) return;
   updateNotifyPending.value = false;
-  notification.error({ title: "DST 更新检查失败", content: message, duration: 0, closable: true });
+  notifyError("DST 更新检查失败", message, 0);
 }
 
 const buildAlert = computed(() => {
@@ -158,16 +152,15 @@ const buildAlert = computed(() => {
     return {
       type: "info" as const,
       title: buildStatus.value?.progress?.currentStep || "正在构建 DST 镜像…",
-      content: buildObservationError.value || "",
     };
   }
   if (buildError.value) {
-    return { type: "error" as const, title: "构建失败", content: buildError.value };
+    return { type: "error" as const, title: "构建失败" };
   }
   if (buildMessage.value) {
-    return { type: "success" as const, title: buildMessage.value, content: "" };
+    return { type: "success" as const, title: buildMessage.value };
   }
-  return { type: "default" as const, title: "镜像构建", content: "" };
+  return { type: "default" as const, title: "镜像构建" };
 });
 
 function stopUpdatePoll() {
@@ -202,17 +195,18 @@ function scheduleUpdatePoll() {
 }
 
 async function loadUpdateStatus() {
-  if (updateDisposed) return;
-  const value = server.value;
-  if (!value?.hostId) return;
-  const expectedRecordVersion = value.recordVersion;
+  const target = targetSnapshot();
+  if (!target || updateDisposed || workspace.preview.value) return;
+  const epoch = contextEpoch, sequence = ++updateStatusSequence;
+  const current = () => isCurrent(target) && contextEpoch === epoch && sequence === updateStatusSequence;
   const requestId = crypto.randomUUID();
   try {
-    const status = await getDstUpdateStatus({ schemaVersion: 1, requestId, serverId: value.serverId,
-      hostId: value.hostId, expectedRecordVersion });
-    if (updateDisposed || server.value?.serverId !== value.serverId || server.value.hostId !== value.hostId
-      || server.value.recordVersion !== expectedRecordVersion || status.requestId !== requestId
-      || status.target.serverId !== value.serverId || status.target.hostId !== value.hostId) return;
+    const status = await getDstUpdateStatus({ schemaVersion: 1, requestId, serverId: target.serverId,
+      hostId: target.hostId, expectedRecordVersion: target.recordVersion });
+    if (!current()) return;
+    if (status.requestId !== requestId || status.target.serverId !== target.serverId || status.target.hostId !== target.hostId) {
+      throw new Error("DST 更新状态响应身份不匹配");
+    }
     updateStatus.value = status;
     if (status.checking || updateCheckBusy.value) scheduleUpdatePoll();
     else {
@@ -220,36 +214,38 @@ async function loadUpdateStatus() {
       notifyUpdateResult(status);
     }
   } catch (cause) {
-    if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
-      notifyUpdateError(describeError(cause).message);
-      if (updateStatus.value?.checking || updateCheckBusy.value) scheduleUpdatePoll();
-      else {
-        updateStatus.value = null;
-        stopUpdatePoll();
-      }
+    if (!current()) return;
+    if (!updateCheckBusy.value) notifyUpdateError(describeError(cause));
+    if (updateStatus.value?.checking || updateCheckBusy.value) scheduleUpdatePoll();
+    else {
+      updateStatus.value = null;
+      stopUpdatePoll();
     }
   }
 }
 
 async function checkUpdates() {
-  const value = server.value;
-  if (!value?.hostId || updateCheckBusy.value) return;
+  const target = targetSnapshot();
+  if (!target || updateCheckBusy.value || workspace.preview.value) return;
   if (updateStatus.value?.checking) {
     updateNotifyPending.value = true;
     scheduleUpdatePoll();
     return;
   }
+  const epoch = contextEpoch;
+  const current = () => isCurrent(target) && contextEpoch === epoch;
   updateCheckBusy.value = true;
   updateNotifyPending.value = true;
   scheduleUpdatePoll();
-  const expectedRecordVersion = value.recordVersion;
   const requestId = crypto.randomUUID();
   try {
-    const status = await checkDstUpdates({ schemaVersion: 1, requestId, serverId: value.serverId,
-      hostId: value.hostId, expectedRecordVersion });
-    if (updateDisposed || server.value?.serverId !== value.serverId || server.value.hostId !== value.hostId
-      || server.value.recordVersion !== expectedRecordVersion || status.requestId !== requestId
-      || status.target.serverId !== value.serverId || status.target.hostId !== value.hostId) return;
+    const status = await checkDstUpdates({ schemaVersion: 1, requestId, serverId: target.serverId,
+      hostId: target.hostId, expectedRecordVersion: target.recordVersion });
+    if (!current()) return;
+    if (status.requestId !== requestId || status.target.serverId !== target.serverId || status.target.hostId !== target.hostId) {
+      throw new Error("DST 更新检查响应身份不匹配");
+    }
+    updateStatusSequence++;
     updateStatus.value = status;
     if (status.checking) scheduleUpdatePoll();
     else {
@@ -257,20 +253,19 @@ async function checkUpdates() {
       notifyUpdateResult(status);
     }
   } catch (cause) {
-    if (!updateDisposed && server.value?.serverId === value.serverId && server.value.hostId === value.hostId) {
-      notifyUpdateError(describeError(cause).message);
-      await loadUpdateStatus();
-    }
+    if (!current()) return;
+    notifyUpdateError(describeError(cause));
+    await loadUpdateStatus();
   } finally {
-    updateCheckBusy.value = false;
+    if (current()) updateCheckBusy.value = false;
   }
 }
 
 async function openDiskCleanup() {
   const target = targetSnapshot();
-  if (!target || cleanupBusy.value) return;
+  if (!target || cleanupBusy.value || pendingReleaseId.value) return;
   cleanupOpen.value = true;
-  cleanupError.value = "";
+  cleanupError.value = null;
   cachePreview.value = null;
   cleanupBusy.value = true;
   const sequence = ++actionSequence;
@@ -281,7 +276,7 @@ async function openDiskCleanup() {
     if (response.serverId !== target.serverId || response.hostId !== target.hostId) throw new Error("构建缓存预览身份不匹配");
     cachePreview.value = response;
   } catch (cause) {
-    if (isCurrent(target, sequence)) cleanupError.value = describeError(cause).message;
+    if (isCurrent(target, sequence)) cleanupError.value = describeError(cause);
   } finally {
     if (isCurrent(target, sequence)) cleanupBusy.value = false;
   }
@@ -289,19 +284,24 @@ async function openDiskCleanup() {
 
 async function confirmDiskCleanup() {
   const target = targetSnapshot();
-  if (!target || cleanupBusy.value) return;
+  if (!target || cleanupBusy.value || pendingReleaseId.value) return;
+  const sequence = ++actionSequence;
+  const current = () => isCurrent(target, sequence);
+  const candidates = reclaimableReleases.value;
+  const cache = cachePreview.value;
   cleanupBusy.value = true;
-  cleanupError.value = "";
+  cleanupError.value = null;
   let deleted = 0;
   let skipped = 0;
   let cacheCleaned = false;
   try {
-    for (const release of reclaimableReleases.value) {
+    for (const release of candidates) {
       try {
         const preview = await previewInstanceReleaseDelete({
           schemaVersion: 1, requestId: crypto.randomUUID(), target: { serverId: target.serverId, hostId: target.hostId },
           expectedRecordVersion: target.recordVersion, releaseId: release.releaseId,
         });
+        if (!current()) return;
         if (!preview.allowed) {
           skipped++;
           continue;
@@ -311,14 +311,16 @@ async function confirmDiskCleanup() {
           expectedRecordVersion: target.recordVersion, releaseId: release.releaseId,
           catalogDigest: preview.catalogDigest, typedName: release.dstBuild,
         });
+        if (!current()) return;
         deleted++;
       } catch (cause) {
-        cleanupError.value = describeError(cause).message;
+        if (!current()) return;
+        cleanupError.value = describeError(cause);
         break;
       }
     }
-    if (!cleanupError.value && cachePreview.value?.allowed) {
-      const before = cachePreview.value.dockerCache.size;
+    if (!cleanupError.value && cache?.allowed) {
+      const before = cache.dockerCache.size;
       const outcome = await operations.run({
         kind: "buildCacheCleanup",
         target: { serverId: target.serverId, hostId: target.hostId },
@@ -335,7 +337,8 @@ async function confirmDiskCleanup() {
           ? `Docker 缓存 ${before} → ${response.dockerCache.size ?? "不可用"}`
           : `Docker 缓存 ${response.dockerCache.size ?? "已清理"}`,
       });
-      if (outcome.error) cleanupError.value = outcome.error.message;
+      if (!current()) return;
+      if (outcome.error) cleanupError.value = outcome.error;
       else cacheCleaned = true;
     }
     if (!cleanupError.value) {
@@ -344,7 +347,7 @@ async function confirmDiskCleanup() {
     }
     await refresh();
   } finally {
-    cleanupBusy.value = false;
+    if (current()) cleanupBusy.value = false;
   }
 }
 
@@ -365,17 +368,15 @@ function closeDeleteDialog(open: boolean) {
   if (!open && !deleteBusy.value) {
     deletePreview.value = null;
     deleteTypedName.value = "";
-    deleteError.value = "";
   }
 }
 
 async function previewDeleteRelease(release: InstanceReleaseSummary) {
   const target = targetSnapshot();
+  if (!target || pendingReleaseId.value || building.value || cleanupBusy.value) return;
   const sequence = ++actionSequence;
-  if (!target || pendingReleaseId.value || building.value) return;
   pendingReleaseId.value = release.releaseId;
   pendingStage.value = "delete";
-  deleteError.value = "";
   try {
     const result = await previewInstanceReleaseDelete({
       schemaVersion: 1, requestId: crypto.randomUUID(),
@@ -386,10 +387,7 @@ async function previewDeleteRelease(release: InstanceReleaseSummary) {
     deletePreview.value = result;
     deleteTypedName.value = "";
   } catch (cause) {
-    if (isCurrent(target, sequence)) {
-      deleteError.value = describeError(cause).message;
-      actionError.value = { releaseId: release.releaseId, message: deleteError.value };
-    }
+    if (isCurrent(target, sequence)) notifyError("读取 Release 删除预览失败", describeError(cause));
   } finally {
     if (isCurrent(target, sequence)) {
       pendingReleaseId.value = "";
@@ -402,12 +400,11 @@ async function confirmDeleteRelease() {
   const preview = deletePreview.value;
   const target = targetSnapshot();
   if (!preview || !target || deleteBusy.value || !preview.allowed
-      || deleteTypedName.value !== preview.dstBuild || pendingReleaseId.value) return;
+      || deleteTypedName.value !== preview.dstBuild || pendingReleaseId.value || cleanupBusy.value) return;
   const sequence = ++actionSequence;
   deleteBusy.value = true;
   pendingReleaseId.value = preview.releaseId;
   pendingStage.value = "delete";
-  deleteError.value = "";
   try {
     const result = await deleteInstanceRelease({
       schemaVersion: 1, requestId: crypto.randomUUID(),
@@ -423,10 +420,7 @@ async function confirmDeleteRelease() {
         : result.imageRemoved ? "Release 与镜像已删除" : "镜像本已不存在");
     await refresh();
   } catch (cause) {
-    if (isCurrent(target, sequence)) {
-      deleteError.value = describeError(cause).message;
-      actionError.value = { releaseId: preview.releaseId, message: deleteError.value };
-    }
+    if (isCurrent(target, sequence)) notifyError("删除 Release 失败", describeError(cause));
   } finally {
     if (isCurrent(target, sequence)) {
       deleteBusy.value = false;
@@ -438,11 +432,10 @@ async function confirmDeleteRelease() {
 
 async function verifyBase(release: InstanceReleaseSummary) {
   const target = targetSnapshot();
+  if (!target || pendingReleaseId.value || cleanupBusy.value) return;
   const sequence = ++actionSequence;
-  if (!target || pendingReleaseId.value) return;
   pendingReleaseId.value = release.releaseId;
   pendingStage.value = "base";
-  actionError.value = null;
   try {
     await verifyInstanceReleaseBase({
       schemaVersion: 1,
@@ -455,7 +448,7 @@ async function verifyBase(release: InstanceReleaseSummary) {
     notifySuccess("镜像验证通过", release.dstBuild);
     await refresh();
   } catch (cause) {
-    if (isCurrent(target, sequence)) actionError.value = { releaseId: release.releaseId, message: describeError(cause).message };
+    if (isCurrent(target, sequence)) notifyError("验证镜像失败", describeError(cause));
   } finally {
     if (isCurrent(target, sequence)) {
       pendingReleaseId.value = "";
@@ -465,21 +458,25 @@ async function verifyBase(release: InstanceReleaseSummary) {
 }
 
 async function requestBuild(target: {serverId: string; hostId: string; recordVersion: number}) {
+  const epoch = contextEpoch;
+  const current = () => isCurrent(target) && contextEpoch === epoch;
+  const requestId = crypto.randomUUID();
   buildStarting.value = true;
-  buildStartError.value = "";
   try {
     const response = await buildDstImage({
       schemaVersion: 1,
-      requestId: crypto.randomUUID(),
+      requestId,
       target: { serverId: target.serverId, hostId: target.hostId },
       expectedRecordVersion: target.recordVersion,
     });
+    if (response.requestId !== requestId || response.serverId !== target.serverId || response.recordVersion !== target.recordVersion) {
+      throw new Error("镜像构建回执身份或版本不匹配");
+    }
     buildTasks.start(target.serverId, target.hostId, target.recordVersion, response.releaseId, response.message);
-    if (!isCurrent(target)) return;
   } catch (cause) {
-    if (isCurrent(target)) buildStartError.value = describeError(cause).message;
+    if (current()) notifyError("启动镜像构建失败", describeError(cause));
   } finally {
-    buildStarting.value = false;
+    if (current()) buildStarting.value = false;
   }
 }
 async function startBuild() {
@@ -491,9 +488,9 @@ async function startBuild() {
     return;
   }
   await hostConnection.connect(value, async (_result, connected) => {
-    if (server.value?.serverId !== value.serverId) return;
+    if (updateDisposed || server.value?.serverId !== value.serverId || workspace.preview.value) return;
     if (!connected.hostId) {
-      buildStartError.value = "主机尚未初始化，请先在主机环境完成初始化";
+      notifyError("主机尚未初始化", "请先在主机环境完成初始化");
       return;
     }
     await requestBuild({ serverId: connected.serverId, hostId: connected.hostId, recordVersion: connected.recordVersion });
@@ -507,28 +504,27 @@ watch(() => buildEntry.value?.status.status, (next, previous) => {
   }
 }, { flush: "sync" });
 
-watch(() => [server.value?.serverId, server.value?.hostId, server.value?.recordVersion], () => {
+watch([() => server.value?.serverId, () => server.value?.hostId, () => server.value?.recordVersion, workspace.preview], () => {
+  contextEpoch++;
   stopUpdatePoll();
   actionSequence++;
   pendingReleaseId.value = "";
   pendingStage.value = "";
-  actionError.value = null;
   deletePreview.value = null;
   deleteTypedName.value = "";
   deleteBusy.value = false;
-  deleteError.value = "";
   cachePreview.value = null;
   cleanupOpen.value = false;
   cleanupBusy.value = false;
-  cleanupError.value = "";
+  cleanupError.value = null;
   updateStatus.value = null;
   updateCheckBusy.value = false;
-  void loadUpdateStatus();
+  updateNotifyPending.value = false;
   buildStarting.value = false;
-  buildStartError.value = "";
-});
+  void loadUpdateStatus();
+}, { immediate: true, flush: "sync" });
 
-onUnmounted(() => {
+onBeforeUnmount(() => {
   updateDisposed = true;
   stopUpdatePoll();
   actionSequence++;
@@ -537,7 +533,6 @@ onUnmounted(() => {
 const releaseColumns = computed<DataTableColumns<InstanceReleaseSummary>>(() => {
   void pendingReleaseId.value;
   void pendingStage.value;
-  void actionError.value;
   void building.value;
   void stale.value;
   return [
@@ -583,16 +578,13 @@ const releaseColumns = computed<DataTableColumns<InstanceReleaseSummary>>(() => 
       } else if (!release.verified) {
         actions.push(h(IconButton, {
           label: "验证镜像",
-          disabled: !!pendingReleaseId.value || building.value,
+          disabled: !!pendingReleaseId.value || building.value || cleanupBusy.value,
           onClick: () => void verifyBase(release),
         }, () => h(CheckCircle, { size: 15 })));
       }
-      if (actionError.value?.releaseId === release.releaseId) {
-        actions.push(h("small", { class: "release-action-error", role: "alert" }, actionError.value.message));
-      }
       actions.push(h(IconButton, {
         label: "删除 DST Release",
-        disabled: !!pendingReleaseId.value || building.value || stale.value,
+        disabled: !!pendingReleaseId.value || building.value || cleanupBusy.value || stale.value,
         tone: "danger",
         onClick: () => void previewDeleteRelease(release),
       }, () => h(Trash2, { size: 15 })));
@@ -606,11 +598,12 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
 <template>
   <div class="page release-page">
     <PageHeader :eyebrow="server?.displayName" title="DST Release 管理">
+      <template #status><StatusLabel v-if="dockerNotice" tone="warning" :label="dockerNotice.title"/></template>
       <template #actions>
         <NButton :disabled="loading || !server || updateCheckBusy || updateStatus?.checking || building" @click="checkUpdates">
           <template #icon><RefreshCw :size="16"/></template>{{ updateCheckBusy || updateStatus?.checking ? "检查中…" : "检查 DST 更新" }}
         </NButton>
-        <NButton :disabled="loading || !server || cleanupBusy || building" @click="openDiskCleanup">
+        <NButton :disabled="loading || !server || cleanupBusy || !!pendingReleaseId || building" @click="openDiskCleanup">
           <template #icon><Trash2 :size="16"/></template>{{ cleanupBusy ? "清理中…" : "清理磁盘" }}
         </NButton>
         <NButton :disabled="building || !server || !!dockerNotice || hostConnection.busyServerId.value === server?.serverId" @click="startBuild">
@@ -621,18 +614,10 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
     </PageHeader>
     <PreviewNotice/>
 
-    <div v-if="error" class="environment-error release-feedback" role="alert">
-      <strong>{{ error.message }}</strong>
-      <ul v-if="error.recoverySteps.length"><li v-for="step in error.recoverySteps" :key="step">{{ step }}</li></ul>
-    </div>
-    <div v-if="hostConnection.error.value && hostConnection.errorServerId.value === server?.serverId" class="environment-error release-feedback" role="alert">
-      <strong>{{ hostConnection.error.value.message }}</strong>
-      <ul v-if="hostConnection.error.value.recoverySteps.length"><li v-for="step in hostConnection.error.value.recoverySteps" :key="step">{{ step }}</li></ul>
-    </div>
-    <div v-if="dockerNotice" class="environment-error release-feedback" role="alert">
-      <strong>{{ dockerNotice.title }}</strong>
-      <ul><li v-for="step in dockerNotice.steps" :key="step">{{ step }}</li></ul>
-    </div>
+    <ErrorNotice :key="server?.serverId" title="读取 DST Release 失败" :error="error" :pending="loading"/>
+    <ErrorNotice :title="dockerNotice?.title" :error="dockerNotice?.steps.join('；')"/>
+    <ErrorNotice :key="buildStatus?.releaseId" title="镜像构建未完成" :error="buildDockVisible && !building ? buildError : null"/>
+    <ErrorNotice title="读取构建进度失败" :error="building ? buildObservationError : null"/>
 
     <template v-if="loading || data">
       <div v-if="stale" class="stale-note"><StatusLabel tone="warning" label="结果已过期"/></div>
@@ -651,7 +636,6 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
         <CheckCircle v-else-if="buildMessage && !buildError" :size="16" class="state-success-icon"/>
         <AlertCircle v-else :size="16" class="state-error-icon"/>
       </template>
-      <span v-if="buildAlert.content">{{ buildAlert.content }}</span>
     </NAlert>
     <div v-if="building && buildPercent != null" class="build-progress">
       <div class="build-progress-head"><span>构建阶段</span><span>{{ buildPercent }}%</span></div>
@@ -666,7 +650,7 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
 
     <AppDialog :open="cleanupOpen" title="清理磁盘"  @update:open="value => { if (!value && !cleanupBusy) cleanupOpen = false; }">
       <div class="form-stack">
-        <p v-if="cleanupError" class="environment-error" role="alert">{{ cleanupError }}</p>
+        <ErrorNotice title="磁盘清理未完成" :error="cleanupError" :pending="cleanupBusy"/>
         <section class="disk-cleanup-section">
           <strong>构建缓存</strong>
           <dl v-if="cachePreview" class="creation-facts">
@@ -716,14 +700,13 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
           </ul>
         </div>
         <label v-else>输入 DST 版本确认<NInput v-model:value="deleteTypedName" placeholder="" :input-props="{ autocomplete: 'off' }" :disabled="deleteBusy"/></label>
-        <div v-if="deleteError" class="environment-error" role="alert">{{ deleteError }}</div>
-      </div>
+        </div>
       <template #footer>
         <NButton :disabled="deleteBusy" @click="closeDeleteDialog(false)">取消</NButton>
         <NButton type="error" ghost :disabled="deleteBusy || !deletePreview?.allowed || deleteTypedName!==deletePreview?.dstBuild" @click="confirmDeleteRelease">{{ deleteBusy ? "正在删除…" : "删除 Release" }}</NButton>
       </template>
     </AppDialog>
-    <FingerprintTrustDialog :open="hostConnection.trustOpen.value" :display-name="hostConnection.challengeServer.value?.displayName ?? ''" :host="hostConnection.challengeServer.value?.host ?? ''" :ssh-port="hostConnection.challengeServer.value?.sshPort ?? 22" :challenge="hostConnection.challenge.value" :busy="hostConnection.busyServerId.value === hostConnection.challengeServer.value?.serverId" :error="hostConnection.trustError.value" @update:open="value => { if (!value) hostConnection.closeTrust() }" @confirm="hostConnection.confirmTrust"/>
+    <FingerprintTrustDialog :open="hostConnection.trustOpen.value" :display-name="hostConnection.challengeServer.value?.displayName ?? ''" :host="hostConnection.challengeServer.value?.host ?? ''" :ssh-port="hostConnection.challengeServer.value?.sshPort ?? 22" :challenge="hostConnection.challenge.value" :busy="hostConnection.busyServerId.value === hostConnection.challengeServer.value?.serverId" @update:open="value => { if (!value) hostConnection.closeTrust() }" @confirm="hostConnection.confirmTrust"/>
   </div>
 </template>
 
@@ -738,7 +721,6 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
 .state-indicator { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
 .state-indicator.busy { background: var(--warning); animation: release-pulse 1.2s ease-in-out infinite; }
 .build-log { margin-top: 8px; }
-.release-feedback { margin-bottom: var(--space-3); }
 .release-retention { color: var(--text-secondary); font-size: 11px; }
 .disk-cleanup-section { display: grid; gap: var(--space-2); }
 .disk-cleanup-section > strong { font-size: 12px; font-weight: 600; }
@@ -759,10 +741,6 @@ const releaseRowKey = (release: InstanceReleaseSummary) => release.releaseId;</s
 .release-created-cell { color: var(--text-secondary); font-size: 11px; }
 .button-compact { min-height: 30px; padding: 0 var(--space-2); font-size: 12px; }
 .release-action-progress { display: inline-flex; align-items: center; gap: var(--space-2); font-size: 12px; }
-.release-action-error, .release-action-success { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
-.release-action-error { color: var(--danger); }
-.release-action-success { color: var(--success); }
-.release-feedback :deep(ul) { margin: var(--space-2) 0 0; }
 @keyframes release-pulse { 50% { opacity: .35; } }
 @media (max-width: 1099px) {
   .release-table-head { display: none; }
